@@ -33,6 +33,7 @@ mkdir -p "$USER_DATA"
   --user-data-dir="$USER_DATA" \
   --remote-debugging-port=9222 \
   --remote-debugging-address=0.0.0.0 \
+  --remote-allow-origins=* \
   --window-size=1800,1400 \
   "https://po-signals.com/en/app/charts" \
   > /tmp/chrome.log 2>&1 &

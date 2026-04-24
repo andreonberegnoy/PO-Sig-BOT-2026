@@ -1,187 +1,225 @@
 # MY PO-SIG BOT
 
-Торговый бот под [po-signals.com](https://po-signals.com/app/charts). Работает через уже залогиненный браузер Chrome (CDP), получает свечи и отправляет сделки через socket.io (без кликов по DOM для трейдов — но клики используются для переключения пар в мульти-чарт окнах). Сигналы считает Python-порт индикатора **CONSENSUS 4/5**, 1:1 с JS-версией на сайте.
+Торговый бот под [po-signals.com](https://po-signals.com/app/charts) с индикатором **CONSENSUS 4/5**. Работает как на локальном Chrome через CDP, так и в headless-Chromium на Railway с persistent volume. Использует санбокс-обход через патчинг `WebSocket.prototype.send`, детектит закрытие сделок по дельте баланса, мартингейл с сигнал-гейтом, автоматическое управление 15-окным мульти-чарт layout.
 
 ## Архитектура
 
 ```
-config.yaml              все параметры (фильтр, мартингейл, Telegram, индикатор)
+config.yaml              все параметры
 main.py                  оркестратор: feed + strategy + trading + journal + telegram
-consensus_indicator_export.js   JS-индикатор CONSENSUS 4/5 для визуала на сайте
+Dockerfile               образ Playwright-python + Chromium
+scripts/start.sh         запуск Chromium headless + бот (для Railway)
+railway.toml             Railway deploy config
+consensus_indicator_export.js   JS-версия CONSENSUS 4/5 для визуала на сайте
 ├── feed/
 │   ├── po_feed.py       CDP hook (WebSocket.prototype.send patch), два WS, парсинг
+│   ├── auth.py          авто-логин через клик «Войти» + заполнение модалки
 │   └── history.py       REST /api/po/candles/{SYMBOL}?period=60&limit=1060
 ├── strategy/
 │   ├── indicators.py    RSI / QQE / EMA/SMA/WMA/RMA / Bollinger / ATR / HTF
 │   ├── consensus.py     порт CONSENSUS 4/5 (generate_signals, analyze, evaluate_trade)
-│   └── filter_1000.py   прогон по 1060 свечам → classify (allowed / banned / priority)
+│   └── filter_1000.py   прогон по 1060 свечам → classify (allowed / banned)
 ├── trading/
-│   ├── ws_client.py     open_trade (синтетический trade_id, ждёт баланс-дельту)
-│   ├── state_machine.py свободный скан + сигнально-затворенный мартингейл
-│   └── window_manager.py автосет 15 мульти-чарт окон + пиннинг MG-пары
+│   ├── ws_client.py     send open_trade + синтетический trade_id
+│   ├── state_machine.py свободный скан + сигнал-гейтнутый мартингейл
+│   └── window_manager.py автосет 15 окон + пиннинг MG-пары
 ├── tools/
 │   ├── click_recorder.py   разовая запись кликов для реверса DOM-селекторов
-│   ├── windows_probe.py    разовый дамп состояния 15 окон
-│   └── autoset_windows.py  standalone-запуск перераспределения окон
+│   ├── windows_probe.py    дамп состояния 15 окон
+│   ├── autoset_windows.py  standalone-запуск перераспределения окон
+│   └── activate_layout.py  разовая активация 15-окного layout через CDP
 ├── journal/
 │   └── db.py            SQLite: trades, bans, state_kv, sessions
 └── tg/
-    ├── bot.py           Telegram: /status /pause /resume /stop /bans /test + отчёт
-    └── chart.py         рендер свечного графика с сигналом для Telegram
+    ├── bot.py           Telegram: /status /pause /resume /stop /test /chart /bans
+    └── chart.py         рендер свечного графика для Telegram
 ```
 
-## Ключевые решения
+## Полная стратегия работы
 
-### 1. Отправка сделок через sandbox-обход WebSocket
-Приложение po-signals.com выполняется в «сандбоксе» — блокирует `window.__*` доступы и работает через изолированный realm. Обычный `window.WebSocket = Patched` хук НЕ срабатывает, т.к. бандлер сохранил оригинальный конструктор в замыкании. Решение: патчим **`WebSocket.prototype.send`** — все экземпляры проходят через один прототип, поэтому первый же `.send()` сайта даёт нам ссылку на сокет. После этого отправляем `user.demo.open_trade` по тому же сокету.
+### 1. Сигналы — CONSENSUS 4/5
 
-Payload — ровно как у сайта при клике «Купить»: `{asset, amount, action, time}`, **без `login`** (добавление ломает ответ сервера).
+На каждом закрытом M1-баре считается 5 независимых систем ([strategy/consensus.py](strategy/consensus.py)):
 
-### 2. Детект закрытия через баланс-дельту
-Ответ `user.demo.open_trade.success` приходит как socket.io binary-event (MessagePack) — бинарный парсер неполный. Вместо парсинга: запоминаем `balance_demo` **ДО отправки фрейма** (после отправки сайт списывает сумму за миллисекунды), после `expiry + 5s` читаем снова. `delta > 0` = WIN, `delta < 0` = LOSS, иначе DRAW. Работает т.к. `one_trade_at_a_time: true`.
+| № | Система | Условие |
+|---|---------|---------|
+| 1 | **RSI-QQE** | RSI(14, smooth=5) пересекает trailing-линию с фактором 4.238. **Обязательно**, иначе нет сигнала. |
+| 2 | **HTF trend** | Close старшего ТФ (M5) vs EMA(20). Направление должно совпадать с сигналом. |
+| 3 | **Volatility (ATR)** | `ATR(14) / ATR_avg(100) ∈ [0.7, 2.0]`. Не мёртвый рынок, не хаос. |
+| 4 | **Bollinger zone** | Цена в нижних 30% канала BB(20, 2σ) для BUY или верхних 30% для SELL. |
+| 5 | **Candle** | Тело не больше 2× ATR + направление свечи согласовано с сигналом. |
 
-### 3. Свежесть данных через живые тики
-Сайт стримит M1-свечи по WS только для пар, видимых на экране. В **15-окном мульти-чарт режиме** стримятся все 15. В state_machine тики mirror-ятся в `_candles[symbol]`, REST остаётся fallback'ом. Для пар в окнах задержка бар-клоуз → сигнал — **<1 сек**.
+**Вход разрешён** если голосов **≥ 4 из 5** (в выходные — **5 из 5**). Плюс cooldown 3 бара между сигналами одного типа. Python-порт **1:1 с JS-индикатором** (см. `consensus_indicator_export.js`).
 
-### 4. Автоматическое переключение пар в 15 окнах
-`trading/window_manager.py` через координатные клики на кнопки prev/next в каждом окне:
-- Каждые **90 сек** (только вне MG-цикла) перебирает окна и заменяет пары с низким payout или дубли на уникальные в диапазоне `[min_payout, 92]%`.
-- Перед открытием сделки `ensure_pair_in_window(current_pair)` гарантирует что пара в одном из окон → live-тики на время цикла.
+### 2. Фильтр пар (раз в 5 мин)
 
-### 5. Мартингейл с сигнал-гейтом
-После LOSS бот **не открывает следующую сделку сразу** — ждёт свежий CONSENSUS 4/5 сигнал на текущей паре. Это защищает от слепого «биться против рынка». Логика:
-1. LOSS → `mg_step++`, пара закреплена.
-2. Ждём новый сигнал на закрытии следующих баров (staleness-гейт 25 сек).
-3. Сигнал пришёл → открываем по мартингейл-формуле (`base × 2.1^step`).
-4. Если сигнал в противоположном направлении — следуем за ним (обновляем `state.direction`).
-5. Если payout пары упал <85% → одна смена пары за цикл (`_pick_switch_pair`).
-6. WIN → сброс. Stop-sum / max_steps → `waiting_resume`.
+[strategy/filter_1000.py](strategy/filter_1000.py):
+1. Из всех активных пар сайта отбираются **currency OTC с payout ≥ 92%**
+2. На каждой пары прогоняется CONSENSUS 4/5 по **последним 1060 свечам**
+3. Подсчитывается max loss streak за окно
+4. **Если >3 минусов подряд** → бан пары на 12 ч
+5. Остальные → в `_tracked` список (у работающего бота обычно 15-25 пар)
 
-## Что работает
+### 3. Свечной поток
 
-- [x] CDP-подключение к Chrome, два WS (user + ticker2)
-- [x] Парсинг socket.io v4 + base64-JSON + MessagePack для входящих событий
-- [x] `common.assets_list` → фильтр payout ≥ `min_payout`, тип currency
-- [x] Тики → живые M1 свечи в буфер state_machine (live для 15 пар, REST для остальных)
-- [x] REST `/api/po/candles/{SYMBOL}` — подгрузка 1060 свечей истории
-- [x] Порт CONSENSUS 4/5 **1:1** с JS (RSI-QQE + HTF + ATR + Bollinger + свечной фильтр)
-- [x] Фильтр «≤3 минусов подряд за 1000 свечей» + бан на 12ч
-- [x] Отправка `open_trade` через patched WebSocket.prototype.send
-- [x] Детект WIN/LOSS/DRAW через дельту демо-баланса
-- [x] Сигнал-гейт на мартингейле (не догоняет вслепую)
-- [x] Смена пары при payout<85% (макс 1 за MG-цикл)
-- [x] Стоп-сумма → `waiting_resume`
-- [x] День-офф 6ч если ни одна пара не проходит
-- [x] 15-окный автосет каждые 90 сек по payout 85-92%
-- [x] Пиннинг `current_pair` в окне на время MG-цикла
-- [x] Bar-aligned REST-refresh (подстраховка для пар без live-тиков)
-- [x] Staleness-гейт 25 сек — опоздавшие сигналы пропускаются
-- [x] Telegram: `/status`, `/balance`, `/pause`, `/resume`, `/stop`, `/bans`, `/test`
-- [x] Ежедневный отчёт в 7:00
+- **15 окон мульти-чарт** стримят live-тики через CDP → буфер обновляется <1 сек после закрытия бара
+- Для пар вне 15 окон → **bar-aligned REST refresh** на границе минуты
+- Запасной путь: обычный REST refresh каждые 15 сек
 
-## Запуск
+### 4. Скан-цикл (каждую секунду)
 
-### 1. Chrome с debugging-портом
-```bash
-/Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome \
-  --remote-debugging-port=9222 \
-  --user-data-dir=/tmp/po-chrome
+[state_machine.py:_free_scan_step](trading/state_machine.py):
+1. Для каждой `tracked` пары — проверяем был ли новый закрытый бар
+2. **Staleness-гейт**: если бар закрылся >25 сек назад → **пропустить** (вход уже не актуален)
+3. Прогнать CONSENSUS 4/5 на последних свечах
+4. Первая пара с сигналом → открыть сделку (break из цикла)
+
+### 5. Открытие сделки
+
+[state_machine.py:_open_and_track](trading/state_machine.py):
+1. `ensure_pair_in_window(sym)` — гарантирует что пара в одном из 15 окон для live-тиков
+2. Запоминаем `pre_balance = feed.balance_demo` **ДО** отправки фрейма
+3. Отправляем `42["user.demo.open_trade", {asset, amount, action, time: 120}]`
+4. Сайт списывает сумму с демо-баланса в течение миллисекунд
+5. В Telegram: 📡 сигнал + график с индикатором + «Захожу $X»
+
+### 6. Детект закрытия через дельту баланса
+
+Биннарный ответ `open_trade.success` (MessagePack) не парсится — вместо него:
+1. Ждём `expiry (120s) + 5s буфера`
+2. Читаем текущий `balance_demo`, если не обновился — поллим ещё 10 сек
+3. `delta = post_balance - pre_balance`
+4. Классификация:
+   - `delta > 0` → **WIN**, `profit = delta + amount`
+   - `delta < 0` → **LOSS**
+   - `delta ≈ 0` → **DRAW** (возврат средств)
+
+Работает потому что `one_trade_at_a_time: true` — в один момент только одна открытая сделка.
+
+### 7. Мартингейл с сигнал-гейтом
+
+**Ключевое отличие от классического мартингейла:** не бьём вслепую, ждём новый консенсусный сигнал на той же паре.
+
 ```
-Или через `open -na "Google Chrome" --args --remote-debugging-port=9222 --user-data-dir="$HOME/chrome-po-debug"`.
+LOSS → mg_step++, current_pair заморожена
+  ↓
+Ждём новый CONSENSUS 4/5 сигнал на current_pair (staleness 25 сек)
+  ↓
+Сигнал пришёл → открываем сделку с base × 2.1^step
+  │
+  ├─ если сигнал в ТОЙ ЖЕ direction → классический MG
+  └─ если в противоположной → обновляем direction (следуем за рынком)
 
-Залогиниться в po-signals.com, выбрать аккаунт, **активировать 15-окный мульти-чарт режим** (кнопка «Экран» в левой колонке сайта → 15 окон).
+Если payout на current_pair падает <85% → одна смена пары за цикл
+   (_pick_switch_pair выбирает лучшую свободную из _pair_scores)
 
-### 2. Зависимости
-```bash
-pip3 install -r requirements.txt
+WIN → сброс цикла, возврат к FREE режиму (база $1)
+Stop-sum ($50 суммарных потерь) или max_steps (5) → waiting_resume
+   Ждёт /resume в Telegram
 ```
 
-### 3. Бот
-```bash
-python3 main.py --mode paper   # демо-счёт
-python3 main.py --mode real    # реальный счёт
-```
+### 8. 15-окный мульти-чарт (ускорение)
 
-Фоном:
-```bash
-nohup python3 main.py --mode paper > bot.log 2>&1 < /dev/null &
-disown
-```
-
-### Ручные инструменты
-```bash
-python3 tools/autoset_windows.py --dry-run   # показать план переключения
-python3 tools/autoset_windows.py             # выполнить
-python3 tools/windows_probe.py               # дамп состояния 15 окон
-```
+[trading/window_manager.py](trading/window_manager.py):
+- Каждые **90 сек** (только когда `mg_step == 0`):
+  - DOM-probe находит все 15 окон + их текущие пары + координаты кнопок prev/next
+  - Если пара в окне с payout <85% или дубль другой пары → **клик «next»** до уникальной пары в диапазоне payout 85-92%
+- `ensure_pair_in_window(sym)` — отдельный вызов перед каждой сделкой: гарантирует что торгуемая пара в окне
 
 ## Конфигурация (`config.yaml`)
 
-| Секция | Параметр | Дефолт | Смысл |
-|---|---|---|---|
-| `filter` | `min_payout` | 92 | минимум выплата для входа (%) |
-| | `payout_floor` | 85 | ниже этого — смена пары в цикле |
-| | `max_losses_in_row` | 3 | >N минусов подряд → бан пары |
-| | `history_candles` | 1060 | буфер свечей (HTF-бакеты совпадают с сайтом) |
-| | `ban_hours` | 12 | бан пары на сколько часов |
-| | `day_off_hours` | 6 | пауза если ни одна пара не проходит |
-| `trading` | `base_amount` | 1 | базовая ставка ($) |
-| | `expiry_seconds` | 120 | экспирация сделки |
-| | `max_pair_switch_per_cycle` | 1 | смен пары до WIN |
-| `martingale` | `coefficient` | 2.1 | множитель ставки после LOSS |
-| | `max_steps` | 5 | максимум догонов |
-| | `stop_sum` | 50 | порог потерь → `/resume` |
-| `indicator` | `minConsensus` | 4 | минимум голосов систем (из 5) |
-| | `expiryBars` | 2 | экспирация в барах для бэктеста |
-| | `rsiPeriod` / `qqeFactor` / `htfMultiplier` / ... | | CONSENSUS 4/5 |
-| `misc` | `poll_interval_sec` | 1 | частота скан-цикла |
+```yaml
+mode: paper               # paper | real
+cdp_url: http://localhost:9222
+
+filter:
+  min_payout: 92          # минимум выплата для входа
+  payout_floor: 85        # ниже — смена пары в цикле
+  max_losses_in_row: 3    # бан пары при 4+ подряд
+  history_candles: 1060   # совпадает с сайтом для точного HTF
+  ban_hours: 12
+  day_off_hours: 6
+
+trading:
+  base_amount: 1
+  expiry_seconds: 120
+  one_trade_at_a_time: true
+  max_pair_switch_per_cycle: 1
+
+martingale:
+  coefficient: 2.1
+  max_steps: 5
+  stop_sum: 50            # пауза при $50 потерь
+
+indicator:
+  minConsensus: 4
+  requireAll5OnWeekend: true
+  rsiPeriod: 14; rsiSmoothing: 5; qqeFactor: 4.238
+  htfMultiplier: 5; htfMaPeriod: 20
+  atrPeriod: 14; atrAvgWindow: 100; atrMinRatio: 0.7; atrMaxRatio: 2.0
+  bbPeriod: 20; bbStdDev: 2.0; bbZoneDepth: 0.3
+  candleMaxAtrMult: 2.0; cooldownBars: 3
+```
+
+## Запуск
+
+### Локально
+```bash
+# 1. Chrome с CDP
+/Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome \
+  --remote-debugging-port=9222 --user-data-dir=/tmp/po-chrome
+
+# 2. Зависимости
+pip3 install -r requirements.txt
+
+# 3. Бот
+python3 main.py --mode paper
+```
+
+### Railway
+См. [DEPLOY.md](DEPLOY.md). Требуется:
+- Hobby plan ($5/мес) — под Chromium надо >512 MB RAM
+- Persistent Volume на `/chrome-data` — сохраняет сессию и настройку 15 окон
+- Env-переменные: `PO_EMAIL`, `PO_PASSWORD`, `TELEGRAM_TOKEN`, `TELEGRAM_CHAT_ID`, `MODE`
+- Auto-login с 2-часовым session-reset отрабатывает автоматически
 
 ## Telegram
 
 Команды:
-- `/status` — текущая пара, MG-шаг, потери, баланс
-- `/balance` — баланс выбранного режима
+- `/status` — пара, MG-шаг, потери, баланс
+- `/balance` — баланс
 - `/pause` / `/resume` — пауза / возобновление
 - `/stop` — остановить бота
-- `/bans` — активные баны пар
-- `/chart <SYMBOL>` — свечной график пары
-- `/test <SYMBOL> <call|put> [amount]` — тестовая сделка, минуя фильтры
-- `/help`
+- `/bans` — активные баны
+- `/chart SYMBOL` — свечной график
+- `/test SYMBOL call|put [amount]` — тестовая сделка минуя фильтры
 
 Автоматические уведомления:
-- сигнал пойман, вход в сделку + график
-- WIN / LOSS / DRAW с обновлением потерь
-- новый MG-шаг с суммой и причиной
-- смена пары по правилу payout<85%
-- стоп-сумма достигнута (ждёт `/resume`)
-- день-офф (пауза на 6ч)
-- ежедневный отчёт в 7:00: prof/loss, WR, смен пар, макс. серия минусов
-
-## Хранилище
-
-- `journal.db` — SQLite: сделки, баны, сессии, key/value для restore
-- `bot.log` — лог (INFO+); содержит `WS SEND: ...` исходящих фреймов для отладки
+- 📡 сигнал + график + «Захожу $X»
+- ✅ WIN / ❌ LOSS / ➖ DRAW
+- 🔄 смена пары (payout<85%)
+- 🛑 стоп-сумма или max_steps (ждёт `/resume`)
+- 📊 ежедневный отчёт в 7:00: WR, сделки, смен пар, макс-streak
 
 ## Известные ограничения
 
-1. **HTF-дрейф**: `htf_trend(group = i // mult)` зависит от индекса свечи. При буфере 1060 совпадает с сайтом; при других N возможно расхождение ±1-2 сделки / ±1 по max-streak. Trade-off «1:1 порта».
-2. **История только для валют**: REST 404/400 на акции (`#AAPL_otc`) и крипту (`ETHUSD_otc`). Только currency OTC.
-3. **CDP-сессия**: если Chrome закрыт или нет `--remote-debugging-port` — бот теряет связь. Перезапуск Chrome + бота.
-4. **Sandbox-обход через prototype.send**: если сайт обновит бандл и начнёт сохранять `WebSocket.prototype.send` в замыкание тоже — хук перестанет работать. Тогда fallback — клики по DOM-кнопкам «Купить»/«Продать».
-5. **15-окный режим обязателен для низкой задержки**: без него live-тики только на 1 пару (текущий график), остальные через REST с 15-сек фоллбеком.
-6. **Один Telegram-бот**: polling одного токена нельзя параллелить — иначе `TelegramConflictError`.
+1. **Sandbox-хак через prototype.send** — если сайт обновит бандл и сохранит `WebSocket.prototype.send` в замыкание — бот ослепнет. Мониторинг: если `WS SEND` перестал логиться — чинить хук.
+2. **Session reset** каждые ~2 часа — auto-login отрабатывает, но если PoSignals добавит капчу — сломается.
+3. **15-окный режим обязателен для скорости**. Без него live-тики только на 1 пару, остальные через REST с 15-60 сек задержкой.
+4. **history_candles=1060** должно совпадать с сайтом для точного HTF — иначе расхождения в максимум-streak ±1-2 сделки.
+5. **Один Telegram-бот** — polling одного токена нельзя параллелить (`TelegramConflictError`).
+6. **REST лаг для некоторых пар** — сайт иногда возвращает свечи с отставанием 1 бара → staleness-гейт отбрасывает такие сигналы (это правильное поведение, но снижает частоту сделок на пары без live-тиков).
 
 ## Testing checklist (перед real-mode)
 
-- [ ] Paper: бот поймал сигнал и открыл сделку в демо
-- [ ] WIN — мартингейл сбрасывается, возврат в свободный скан
-- [ ] LOSS — `mg_step++`, бот ждёт новый сигнал на той же паре
-- [ ] Новый сигнал на MG-паре → ставка × 2.1
-- [ ] Сигнал в противоположном направлении во время MG → смена direction
-- [ ] Падение payout<85% на MG-паре — смена пары (одна за цикл)
-- [ ] Стоп-сумма — пауза + уведомление + `/resume` восстанавливает
+- [ ] `/test SYMBOL call` открывает сделку в демо
+- [ ] WIN → мартингейл сбрасывается, возврат в FREE скан
+- [ ] LOSS → `mg_step++`, бот ждёт новый сигнал на той же паре
+- [ ] Новый сигнал → ставка × 2.1
+- [ ] Сигнал в противоположном направлении → смена direction, MG продолжается
+- [ ] Payout упал <85% → смена пары (одна за цикл)
+- [ ] Стоп-сумма → `waiting_resume`, `/resume` восстанавливает
 - [ ] Автосет окон раз в 90с заменил дубли / низкие payout
-- [ ] `current_pair` закреплена в окне на время цикла (ensure_pair_in_window)
-- [ ] `/status`, `/balance`, `/bans`, `/test` отвечают корректно
-- [ ] Ежедневный отчёт в 7:00 приходит
-- [ ] После `kill -9` бот при перезапуске начинает с базовой суммы
+- [ ] `current_pair` всегда в одном из 15 окон во время цикла
+- [ ] Ежедневный отчёт в 7:00
+- [ ] После рестарта контейнера (Railway) — session подхватывается из volume

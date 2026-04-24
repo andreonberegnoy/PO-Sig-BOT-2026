@@ -132,6 +132,11 @@ class StateMachine:
         if not self._tracked and assets:
             logger.info("assets arrived late (%d) — forcing rescan", len(assets))
             self._force_rescan = True
+            # Also clear any day-off that was set because the initial scan found 0 pairs.
+            if self.state.day_off_until:
+                self.state.day_off_until = 0
+                self._persist()
+                logger.info("cleared day-off (was set due to empty initial assets)")
             self._tick_event.set()
 
     def _on_tick(self, symbol: str, tf: int, candle: dict):
@@ -304,10 +309,16 @@ class StateMachine:
 
         await self._rescan_pairs()
         if not self._tracked:
-            hours = self.cfg["filter"]["day_off_hours"]
-            self.state.day_off_until = int(time.time()) + hours * 3600
-            self._persist()
-            await self._notify(f"😴 Ни одна пара не прошла фильтр. Пауза {hours}ч.")
+            # Only trigger day-off if assets were actually available — otherwise
+            # it's a startup race (assets haven't arrived yet) and _on_assets_update
+            # will force a rescan once they do.
+            if self.feed.assets:
+                hours = self.cfg["filter"]["day_off_hours"]
+                self.state.day_off_until = int(time.time()) + hours * 3600
+                self._persist()
+                await self._notify(f"😴 Ни одна пара не прошла фильтр. Пауза {hours}ч.")
+            else:
+                logger.info("initial scan empty — waiting for assets_list from WS")
 
         last_scan = time.time()
         last_bar_minute = -1   # track minute boundary for bar-aligned refresh

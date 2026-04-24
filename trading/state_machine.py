@@ -404,7 +404,16 @@ class StateMachine:
         # Signal is entry-worthy only if we're within ~25s of bar close (entry
         # mode = nextBarOpen → entry price is that bar's open; later = decayed edge).
         MAX_STALENESS = 25
-        for sym in list(self._tracked):
+        # Iterate tracked pairs in priority order (lower priority = fewer
+        # losses-before-win = better). Tie-break by higher payout.
+        sorted_tracked = sorted(
+            self._tracked,
+            key=lambda s: (
+                (self._pair_scores.get(s).priority if self._pair_scores.get(s) else 999),
+                -int((self.feed.assets.get(s) or {}).get("payout", 0)),
+            ),
+        )
+        for sym in sorted_tracked:
             if not self._eligible_for_new_cycle(sym):
                 continue
             buf = self._candles.get(sym)

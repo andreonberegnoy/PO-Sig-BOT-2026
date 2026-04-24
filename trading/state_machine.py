@@ -84,8 +84,10 @@ class StateMachine:
 
         self._running = False
         self._tick_event = asyncio.Event()
+        self._force_rescan = False   # set True to trigger _rescan_pairs next tick
 
         feed.on_tick = self._on_tick
+        feed.on_assets_update = self._on_assets_update
 
     # ---------- persist ----------
     def _persist(self):
@@ -124,6 +126,14 @@ class StateMachine:
         return round(base * (coef ** step), 2)
 
     # ---------- feed callbacks ----------
+    def _on_assets_update(self, assets: dict):
+        """When assets arrive late (after startup scan ran on empty list),
+        wake the main loop so it can rescan and start tracking pairs."""
+        if not self._tracked and assets:
+            logger.info("assets arrived late (%d) — forcing rescan", len(assets))
+            self._force_rescan = True
+            self._tick_event.set()
+
     def _on_tick(self, symbol: str, tf: int, candle: dict):
         # Wake main loop; closed-bar detection happens in loop.
         self._tick_event.set()
@@ -331,8 +341,9 @@ class StateMachine:
                     self._persist()
                     continue
 
-            # Periodic rescan (every 5 min)
-            if now - last_scan > 300:
+            # Periodic rescan (every 5 min) OR forced (e.g., assets arrived late)
+            if self._force_rescan or now - last_scan > 300:
+                self._force_rescan = False
                 last_scan = now
                 await self._rescan_pairs()
                 self.journal.prune_bans()

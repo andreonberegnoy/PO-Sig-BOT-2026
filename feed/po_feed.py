@@ -175,29 +175,41 @@ class PoFeed:
         # If the page isn't already at the trading app, navigate there explicitly.
         # On Railway the Chrome tab lands on https://po-signals.com/ (root) which
         # may redirect to login — we handle that right after.
-        # Wait for page URL to settle on something useful. Chrome may still be
-        # redirecting at this point (root → /en/app/charts, or to login).
-        for _ in range(20):
-            u = self._page.url
-            if "/app/charts" in u or "/sign-in" in u or "/auth" in u:
-                break
-            await asyncio.sleep(0.5)
+        # On a fresh Chrome user-data-dir there is no session cookie, and the
+        # app may render ambiguous states (blank shell, cookies banner, etc) that
+        # our is_on_login_page heuristic can miss. If we have credentials, go
+        # through /sign-in explicitly — the site will redirect to /app/charts
+        # after successful login.
+        login_url = (self._auth_cfg or {}).get("login_url") or \
+            "https://po-signals.com/en/app/auth/sign-in"
+        email = (self._auth_cfg or {}).get("email", "")
+        password = (self._auth_cfg or {}).get("password", "")
 
-        # If we ended up somewhere weird (root, etc), nudge via JS location.
-        if ("/app/charts" not in self._page.url
-                and "/sign-in" not in self._page.url
-                and "/auth" not in self._page.url):
+        if email and password:
             try:
-                await self._page.evaluate(
-                    "location.href = 'https://po-signals.com/en/app/charts'"
-                )
-                for _ in range(20):
-                    u = self._page.url
-                    if "/app/charts" in u or "/sign-in" in u or "/auth" in u:
-                        break
+                await self._page.evaluate(f"location.href = {login_url!r}")
+                # wait for login form to appear
+                for _ in range(40):
                     await asyncio.sleep(0.5)
+                    u = self._page.url
+                    if "/sign-in" in u or "/auth" in u:
+                        break
+                logger.info("navigated to login: %s", self._page.url)
             except Exception as e:
-                logger.warning("location-href nudge failed: %s", e)
+                logger.warning("login-url nudge failed: %s", e)
+        else:
+            # No credentials → just ensure we're on /app/charts via JS nudge.
+            if "/app/charts" not in self._page.url:
+                try:
+                    await self._page.evaluate(
+                        "location.href = 'https://po-signals.com/en/app/charts'"
+                    )
+                    for _ in range(20):
+                        await asyncio.sleep(0.5)
+                        if "/app/charts" in self._page.url:
+                            break
+                except Exception as e:
+                    logger.warning("charts-url nudge failed: %s", e)
 
         logger.info("page settled on: %s", self._page.url)
 

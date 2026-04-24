@@ -185,8 +185,9 @@ class PoFeed:
 
         # Auto-login if the page landed on a login screen (happens on fresh
         # Chrome user-data-dir, or after ~2h session reset).
+        from feed.auth import ensure_logged_in, open_login_modal, auto_login
+
         try:
-            from feed.auth import ensure_logged_in
             if self._auth_cfg:
                 ok = await ensure_logged_in(self._page, self._auth_cfg)
                 if not ok:
@@ -194,13 +195,36 @@ class PoFeed:
         except Exception:
             logger.exception("ensure_logged_in error during connect")
 
-        # Wait for both WS + assets list
+        # Wait for WS + assets list
         try:
             await asyncio.wait_for(self._ready.wait(), timeout=60)
             logger.info("feed ready. assets=%d real_bal=%s demo_bal=%s",
                         len(self.assets), self.balance_real, self.balance_demo)
+            return
         except asyncio.TimeoutError:
-            logger.warning("feed not fully ready after 60s, continuing anyway")
+            logger.warning("feed not fully ready after 60s — retrying login")
+
+        # Fallback: WS never came up. Likely we landed on /app/charts but without
+        # session — site may show a 'Войти' button somewhere. Force open modal
+        # and attempt login again, then wait once more.
+        if self._auth_cfg and self._auth_cfg.get("email"):
+            try:
+                if await open_login_modal(self._page):
+                    await auto_login(
+                        self._page,
+                        self._auth_cfg.get("email", ""),
+                        self._auth_cfg.get("password", ""),
+                    )
+                    try:
+                        await asyncio.wait_for(self._ready.wait(), timeout=45)
+                        logger.info("feed ready after fallback login. assets=%d",
+                                    len(self.assets))
+                        return
+                    except asyncio.TimeoutError:
+                        logger.error("feed still not ready after fallback login")
+            except Exception:
+                logger.exception("fallback login attempt failed")
+        logger.warning("feed never became ready — continuing anyway, bot will retry via REST")
 
     async def close(self):
         try:

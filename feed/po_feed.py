@@ -172,16 +172,38 @@ class PoFeed:
         self._cdp.on("Network.webSocketFrameReceived", self._on_ws_recv)
         self._cdp.on("Network.webSocketFrameSent", self._on_ws_sent)
 
-        # Reload to ensure hook is active
-        await self._page.reload(wait_until="domcontentloaded", timeout=60000)
+        # If the page isn't already at the trading app, navigate there explicitly.
+        # On Railway the Chrome tab lands on https://po-signals.com/ (root) which
+        # may redirect to login — we handle that right after.
+        try:
+            if "/app/charts" not in self._page.url:
+                target_url = (self._auth_cfg.get("login_url") or "").replace(
+                    "/auth/sign-in", "/app/charts"
+                ) or "https://po-signals.com/en/app/charts"
+                await self._page.goto(target_url, wait_until="domcontentloaded", timeout=60000)
+            else:
+                await self._page.reload(wait_until="domcontentloaded", timeout=60000)
+        except Exception as e:
+            logger.warning("initial navigation failed: %s", e)
+
+        # Auto-login if the page landed on a login screen (happens on fresh
+        # Chrome user-data-dir, or after ~2h session reset).
+        try:
+            from feed.auth import ensure_logged_in
+            if self._auth_cfg:
+                ok = await ensure_logged_in(self._page, self._auth_cfg)
+                if not ok:
+                    logger.error("auto-login failed during initial connect")
+        except Exception:
+            logger.exception("ensure_logged_in error during connect")
 
         # Wait for both WS + assets list
         try:
-            await asyncio.wait_for(self._ready.wait(), timeout=30)
+            await asyncio.wait_for(self._ready.wait(), timeout=60)
             logger.info("feed ready. assets=%d real_bal=%s demo_bal=%s",
                         len(self.assets), self.balance_real, self.balance_demo)
         except asyncio.TimeoutError:
-            logger.warning("feed not fully ready after 30s, continuing anyway")
+            logger.warning("feed not fully ready after 60s, continuing anyway")
 
     async def close(self):
         try:

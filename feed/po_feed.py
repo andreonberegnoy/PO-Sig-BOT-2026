@@ -175,16 +175,31 @@ class PoFeed:
         # If the page isn't already at the trading app, navigate there explicitly.
         # On Railway the Chrome tab lands on https://po-signals.com/ (root) which
         # may redirect to login — we handle that right after.
-        try:
-            if "/app/charts" not in self._page.url:
-                await self._page.goto(
-                    "https://po-signals.com/en/app/charts",
-                    wait_until="domcontentloaded", timeout=60000,
+        # Wait for page URL to settle on something useful. Chrome may still be
+        # redirecting at this point (root → /en/app/charts, or to login).
+        for _ in range(20):
+            u = self._page.url
+            if "/app/charts" in u or "/sign-in" in u or "/auth" in u:
+                break
+            await asyncio.sleep(0.5)
+
+        # If we ended up somewhere weird (root, etc), nudge via JS location.
+        if ("/app/charts" not in self._page.url
+                and "/sign-in" not in self._page.url
+                and "/auth" not in self._page.url):
+            try:
+                await self._page.evaluate(
+                    "location.href = 'https://po-signals.com/en/app/charts'"
                 )
-            else:
-                await self._page.reload(wait_until="domcontentloaded", timeout=60000)
-        except Exception as e:
-            logger.warning("initial navigation failed: %s", e)
+                for _ in range(20):
+                    u = self._page.url
+                    if "/app/charts" in u or "/sign-in" in u or "/auth" in u:
+                        break
+                    await asyncio.sleep(0.5)
+            except Exception as e:
+                logger.warning("location-href nudge failed: %s", e)
+
+        logger.info("page settled on: %s", self._page.url)
 
         # Auto-login if the page landed on a login screen (happens on fresh
         # Chrome user-data-dir, or after ~2h session reset).

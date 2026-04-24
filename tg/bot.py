@@ -83,17 +83,21 @@ class TelegramBot:
             if not self.sm:
                 return await m.answer("Бот ещё не запущен.")
             s = self.sm.state
+            tracked = len(getattr(self.sm, "_tracked", set()) or set())
+            ticks = sum((getattr(self.sm, "_tick_counts", {}) or {}).values())
+            active = sum(1 for v in (getattr(self.sm, "_tick_counts", {}) or {}).values() if v > 0)
             text = (
-                f"Режим: *{self.cfg['mode']}*\n"
+                f"Режим: {self.cfg['mode']}\n"
                 f"Пара: {s.current_pair or '—'}\n"
                 f"МГ-шаг: {s.mg_step}  (сумма ${self.sm._amount_for_step(s.mg_step):.2f})\n"
                 f"Сделок на паре: {s.trades_on_pair}\n"
                 f"Смен пары в цикле: {s.cycle_switches}\n"
                 f"Потери за сессию: ${s.session_loss:.2f}\n"
                 f"Пауза: {'ДА' if s.paused else 'нет'}   Стоп-сумма: {'ЖДУ /resume' if s.waiting_resume else 'нет'}\n"
-                f"Баланс: {self.feed.balance() if self.feed else '?'}"
+                f"Баланс: {self.feed.balance() if self.feed else '?'}\n"
+                f"Tracked пар: {tracked}  |  live-тиков: {ticks} (активных пар {active})"
             )
-            await m.answer(text, parse_mode="Markdown")
+            await m.answer(text)   # plain text — underscores in symbols break Markdown
 
         @dp.message(Command("balance"))
         async def _balance(m: Message):

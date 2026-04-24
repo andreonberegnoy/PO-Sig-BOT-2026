@@ -177,10 +177,10 @@ class PoFeed:
         # may redirect to login — we handle that right after.
         try:
             if "/app/charts" not in self._page.url:
-                target_url = (self._auth_cfg.get("login_url") or "").replace(
-                    "/auth/sign-in", "/app/charts"
-                ) or "https://po-signals.com/en/app/charts"
-                await self._page.goto(target_url, wait_until="domcontentloaded", timeout=60000)
+                await self._page.goto(
+                    "https://po-signals.com/en/app/charts",
+                    wait_until="domcontentloaded", timeout=60000,
+                )
             else:
                 await self._page.reload(wait_until="domcontentloaded", timeout=60000)
         except Exception as e:

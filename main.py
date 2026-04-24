@@ -15,11 +15,28 @@ from pathlib import Path
 
 import yaml
 
-from feed.po_feed import PoFeed
 from trading.ws_client import TradeClient
 from trading.state_machine import StateMachine
 from journal.db import Journal
 from tg.bot import TelegramBot
+
+
+def _load_dotenv(path: str = ".env") -> None:
+    """Minimal .env loader (ignores python-dotenv dep)."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                k, v = k.strip(), v.strip()
+                # Strip surrounding quotes if present
+                if (v.startswith('"') and v.endswith('"')) or (v.startswith("'") and v.endswith("'")):
+                    v = v[1:-1]
+                os.environ.setdefault(k, v)
+    except FileNotFoundError:
+        pass
 
 
 def _env_override(cfg: dict) -> dict:
@@ -43,6 +60,7 @@ def _env_override(cfg: dict) -> dict:
 
 
 def load_config(path: str) -> dict:
+    _load_dotenv(".env")
     with open(path, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
     return _env_override(cfg)
@@ -66,9 +84,34 @@ async def run(cfg: dict):
     # 1. Journal
     journal = Journal(cfg["storage"]["db_path"])
 
-    # 2. Feed (connects to Chrome via CDP, reuses logged-in po-signals.com tab)
-    feed = PoFeed(mode=cfg["mode"], auth_cfg=cfg.get("auth") or {})
-    await feed.connect(cfg["cdp_url"])
+    # 2. Feed — prefer direct Pocket Option WS if PO_SSID is set, else legacy CDP.
+    ssid = os.environ.get("PO_SSID") or (cfg.get("po") or {}).get("ssid")
+    if ssid:
+        from feed.po_direct import PoDirectFeed
+        uid = int(os.environ.get("PO_UID") or (cfg.get("po") or {}).get("uid") or 0)
+        ws_url = (os.environ.get("PO_WS_URL")
+                  or (cfg.get("po") or {}).get("ws_url")
+                  or "wss://api-eu.po.market/socket.io/?EIO=4&transport=websocket")
+        # PO session is captured with a specific isDemo flag (from when user
+        # logged into the site). Match the session: if user extracted ssid
+        # while on demo account → PO_IS_DEMO=1; while on real → PO_IS_DEMO=0.
+        # Fallback: infer from config mode.
+        is_demo_env = os.environ.get("PO_IS_DEMO")
+        if is_demo_env is not None:
+            is_demo = is_demo_env.strip() in ("1", "true", "yes")
+        else:
+            is_demo = (cfg["mode"] == "paper")
+        feed = PoDirectFeed(
+            ssid=ssid, uid=uid,
+            is_demo=is_demo,
+            ws_url=ws_url,
+            verify_ssl=False,   # macOS-Python cert issue; PO is wss:// pinned anyway
+        )
+        await feed.connect()
+    else:
+        from feed.po_feed import PoFeed
+        feed = PoFeed(mode=cfg["mode"], auth_cfg=cfg.get("auth") or {})
+        await feed.connect(cfg["cdp_url"])
     bal = feed.balance()
     journal.start_session(cfg["mode"], bal)
 

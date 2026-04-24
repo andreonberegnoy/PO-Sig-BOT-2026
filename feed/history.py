@@ -11,6 +11,16 @@ logger = logging.getLogger(__name__)
 
 
 async def fetch_candles(feed, symbol: str, period: int = 60, limit: int = 1050) -> list[dict]:
+    # Direct-PO path: no REST endpoint, use WS subscription + loadHistoryPeriod
+    if hasattr(feed, "subscribe") and not hasattr(feed, "http_get_json"):
+        try:
+            await feed.subscribe(symbol, period, history_limit=limit)
+        except Exception as e:
+            logger.warning("subscribe %s failed: %s", symbol, e)
+            return []
+        return feed.get_candles(symbol, period, limit)
+
+    # po-signals REST path (legacy)
     path = f"/api/po/candles/{quote(symbol, safe='')}?period={period}&limit={limit}"
     data = await feed.http_get_json(path)
     if not data or (isinstance(data, dict) and data.get("__error")):

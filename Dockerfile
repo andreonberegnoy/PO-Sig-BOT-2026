@@ -1,21 +1,23 @@
-# Playwright image bundles Chromium + system deps for headless Chrome.
-FROM mcr.microsoft.com/playwright/python:v1.48.0-noble
+# Lightweight image — no browser needed since we connect directly to
+# wss://demo-api-eu.po.market via Python WebSocket.
+FROM python:3.12-slim
 
 WORKDIR /app
 
-# Copy python deps first for layer cache
-COPY requirements.txt /app/requirements.txt
-RUN pip3 install --no-cache-dir -r requirements.txt
+# System deps for lxml/matplotlib/pillow (used by tg/chart.py)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc libjpeg-dev zlib1g-dev libpng-dev libfreetype6-dev \
+    && rm -rf /var/lib/apt/lists/*
 
-# Copy app
+COPY requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt \
+    && pip install --no-cache-dir websockets
+
 COPY . /app
 
-# Chrome user-data-dir persists at /chrome-data (mount a Railway Volume here)
-ENV CHROME_USER_DATA_DIR=/chrome-data \
-    CDP_URL=http://localhost:9222 \
-    PYTHONUNBUFFERED=1
+ENV PYTHONUNBUFFERED=1
 
-RUN chmod +x /app/scripts/start.sh
-EXPOSE 9222
+# journal/candles.db lives in a Volume mount for persistence
+RUN mkdir -p /app/journal
 
-ENTRYPOINT ["/app/scripts/start.sh"]
+CMD ["python3", "main.py"]

@@ -6,6 +6,9 @@ __pycache__/
 .env.local
 bot.log
 journal.db
+journal/candles.db
+journal/candles.db-shm
+journal/candles.db-wal
 state.json
 *.db-journal
 .idea/

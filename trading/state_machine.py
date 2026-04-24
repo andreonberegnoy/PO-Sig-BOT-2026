@@ -22,7 +22,12 @@ from strategy.consensus import generate_signals, DEFAULT_PARAMS
 from strategy.filter_1000 import scan_all_pairs, pick_best, PairScore
 from feed.history import fetch_candles
 from trading.ws_client import TradeClient, ClosedTrade, OpenedTrade
-from trading.window_manager import autoset_windows, ensure_pair_in_window
+# Legacy Chrome-based helpers; only used when feed has _page (po-signals path)
+try:
+    from trading.window_manager import autoset_windows, ensure_pair_in_window
+except Exception:
+    autoset_windows = None
+    ensure_pair_in_window = None
 from journal.db import Journal
 
 logger = logging.getLogger(__name__)
@@ -88,6 +93,9 @@ class StateMachine:
 
         feed.on_tick = self._on_tick
         feed.on_assets_update = self._on_assets_update
+        feed.on_trade_close = self._on_trade_close_event
+        # Latest closed deals from PO keyed by "asset:open_ts" → {profit, ...}
+        self._closed_deals_index: dict[str, dict] = {}
 
     # ---------- persist ----------
     def _persist(self):
@@ -126,6 +134,19 @@ class StateMachine:
         return round(base * (coef ** step), 2)
 
     # ---------- feed callbacks ----------
+    def _on_trade_close_event(self, payload):
+        """PO sends `updateClosedDeals` (list) or `successcloseOrder` (dict).
+        Index by asset + openTimestamp so _open_and_track can look up profit."""
+        deals = payload if isinstance(payload, list) else [payload] if isinstance(payload, dict) else []
+        for d in deals:
+            if not isinstance(d, dict):
+                continue
+            asset = d.get("asset") or d.get("symbol")
+            open_ts = d.get("openTimestamp") or d.get("open_timestamp") or 0
+            if not asset or not open_ts:
+                continue
+            self._closed_deals_index[f"{asset}:{int(open_ts)}"] = d
+
     def _on_assets_update(self, assets: dict):
         """When assets arrive late (after startup scan ran on empty list),
         wake the main loop so it can rescan and start tracking pairs."""
@@ -198,9 +219,10 @@ class StateMachine:
         hist = await fetch_candles(self.feed, symbol, period=tf, limit=limit)
         if len(hist) >= 200:
             self._candles[symbol] = hist[-limit:]
-            # Mark as "evaluated up to the PRE-last closed bar" so the first scan
-            # immediately checks the last closed bar for a fresh signal.
-            self._last_closed_bar_time[symbol] = hist[-3]["time"] if len(hist) >= 3 else 0
+            # Mark LAST closed bar as already-evaluated so the first scan does
+            # NOT fire a stale signal on a bar that closed before bot startup.
+            # Entry will happen on the NEXT close (within 1-2 sec of bar close).
+            self._last_closed_bar_time[symbol] = hist[-2]["time"] if len(hist) >= 2 else 0
             self._last_refresh[symbol] = time.time()
             logger.info("cached %s (%d candles via REST)", symbol, len(hist))
 
@@ -274,8 +296,13 @@ class StateMachine:
                   if s.allowed and not self.journal.is_banned(sym)
                   and int(self.feed.assets.get(sym, {}).get("payout", 0)) >= min_payout}
 
-        # Drop pairs we no longer track (no WS to unsubscribe — we poll REST only)
+        # Drop pairs we no longer track — unsubscribe from WS if supported.
         to_drop = self._tracked - wanted
+        if hasattr(self.feed, "unsubscribe"):
+            tf = int(self.cfg["filter"]["tf"])
+            for sym in to_drop:
+                try: await self.feed.unsubscribe(sym, tf)
+                except Exception: pass
         self._tracked -= to_drop
 
         # Subscribe new pairs (bounded concurrency)
@@ -359,10 +386,11 @@ class StateMachine:
                 await self._rescan_pairs()
                 self.journal.prune_bans()
 
-            # Periodic auto-assignment of multi-chart windows (every ~90s, only
-            # when bot is free — never during an active MG cycle to avoid clicks
-            # disrupting an in-flight trade).
-            if (self.state.mg_step == 0
+            # Periodic auto-assignment of multi-chart windows — ONLY for legacy
+            # po-signals browser path. Direct-PO feed doesn't need any clicks
+            # (live ticks stream for every subscribed pair automatically).
+            if (autoset_windows is not None
+                    and self.state.mg_step == 0
                     and now - last_autoset > 90
                     and getattr(self.feed, "_page", None)):
                 last_autoset = now
@@ -548,14 +576,15 @@ class StateMachine:
     # ---------- trade open / close flow ----------
     async def _open_and_track(self, sym: str, action: str, amount: float):
         expiry = int(self.cfg["trading"]["expiry_seconds"])
-        # Guarantee live-tick window for this pair so next-bar detection is
-        # instantaneous during any follow-up MG step. Best-effort, non-blocking
-        # on failure.
+        # Direct-PO feed: subscribe to pair so live ticks flow (idempotent).
+        # Legacy po-signals path: click into one of 15 windows (via window_manager).
         try:
-            if getattr(self.feed, "_page", None):
+            if hasattr(self.feed, "subscribe"):
+                await self.feed.subscribe(sym, int(self.cfg["filter"]["tf"]))
+            elif ensure_pair_in_window and getattr(self.feed, "_page", None):
                 await ensure_pair_in_window(self.feed._page, sym)
         except Exception:
-            logger.exception("ensure_pair_in_window failed")
+            logger.exception("ensure live-tick subscription failed")
 
         # CRITICAL: capture balance BEFORE sending the frame. The site debits
         # the amount within milliseconds of receiving open_trade, so reading
@@ -573,29 +602,63 @@ class StateMachine:
 
         logger.info("OPEN %s %s $%s exp=%ss trade_id=%s", sym, action, amount, expiry, opened.trade_id)
 
-        # Balance-delta close detection: pre_balance was captured BEFORE the
-        # open_trade frame was sent (see top of this function). Now wait for
-        # expiry + buffer and compare.
-        await asyncio.sleep(expiry + 5)
-        # Small extra poll in case update_balance is delayed
-        post_balance = float(self.feed.balance() or 0.0)
-        for _ in range(10):
-            if abs(post_balance - pre_balance) >= 0.01:
+        # Wait for expiry, then check for explicit close event from PO first.
+        # Direct-PO feed gets `updateClosedDeals` with a `profit` field — much
+        # more reliable than balance delta (which can see partial debits).
+        await asyncio.sleep(expiry + 2)
+
+        open_ts = opened.open_time
+        deal = None
+        # Poll up to 15s for the close event to arrive
+        for _ in range(15):
+            # Try exact match by open_ts (+/- 2s tolerance)
+            for dt in range(-2, 3):
+                deal = self._closed_deals_index.get(f"{sym}:{open_ts + dt}")
+                if deal:
+                    break
+            if deal:
                 break
             await asyncio.sleep(1.0)
-            post_balance = float(self.feed.balance() or 0.0)
 
-        delta = round(post_balance - pre_balance, 2)
-        # Compare vs -amount (the debit that persists on loss) to classify
-        if delta > 0.005:
-            result = "WIN"
-            profit = delta + amount   # gross return (payout)
-        elif delta < -0.005:
-            result = "LOSS"
-            profit = 0.0
+        if deal and "profit" in deal:
+            profit_raw = float(deal.get("profit") or 0)
+            # PO's `profit` field semantics vary by region:
+            #   > 0  → WIN, value is net profit (e.g. +$0.92 on $1 trade)
+            #   == amount with percentProfit=0 → DRAW (refund)
+            #   < 0 or == -amount → LOSS
+            if profit_raw > 0.01:
+                result = "WIN"
+                profit = profit_raw + amount   # gross return (what user gets back)
+            elif profit_raw < -0.01:
+                result = "LOSS"
+                profit = 0.0
+            else:
+                result = "DRAW"
+                profit = amount
+            post_balance = float(self.feed.balance() or 0.0)
+            delta = round(post_balance - pre_balance, 2)
+            logger.info("CLOSE event %s: profit_raw=%.2f → result=%s (balance delta=%.2f)",
+                        sym, profit_raw, result, delta)
         else:
-            result = "DRAW"
-            profit = amount           # refunded
+            # Fallback: balance-delta classification (old method)
+            post_balance = float(self.feed.balance() or 0.0)
+            for _ in range(10):
+                if abs(post_balance - pre_balance) >= 0.01:
+                    break
+                await asyncio.sleep(1.0)
+                post_balance = float(self.feed.balance() or 0.0)
+            delta = round(post_balance - pre_balance, 2)
+            if delta > 0.005:
+                result = "WIN"
+                profit = delta + amount
+            elif delta < -0.005:
+                result = "LOSS"
+                profit = 0.0
+            else:
+                result = "DRAW"
+                profit = amount
+            logger.warning("CLOSE fallback %s: no event — balance delta=%.2f → %s",
+                           sym, delta, result)
 
         closed = ClosedTrade(
             trade_id=opened.trade_id,

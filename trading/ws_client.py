@@ -83,7 +83,11 @@ class TradeClient:
 
         logger.info("OPEN %s %s %s $%s exp=%ss", self.mode.upper(), asset, action.upper(), amount, time_sec)
         try:
-            await self.feed.send_user_ws(event, payload)
+            # Prefer the direct PO interface; fall back to po-signals wrapper.
+            if hasattr(self.feed, "send_open_order"):
+                await self.feed.send_open_order(asset, float(amount), action, int(time_sec))
+            else:
+                await self.feed.send_user_ws(event, payload)
         except Exception as e:
             logger.exception("send open_trade failed: %s", e)
             return None

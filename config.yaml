@@ -1,0 +1,98 @@
+# ================= MY PO-SIG BOT — конфигурация =================
+
+# ---- режим работы ----
+mode: paper              # paper | real  (paper = demo account, real = real money)
+cdp_url: http://localhost:9222
+
+# ---- авто-логин на po-signals.com (для хостинга / автовосстановления сессии) ----
+# Сессия на сайте сбрасывается каждый час. Бот заполнит форму сам, если задано.
+# Капчи нет, 2FA нет — автозаполнения достаточно.
+auth:
+  email: ""              # вписать email, которым логинишься
+  password: ""           # вписать пароль
+  login_url: "https://po-signals.com/en/app/auth/sign-in"
+
+# ---- фильтр валютных пар ----
+filter:
+  min_payout: 92             # минимальная выплата для первой сделки (%)
+  payout_floor: 85           # если текущая пара упала ниже — ищем другую
+  max_losses_in_row: 999     # ВРЕМЕННО без фильтра — анализируем все пары. Вернуть на 3 потом.
+  history_candles: 1060      # размер буфера должен совпадать с сайтом для верного HTF
+  stats_lookback_bars: 1000  # окно статистики — последние N баров
+  ban_hours: 12              # бан пары с >max_losses_in_row на N часов
+  day_off_hours: 6           # если по всем парам >max_losses_in_row — пауза N часов, потом пересмотр
+  tf: 60                     # таймфрейм свечей в секундах (60 = M1)
+
+# ---- торговля ----
+trading:
+  base_amount: 1             # базовая сумма входа ($)
+  expiry_seconds: 120        # экспирация сделки (120 = 2 минуты)
+  one_trade_at_a_time: true  # не открывать параллельные сделки
+  min_trades_on_pair: 3      # минимум сделок на паре до смены (если нет условий для смены)
+  max_pair_switch_per_cycle: 1  # сколько раз можно сменить пару до плюса
+
+# ---- мартингейл ----
+martingale:
+  coefficient: 2.1           # множитель ставки после минуса
+  max_steps: 5               # максимум догонов
+  stop_sum: 50               # стоп-сумма потерь ($): ждём /resume в Telegram
+  reset_on_win: true         # после плюса возвращаем базовую сумму
+
+# ---- CONSENSUS 4/5 (параметры индикатора) ----
+# 1:1 с meta.defaultParams из твоего JS
+indicator:
+  expiryBars: 2
+  entryMode: nextBarOpen
+  martingaleSteps: 0          # у индикатора отдельно от торгового мартингейла (для бэктеста)
+  drawBehavior: continue
+  minConsensus: 4
+  requireAll5OnWeekend: true
+
+  rsiPeriod: 14
+  rsiSmoothing: 5
+  qqeFactor: 4.238
+
+  htfMultiplier: 5
+  htfMaType: EMA
+  htfMaPeriod: 20
+
+  atrPeriod: 14
+  atrAvgWindow: 100
+  atrMinRatio: 0.7
+  atrMaxRatio: 2.0
+
+  bbPeriod: 20
+  bbStdDev: 2.0
+  bbZoneDepth: 0.3
+
+  candleMaxAtrMult: 2.0
+  candleReqAlign: true
+
+  cooldownBars: 3
+
+  drawdownEnabled: true
+  drawdownWindow: 30
+  drawdownStopWR: 40
+
+  statsLookbackBars: 1000
+
+# ---- Telegram ----
+# Реальные значения инжектятся через env-переменные TELEGRAM_TOKEN / TELEGRAM_CHAT_ID
+# (см. main.py::_env_override). Здесь — только пустые/dev-плейсхолдеры.
+telegram:
+  token: ""
+  chat_id: 0
+  daily_report_hour: 7       # UTC+0; час в локальной TZ для отчёта
+  daily_report_timezone: "Europe/Kyiv"
+
+# ---- хранилище ----
+storage:
+  db_path: journal.db
+  state_path: state.json
+  log_path: bot.log
+  log_level: INFO
+
+# ---- прочее ----
+misc:
+  poll_interval_sec: 1       # как часто проверяем сигналы
+  assets_refresh_sec: 30     # как часто рефрешим assets_list на сервере (fallback если не приходит сам)

@@ -1,0 +1,12 @@
+# Railway deploy config. See https://docs.railway.app/reference/config-as-code
+
+[build]
+builder = "dockerfile"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+# Auto-restart on crash; Chrome + session resets are handled gracefully inside.
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 5
+# Healthcheck: bot's main loop writes bot.log every second; if it's alive we're fine.
+# Railway doesn't check via HTTP unless we expose a health endpoint. Skipping for now.

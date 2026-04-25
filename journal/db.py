@@ -191,16 +191,35 @@ class Journal:
         r = cur.fetchone()
         return int(r[0]) if r else None
 
+    def _hour_filter_sql(self, hour_filter: Optional[tuple],
+                         tz_offset_sec: int) -> tuple[str, list]:
+        """Returns (sql_clause, params) to filter rows by local hour-of-day.
+        hour_filter = (start, end) ints in [0,24]. None → no filter."""
+        if not hour_filter:
+            return "", []
+        start, end = int(hour_filter[0]), int(hour_filter[1])
+        # SQL: extract hour after applying timezone offset
+        hour_expr = f"CAST(strftime('%H', ts + {int(tz_offset_sec)}, 'unixepoch') AS INTEGER)"
+        if start <= end:
+            return f" AND {hour_expr} >= ? AND {hour_expr} < ?", [start, end]
+        else:
+            # window crosses midnight (e.g. 22..6) — OR logic
+            return f" AND ({hour_expr} >= ? OR {hour_expr} < ?)", [start, end]
+
     def payout_aggregate(self, since_ts: int, min_payout: int = 92,
-                         floor_payout: int = 85) -> list[dict]:
+                         floor_payout: int = 85,
+                         hour_filter: Optional[tuple] = None,
+                         tz_offset_sec: int = 0) -> list[dict]:
         """For each symbol, aggregate over [since_ts, now]:
           - n_snapshots, avg_payout, min_payout, max_payout
           - pct_above_min, pct_above_floor
           - first_seen_ts, last_seen_ts
+        If hour_filter=(start,end), only rows whose local hour is in window.
         """
         self.conn.row_factory = sqlite3.Row
+        hour_sql, hour_params = self._hour_filter_sql(hour_filter, tz_offset_sec)
         cur = self.conn.execute(
-            """SELECT symbol,
+            f"""SELECT symbol,
                       COUNT(*)               AS n,
                       AVG(payout)            AS avg_p,
                       MIN(payout)            AS min_p,
@@ -210,9 +229,9 @@ class Journal:
                       SUM(CASE WHEN payout >= ? THEN 1 ELSE 0 END) AS n_above_min,
                       SUM(CASE WHEN payout >= ? THEN 1 ELSE 0 END) AS n_above_floor
                  FROM payout_log
-                WHERE ts >= ?
+                WHERE ts >= ?{hour_sql}
              GROUP BY symbol""",
-            (min_payout, floor_payout, since_ts),
+            [min_payout, floor_payout, since_ts] + hour_params,
         )
         out = []
         for r in cur.fetchall():
@@ -255,14 +274,18 @@ class Journal:
         )
         self.conn.commit()
 
-    def pair_stats_aggregate(self, since_ts: int) -> list[dict]:
+    def pair_stats_aggregate(self, since_ts: int,
+                             hour_filter: Optional[tuple] = None,
+                             tz_offset_sec: int = 0) -> list[dict]:
         """For each symbol, aggregate backtest snapshots over [since_ts, now]:
           - n_snapshots, avg_wr, avg_wr1, avg_signals, max_max_streak
           - last_wr, last_wr1, last_max_streak (most recent snapshot)
+        If hour_filter set, only snapshots whose local hour is in window.
         """
         self.conn.row_factory = sqlite3.Row
+        hour_sql, hour_params = self._hour_filter_sql(hour_filter, tz_offset_sec)
         cur = self.conn.execute(
-            """SELECT symbol,
+            f"""SELECT symbol,
                       COUNT(*) AS n,
                       AVG(wr) AS avg_wr,
                       AVG(wr1) AS avg_wr1,
@@ -271,9 +294,9 @@ class Journal:
                       MIN(ts) AS first_ts,
                       MAX(ts) AS last_ts
                  FROM pair_stats_log
-                WHERE ts >= ?
+                WHERE ts >= ?{hour_sql}
              GROUP BY symbol""",
-            (since_ts,),
+            [since_ts] + hour_params,
         )
         out = {}
         for r in cur.fetchall():
@@ -289,12 +312,12 @@ class Journal:
             }
         # Add the most-recent snapshot per symbol for "last" fields
         cur = self.conn.execute(
-            """SELECT p.symbol, p.wr, p.wr1, p.max_streak, p.max_streak_overall, p.bars_in_window, p.ts
+            f"""SELECT p.symbol, p.wr, p.wr1, p.max_streak, p.max_streak_overall, p.bars_in_window, p.ts
                  FROM pair_stats_log p
                  JOIN (SELECT symbol, MAX(ts) AS mts FROM pair_stats_log
-                       WHERE ts >= ? GROUP BY symbol) m
+                       WHERE ts >= ?{hour_sql} GROUP BY symbol) m
                   ON m.symbol = p.symbol AND m.mts = p.ts""",
-            (since_ts,),
+            [since_ts] + hour_params,
         )
         for r in cur.fetchall():
             sym = r["symbol"]

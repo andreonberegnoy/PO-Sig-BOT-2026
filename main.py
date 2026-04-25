@@ -78,11 +78,15 @@ def setup_logging(cfg: dict):
     )
 
 
-async def run(cfg: dict):
+async def run(cfg: dict, config_path: str = "config.yaml"):
     log = logging.getLogger("main")
 
     # 1. Journal
     journal = Journal(cfg["storage"]["db_path"])
+
+    # 1b. Strategy registry (built-in + user-uploaded plugins)
+    from strategy.registry import StrategyRegistry
+    registry = StrategyRegistry(journal=journal)
 
     # 2. Feed — prefer direct Pocket Option WS if PO_SSID is set, else legacy CDP.
     ssid = os.environ.get("PO_SSID") or (cfg.get("po") or {}).get("ssid")
@@ -126,6 +130,7 @@ async def run(cfg: dict):
 
     # 5. State machine
     sm = StateMachine(cfg, feed, tc, journal, notify=tg.notify, send_chart=tg.send_chart)
+    sm.registry = registry   # wire active-strategy switch in
 
     tg.attach(state_machine=sm, journal=journal, feed=feed, stop_cb=stop_all)
 
@@ -139,11 +144,34 @@ async def run(cfg: dict):
 
     log.info("🚀 starting — mode=%s  balance=%s", cfg["mode"], bal)
 
+    # 6. FastAPI / Mini App (best-effort; missing deps shouldn't kill the bot)
+    api_task = None
+    try:
+        import uvicorn
+        from api.server import create_app
+        api_app = create_app(
+            cfg=cfg, config_path=config_path,
+            registry=registry, sm=sm, feed=feed, journal=journal,
+            bot_token=cfg.get("telegram", {}).get("token", ""),
+            allowed_chat_id=int(cfg.get("telegram", {}).get("chat_id") or 0),
+        )
+        api_port = int(os.environ.get("PORT") or os.environ.get("API_PORT") or 8080)
+        api_config = uvicorn.Config(api_app, host="0.0.0.0", port=api_port,
+                                    log_level="info", access_log=False)
+        api_server = uvicorn.Server(api_config)
+        api_task = asyncio.create_task(api_server.serve(), name="api")
+        log.info("🌐 Mini App API on port %d", api_port)
+    except ImportError as e:
+        log.warning("FastAPI/uvicorn not installed — Mini App disabled (%s)", e)
+    except Exception:
+        log.exception("Mini App startup failed — continuing without it")
+
     tasks = [
         asyncio.create_task(sm.run(), name="state_machine"),
         asyncio.create_task(tg.run_polling(), name="tg_polling"),
         asyncio.create_task(tg.daily_report_loop(), name="daily_report"),
     ]
+    if api_task: tasks.append(api_task)
 
     # Wait for stop signal
     await stop_event.wait()
@@ -175,7 +203,7 @@ def main():
     setup_logging(cfg)
 
     try:
-        asyncio.run(run(cfg))
+        asyncio.run(run(cfg, config_path=args.config))
     except KeyboardInterrupt:
         pass
 

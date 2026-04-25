@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>PO-Sig Bot</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<header>
+  <div class="tabs">
+    <button class="tab active" data-tab="status">Статус</button>
+    <button class="tab" data-tab="settings">Настройки</button>
+    <button class="tab" data-tab="strategies">Стратегии</button>
+  </div>
+</header>
+
+<main>
+  <!-- ─── STATUS ─── -->
+  <section id="tab-status" class="tab-panel active">
+    <div class="card">
+      <h2>📊 Состояние</h2>
+      <table class="kv">
+        <tr><td>Режим:</td><td id="m-mode">—</td></tr>
+        <tr><td>Баланс:</td><td id="m-balance">—</td></tr>
+        <tr><td>Стратегия:</td><td id="m-strategy">—</td></tr>
+        <tr><td>Tracked пары:</td><td id="m-tracked">—</td></tr>
+        <tr><td>Активных пар (live):</td><td id="m-active">—</td></tr>
+        <tr><td>Текущая пара:</td><td id="m-pair">—</td></tr>
+        <tr><td>МГ-шаг:</td><td id="m-mg">—</td></tr>
+        <tr><td>Потери сессии:</td><td id="m-loss">—</td></tr>
+        <tr><td>Пауза:</td><td id="m-paused">—</td></tr>
+      </table>
+      <div class="actions">
+        <button id="btn-pause" class="btn">⏸ Pause</button>
+        <button id="btn-resume" class="btn">▶ Resume</button>
+        <button id="btn-refresh" class="btn primary">🔄 Обновить</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ─── SETTINGS ─── -->
+  <section id="tab-settings" class="tab-panel">
+    <div id="settings-list">Загрузка…</div>
+  </section>
+
+  <!-- ─── STRATEGIES ─── -->
+  <section id="tab-strategies" class="tab-panel">
+    <div class="card">
+      <h2>🧠 Стратегии</h2>
+      <ul id="strategies-list" class="strategies"></ul>
+    </div>
+    <div class="card">
+      <h3>📤 Загрузить новую стратегию</h3>
+      <input id="new-strat-name" type="text" placeholder="имя_файла (буквы/цифры/_)" />
+      <textarea id="new-strat-code" rows="14" placeholder="# Python код. Должен экспортировать generate_signals(candles, params).
+# См. strategy/consensus.py для примера."></textarea>
+      <div class="actions">
+        <button id="btn-upload-strat" class="btn primary">Сохранить и активировать</button>
+      </div>
+      <div id="strat-status" class="status-line"></div>
+    </div>
+  </section>
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>

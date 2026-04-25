@@ -18,6 +18,8 @@ COPY . /app
 ENV PYTHONUNBUFFERED=1
 
 # journal/candles.db lives in a Volume mount for persistence
-RUN mkdir -p /app/journal
+RUN mkdir -p /app/journal /app/strategy/user
+
+EXPOSE 8080
 
 CMD ["python3", "main.py"]

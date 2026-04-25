@@ -18,7 +18,7 @@ import time
 from dataclasses import dataclass, field, asdict
 from typing import Optional
 
-from strategy.consensus import generate_signals, DEFAULT_PARAMS
+from strategy.consensus import generate_signals as _consensus_generate_signals, DEFAULT_PARAMS
 from strategy.filter_1000 import scan_all_pairs, pick_best, PairScore
 from feed.history import fetch_candles
 from trading.ws_client import TradeClient, ClosedTrade, OpenedTrade
@@ -90,6 +90,9 @@ class StateMachine:
         self._running = False
         self._tick_event = asyncio.Event()
         self._force_rescan = False   # set True to trigger _rescan_pairs next tick
+
+        # Strategy registry — replaceable at runtime via Mini App
+        self.registry = None   # set externally by main.py if available
 
         feed.on_tick = self._on_tick
         feed.on_assets_update = self._on_assets_update
@@ -268,7 +271,17 @@ class StateMachine:
             return None
         closed = buf[:-1]
         params = {**DEFAULT_PARAMS, **self.cfg["indicator"]}
-        sigs, _ = generate_signals(closed, params)
+        # Use active strategy from registry if available, else builtin consensus
+        if self.registry:
+            try:
+                strat = self.registry.get_active()
+                merged = {**strat.default_params, **params}
+                sigs, _ = strat.generate_signals(closed, merged)
+            except Exception:
+                logger.exception("active strategy failed, fallback to consensus")
+                sigs, _ = _consensus_generate_signals(closed, params)
+        else:
+            sigs, _ = _consensus_generate_signals(closed, params)
         if not sigs:
             return None
         last = sigs[-1]

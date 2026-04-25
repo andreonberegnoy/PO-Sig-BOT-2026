@@ -1,0 +1,186 @@
+"""FastAPI backend serving Mini App + REST API for the bot.
+
+Runs alongside the bot's main asyncio loop via uvicorn.
+Endpoints (under /api):
+    GET  /api/status          — bot state snapshot
+    GET  /api/settings        — full cfg dict
+    PUT  /api/settings        — update cfg by dotted key paths
+    GET  /api/strategies      — list strategies
+    POST /api/strategies      — upload new user strategy {name, code}
+    DELETE /api/strategies/{name}
+    POST /api/strategies/{name}/activate
+
+Mini App static files served at /miniapp/*.
+Auth: Telegram WebApp `initData` in `X-Init-Data` header verified against
+TELEGRAM_TOKEN. Allowed user must match TELEGRAM_CHAT_ID.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+from pathlib import Path
+from typing import Any, Optional
+
+import yaml
+from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+
+from api.auth import verify_init_data
+
+logger = logging.getLogger(__name__)
+
+
+def _set(cfg: dict, key: str, value: Any) -> None:
+    parts = key.split(".")
+    cur = cfg
+    for p in parts[:-1]:
+        if p not in cur or not isinstance(cur[p], dict):
+            cur[p] = {}
+        cur = cur[p]
+    cur[parts[-1]] = value
+
+
+def _save_yaml(cfg: dict, path: str) -> None:
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(cfg, f, sort_keys=False, allow_unicode=True)
+    except Exception:
+        logger.exception("save config.yaml failed")
+
+
+def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_token: str,
+               allowed_chat_id: int) -> FastAPI:
+    """Build a FastAPI app wired to the running bot's components."""
+    app = FastAPI(title="PO-Sig Bot API")
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    # Auth dependency
+    def _auth(request: Request) -> dict:
+        # In production: check initData. In dev (no token): allow.
+        init = request.headers.get("X-Init-Data") or request.query_params.get("initData", "")
+        if not bot_token:
+            return {}
+        user = verify_init_data(init, bot_token)
+        if user is None:
+            raise HTTPException(401, "invalid initData")
+        if allowed_chat_id and user.get("id") != allowed_chat_id:
+            raise HTTPException(403, "user not allowed")
+        return user
+
+    # ─── status ───
+    @app.get("/api/status")
+    async def get_status(request: Request):
+        _auth(request)
+        s = sm.state if sm else None
+        balance = feed.balance() if feed else None
+        return {
+            "mode": cfg.get("mode"),
+            "balance": balance,
+            "current_pair": getattr(s, "current_pair", None),
+            "mg_step": getattr(s, "mg_step", 0),
+            "session_loss": getattr(s, "session_loss", 0.0),
+            "paused": getattr(s, "paused", False),
+            "waiting_resume": getattr(s, "waiting_resume", False),
+            "tracked_pairs": len(getattr(sm, "_tracked", set()) or set()) if sm else 0,
+            "active_strategy": registry.active_name if registry else None,
+            "active_syms": sum(1 for v in (getattr(sm, "_tick_counts", {}) or {}).values() if v > 0) if sm else 0,
+        }
+
+    # ─── settings ───
+    @app.get("/api/settings")
+    async def get_settings(request: Request):
+        _auth(request)
+        return cfg
+
+    @app.put("/api/settings")
+    async def put_settings(request: Request, payload: dict):
+        _auth(request)
+        # payload format: {"key.path": value, ...}
+        if not isinstance(payload, dict):
+            raise HTTPException(400, "expected dict of {dotted_key: value}")
+        for key, value in payload.items():
+            _set(cfg, key, value)
+        _save_yaml(cfg, config_path)
+        return {"updated": list(payload.keys()), "cfg": cfg}
+
+    # ─── strategies ───
+    @app.get("/api/strategies")
+    async def list_strategies(request: Request):
+        _auth(request)
+        return {"strategies": registry.list() if registry else [], "active": registry.active_name if registry else None}
+
+    @app.get("/api/strategies/{name}/code")
+    async def get_strategy_code(request: Request, name: str):
+        _auth(request)
+        # Only user-uploaded strategies expose code (builtin import path)
+        path = Path(f"strategy/user/{name}.py")
+        if path.exists():
+            return {"name": name, "code": path.read_text(encoding="utf-8")}
+        raise HTTPException(404, "no source available")
+
+    @app.post("/api/strategies")
+    async def upload_strategy(request: Request, payload: dict):
+        _auth(request)
+        name = (payload.get("name") or "").strip()
+        code = payload.get("code") or ""
+        if not name or not code:
+            raise HTTPException(400, "name and code required")
+        try:
+            strat = registry.add_user_code(name, code)
+            return {"ok": True, "name": strat.name}
+        except Exception as e:
+            raise HTTPException(400, f"strategy load failed: {e}")
+
+    @app.delete("/api/strategies/{name}")
+    async def delete_strategy(request: Request, name: str):
+        _auth(request)
+        ok = registry.remove_user_strategy(name)
+        if not ok:
+            raise HTTPException(400, "cannot remove (builtin or not found)")
+        return {"ok": True}
+
+    @app.post("/api/strategies/{name}/activate")
+    async def activate_strategy(request: Request, name: str):
+        _auth(request)
+        ok = registry.set_active(name)
+        if not ok:
+            raise HTTPException(404, "strategy not found")
+        return {"ok": True, "active": name}
+
+    # ─── control ───
+    @app.post("/api/control/{action}")
+    async def control(request: Request, action: str):
+        _auth(request)
+        if not sm:
+            raise HTTPException(503, "state machine not ready")
+        if action == "pause":
+            sm.pause(); return {"ok": True}
+        if action == "resume":
+            sm.resume(); return {"ok": True}
+        raise HTTPException(400, f"unknown action: {action}")
+
+    # ─── miniapp static ───
+    miniapp_dir = Path("miniapp")
+    if miniapp_dir.exists():
+        app.mount("/miniapp", StaticFiles(directory=str(miniapp_dir), html=True), name="miniapp")
+
+    @app.get("/", response_class=HTMLResponse)
+    async def root():
+        idx = miniapp_dir / "index.html"
+        if idx.exists():
+            return FileResponse(str(idx))
+        return HTMLResponse("<h1>PO-Sig Bot</h1><p>API up. Mini App not yet deployed.</p>")
+
+    @app.get("/health")
+    async def health():
+        return {"ok": True}
+
+    return app

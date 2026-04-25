@@ -52,6 +52,29 @@ async def fetch_fresh_ssid(
     password: str,
     is_demo: bool = True,
     timeout_sec: int = 90,
+    overall_timeout_sec: int = 240,
+) -> Optional[dict]:
+    """Outer wrapper with hard timeout — Playwright can hang on launch in
+    low-memory containers (Railway), which would freeze the whole bot."""
+    try:
+        return await asyncio.wait_for(
+            _fetch_fresh_ssid_impl(email, password, is_demo, timeout_sec),
+            timeout=overall_timeout_sec,
+        )
+    except asyncio.TimeoutError:
+        logger.error("auto-relogin: HARD TIMEOUT after %ds — Playwright stuck",
+                     overall_timeout_sec)
+        return None
+    except Exception:
+        logger.exception("auto-relogin: unexpected error")
+        return None
+
+
+async def _fetch_fresh_ssid_impl(
+    email: str,
+    password: str,
+    is_demo: bool = True,
+    timeout_sec: int = 90,
 ) -> Optional[dict]:
     """Run headless Chromium → login → capture WebSocket auth frame.
 
@@ -107,16 +130,20 @@ async def fetch_fresh_ssid(
         except Exception:
             pass
 
+    logger.info("auto-relogin: entering async_playwright()")
     async with async_playwright() as p:
-        browser = await p.chromium.launch(
+        logger.info("auto-relogin: launching chromium…")
+        browser = await asyncio.wait_for(p.chromium.launch(
             headless=True,
             args=[
                 "--no-sandbox",
                 "--disable-blink-features=AutomationControlled",
                 "--disable-dev-shm-usage",
                 "--disable-features=IsolateOrigins,site-per-process",
+                "--disable-gpu",
             ],
-        )
+        ), timeout=60)
+        logger.info("auto-relogin: chromium launched")
         try:
             context = await browser.new_context(
                 user_agent=(
@@ -134,8 +161,10 @@ async def fetch_fresh_ssid(
                 Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en', 'ru']});
                 window.chrome = { runtime: {} };
             """)
+            logger.info("auto-relogin: context created, opening new page")
             page = await context.new_page()
             page.on("websocket", _on_ws)
+            logger.info("auto-relogin: page opened")
 
             # 1. Open login page
             logger.info("auto-relogin: navigating to %s", PO_LOGIN_URL)

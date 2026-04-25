@@ -162,6 +162,29 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
             raise HTTPException(404, "strategy not found")
         return {"ok": True, "active": name}
 
+    @app.get("/api/strategies/{name}/params")
+    async def get_strategy_params(request: Request, name: str):
+        _auth(request)
+        s = registry.strategies.get(name)
+        if not s:
+            raise HTTPException(404, "strategy not found")
+        return {
+            "name": name,
+            "params": s.params,
+            "default_params": s.default_params,
+            "schema": s.param_schema,
+        }
+
+    @app.put("/api/strategies/{name}/params")
+    async def put_strategy_params(request: Request, name: str, payload: dict):
+        _auth(request)
+        if not isinstance(payload, dict):
+            raise HTTPException(400, "expected dict {key: value}")
+        ok = registry.update_params(name, payload)
+        if not ok:
+            raise HTTPException(404, "strategy not found")
+        return {"ok": True, "params": registry.strategies[name].params}
+
     # ─── control ───
     @app.post("/api/control/{action}")
     async def control(request: Request, action: str):

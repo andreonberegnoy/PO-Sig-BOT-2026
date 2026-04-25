@@ -84,9 +84,11 @@ async def run(cfg: dict, config_path: str = "config.yaml"):
     # 1. Journal
     journal = Journal(cfg["storage"]["db_path"])
 
-    # 1b. Strategy registry (built-in + user-uploaded plugins)
+    # 1b. Strategy registry (built-in + user-uploaded plugins).
+    # Pass current cfg["indicator"] for one-time migration: if no per-strategy
+    # params yet, seed consensus with user's existing config.yaml indicator settings.
     from strategy.registry import StrategyRegistry
-    registry = StrategyRegistry(journal=journal)
+    registry = StrategyRegistry(journal=journal, global_indicator_cfg=cfg.get("indicator") or {})
 
     # 2. Feed — prefer direct Pocket Option WS if PO_SSID is set, else legacy CDP.
     ssid = os.environ.get("PO_SSID") or (cfg.get("po") or {}).get("ssid")

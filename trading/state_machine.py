@@ -270,17 +270,19 @@ class StateMachine:
         if not buf or len(buf) < 200:
             return None
         closed = buf[:-1]
-        params = {**DEFAULT_PARAMS, **self.cfg["indicator"]}
-        # Use active strategy from registry if available, else builtin consensus
+        # Use active strategy's own params (per-strategy storage), falling back
+        # to global cfg["indicator"] if registry unavailable.
         if self.registry:
             try:
                 strat = self.registry.get_active()
-                merged = {**strat.default_params, **params}
-                sigs, _ = strat.generate_signals(closed, merged)
+                params = strat.merged_params()
+                sigs, _ = strat.generate_signals(closed, params)
             except Exception:
                 logger.exception("active strategy failed, fallback to consensus")
+                params = {**DEFAULT_PARAMS, **self.cfg["indicator"]}
                 sigs, _ = _consensus_generate_signals(closed, params)
         else:
+            params = {**DEFAULT_PARAMS, **self.cfg["indicator"]}
             sigs, _ = _consensus_generate_signals(closed, params)
         if not sigs:
             return None

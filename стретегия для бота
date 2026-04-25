@@ -1,0 +1,18 @@
+from dataclasses import dataclass
+
+NAME = "My Strategy"
+DEFAULT_PARAMS = {"my_param": 14}
+
+@dataclass
+class Signal:
+    side: str          # "buy" или "sell"
+    i: int             # индекс бара сигнала
+    votes: dict
+    total: int
+
+def generate_signals(candles, params):
+    # candles: [{time, open, high, low, close, volume}, ...]
+    # сигнал должен быть на последнем баре чтобы бот вошёл
+    sigs = []
+    # ...твоя логика...
+    return sigs, {}

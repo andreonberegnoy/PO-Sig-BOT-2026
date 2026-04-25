@@ -45,6 +45,13 @@ DEFAULT_PARAMS = {
     "slowPeriod": 21,
 }
 
+# (опционально) Схема для красивой UI в Mini App
+# Без неё бот сам угадает типы (int/float/bool) — но min/max/label/options не задать.
+PARAM_SCHEMA = {
+    "fastPeriod": {"type": "int", "min": 2, "max": 50,  "label": "Fast SMA period"},
+    "slowPeriod": {"type": "int", "min": 5, "max": 200, "label": "Slow SMA period"},
+}
+
 
 # ─── стандартный Signal-объект (обязательный формат) ───────────────────
 @dataclass

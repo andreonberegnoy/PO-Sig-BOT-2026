@@ -39,6 +39,30 @@ DEFAULT_PARAMS = {
     "statsLookbackBars": 1000,
 }
 
+# UI schema for Mini App "Параметры стратегии" tab
+PARAM_SCHEMA = {
+    "minConsensus":         {"type": "int",    "min": 3,    "max": 5,    "label": "Минимум голосов (4-5)"},
+    "requireAll5OnWeekend": {"type": "bool",                             "label": "На выходных требовать 5/5"},
+    "cooldownBars":         {"type": "int",    "min": 0,    "max": 30,   "label": "Cooldown (бары)"},
+    "expiryBars":           {"type": "int",    "min": 1,    "max": 10,   "label": "Экспирация в барах (бэктест)"},
+    "entryMode":            {"type": "choice", "options": ["nextBarOpen", "signalBarClose"], "label": "Режим входа"},
+    "rsiPeriod":            {"type": "int",    "min": 2,    "max": 50,   "label": "RSI period"},
+    "rsiSmoothing":         {"type": "int",    "min": 1,    "max": 30,   "label": "RSI smoothing"},
+    "qqeFactor":            {"type": "float",  "min": 1,    "max": 10,   "step": 0.1, "label": "QQE factor"},
+    "htfMultiplier":        {"type": "int",    "min": 2,    "max": 60,   "label": "HTF multiplier"},
+    "htfMaPeriod":          {"type": "int",    "min": 5,    "max": 200,  "label": "HTF MA period"},
+    "htfMaType":            {"type": "choice", "options": ["EMA", "SMA", "WMA", "RMA"], "label": "HTF MA type"},
+    "atrPeriod":            {"type": "int",    "min": 5,    "max": 50,   "label": "ATR period"},
+    "atrAvgWindow":         {"type": "int",    "min": 20,   "max": 500,  "label": "ATR avg window"},
+    "atrMinRatio":          {"type": "float",  "min": 0.1,  "max": 5,    "step": 0.05, "label": "ATR min ratio"},
+    "atrMaxRatio":          {"type": "float",  "min": 0.5,  "max": 10,   "step": 0.1, "label": "ATR max ratio"},
+    "bbPeriod":             {"type": "int",    "min": 5,    "max": 100,  "label": "BB period"},
+    "bbStdDev":             {"type": "float",  "min": 0.5,  "max": 5,    "step": 0.1, "label": "BB std dev"},
+    "bbZoneDepth":          {"type": "float",  "min": 0.05, "max": 0.95, "step": 0.05, "label": "BB zone depth"},
+    "candleMaxAtrMult":     {"type": "float",  "min": 0.5,  "max": 10,   "step": 0.1, "label": "Max body / ATR"},
+    "candleReqAlign":       {"type": "bool",                             "label": "Свеча в направлении"},
+}
+
 
 @dataclass
 class Signal:

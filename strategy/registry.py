@@ -28,16 +28,22 @@ class Strategy:
         self.name = name
         self.module = module
         self.source = source            # "builtin" | "user"
-        self.default_params = getattr(module, "DEFAULT_PARAMS", {})
-        # callable: (candles, params) -> (signals, diag)
+        self.default_params = dict(getattr(module, "DEFAULT_PARAMS", {}))
+        # Optional UI schema: {"key": {"type": "int", "min": ..., "max": ..., "label": ...}}
+        self.param_schema = dict(getattr(module, "PARAM_SCHEMA", {}))
         gen = getattr(module, "generate_signals", None)
         if not callable(gen):
             raise ValueError(f"Strategy {name!r} missing generate_signals")
         self.generate_signals: Callable = gen
+        # Live params (overrides default_params). Persisted in journal kv_store.
+        self.params: dict = dict(self.default_params)
+
+    def merged_params(self) -> dict:
+        return {**self.default_params, **self.params}
 
 
 class StrategyRegistry:
-    def __init__(self, journal=None):
+    def __init__(self, journal=None, global_indicator_cfg: Optional[dict] = None):
         self.journal = journal
         self.strategies: dict[str, Strategy] = {}
         self.active_name: str = "consensus"
@@ -47,6 +53,21 @@ class StrategyRegistry:
             saved = journal.get("active_strategy")
             if saved and saved in self.strategies:
                 self.active_name = saved
+        # Migration: if no params stored for consensus yet, seed from
+        # config.yaml `indicator:` section (the user's existing settings).
+        if global_indicator_cfg and "consensus" in self.strategies:
+            stored = (journal.get("strategy_params:consensus") if journal else None)
+            if not stored:
+                self.strategies["consensus"].params.update(global_indicator_cfg)
+                if journal:
+                    journal.set("strategy_params:consensus",
+                                self.strategies["consensus"].params)
+        # Load any persisted per-strategy params
+        if journal:
+            for name, strat in self.strategies.items():
+                p = journal.get(f"strategy_params:{name}")
+                if isinstance(p, dict):
+                    strat.params = dict(p)
 
     def _load_builtins(self):
         try:
@@ -123,6 +144,30 @@ class StrategyRegistry:
     def get_active(self) -> Strategy:
         return self.strategies.get(self.active_name) or self.strategies["consensus"]
 
+    def get_params(self, name: str) -> dict:
+        s = self.strategies.get(name)
+        if not s:
+            return {}
+        return dict(s.params)
+
+    def set_param(self, name: str, key: str, value: Any) -> bool:
+        s = self.strategies.get(name)
+        if not s:
+            return False
+        s.params[key] = value
+        if self.journal:
+            self.journal.set(f"strategy_params:{name}", s.params)
+        return True
+
+    def update_params(self, name: str, params: dict) -> bool:
+        s = self.strategies.get(name)
+        if not s:
+            return False
+        s.params.update(params)
+        if self.journal:
+            self.journal.set(f"strategy_params:{name}", s.params)
+        return True
+
     def list(self) -> list[dict]:
         return [
             {
@@ -130,6 +175,8 @@ class StrategyRegistry:
                 "source": s.source,
                 "active": s.name == self.active_name,
                 "default_params": s.default_params,
+                "params": s.params,
+                "param_schema": s.param_schema,
             }
             for s in self.strategies.values()
         ]

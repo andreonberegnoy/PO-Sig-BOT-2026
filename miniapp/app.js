@@ -58,40 +58,9 @@
   document.getElementById("btn-resume").onclick = () => api("/api/control/resume", { method: "POST" }).then(loadStatus);
 
   // ─── SETTINGS ───
-  // Schema mirrors tg/settings_ui.py (must stay in sync)
-  const SCHEMA = {
-    "📊 Индикатор: правила": [
-      { k: "indicator.minConsensus", t: "int", min: 3, max: 5, label: "Минимум голосов (4 или 5)" },
-      { k: "indicator.requireAll5OnWeekend", t: "bool", label: "На выходных требовать 5/5" },
-      { k: "indicator.cooldownBars", t: "int", min: 0, max: 30, label: "Cooldown между сигналами (бары)" },
-      { k: "indicator.expiryBars", t: "int", min: 1, max: 10, label: "Экспирация в барах (бэктест)" },
-      { k: "indicator.entryMode", t: "choice", options: ["nextBarOpen", "signalBarClose"], label: "Режим входа" },
-    ],
-    "📈 Индикатор: RSI-QQE": [
-      { k: "indicator.rsiPeriod", t: "int", min: 2, max: 50, label: "RSI period" },
-      { k: "indicator.rsiSmoothing", t: "int", min: 1, max: 30, label: "RSI smoothing" },
-      { k: "indicator.qqeFactor", t: "float", min: 1, max: 10, step: 0.1, label: "QQE factor" },
-    ],
-    "🌐 Индикатор: HTF": [
-      { k: "indicator.htfMultiplier", t: "int", min: 2, max: 60, label: "HTF multiplier (M1×N)" },
-      { k: "indicator.htfMaPeriod", t: "int", min: 5, max: 200, label: "HTF MA period" },
-      { k: "indicator.htfMaType", t: "choice", options: ["EMA", "SMA", "WMA", "RMA"], label: "HTF MA type" },
-    ],
-    "📉 Индикатор: ATR": [
-      { k: "indicator.atrPeriod", t: "int", min: 5, max: 50, label: "ATR period" },
-      { k: "indicator.atrAvgWindow", t: "int", min: 20, max: 500, label: "ATR avg window" },
-      { k: "indicator.atrMinRatio", t: "float", min: 0.1, max: 5, step: 0.05, label: "ATR min ratio" },
-      { k: "indicator.atrMaxRatio", t: "float", min: 0.5, max: 10, step: 0.1, label: "ATR max ratio" },
-    ],
-    "📊 Индикатор: Bollinger": [
-      { k: "indicator.bbPeriod", t: "int", min: 5, max: 100, label: "BB period" },
-      { k: "indicator.bbStdDev", t: "float", min: 0.5, max: 5, step: 0.1, label: "BB std dev" },
-      { k: "indicator.bbZoneDepth", t: "float", min: 0.05, max: 0.95, step: 0.05, label: "BB zone depth (0-1)" },
-    ],
-    "🕯 Индикатор: свеча": [
-      { k: "indicator.candleMaxAtrMult", t: "float", min: 0.5, max: 10, step: 0.1, label: "Max body / ATR" },
-      { k: "indicator.candleReqAlign", t: "bool", label: "Свеча в направлении сигнала" },
-    ],
+  // Global (cross-strategy) settings only. Indicator parameters are now
+  // per-strategy and rendered dynamically below.
+  const GLOBAL_SCHEMA = {
     "🔍 Фильтр пар": [
       { k: "filter.min_payout", t: "int", min: 50, max: 95, label: "Минимум payout (%)" },
       { k: "filter.payout_floor", t: "int", min: 50, max: 90, label: "Порог смены пары (%)" },
@@ -114,13 +83,58 @@
 
   function getDeep(o, path) { return path.split(".").reduce((a, p) => a?.[p], o); }
 
+  function inferType(value) {
+    if (typeof value === "boolean") return "bool";
+    if (typeof value === "number") return Number.isInteger(value) ? "int" : "float";
+    return "string";
+  }
+
   async function loadSettings() {
     const cont = document.getElementById("settings-list");
     cont.innerHTML = "Загрузка…";
     try {
-      const cfg = await api("/api/settings");
+      const [cfg, stratData] = await Promise.all([
+        api("/api/settings"),
+        api("/api/strategies"),
+      ]);
       cont.innerHTML = "";
-      for (const [cat, items] of Object.entries(SCHEMA)) {
+
+      // ── Strategy-specific section ──
+      const active = stratData.strategies.find((s) => s.active) || stratData.strategies[0];
+      if (active) {
+        const stratDiv = document.createElement("div");
+        stratDiv.className = "category";
+        stratDiv.innerHTML = `<div class="category-title">🧠 Параметры стратегии: <b>${active.name}</b></div>`;
+        const paramKeys = Object.keys(active.default_params || {});
+        for (const key of paramKeys) {
+          const schema = (active.param_schema || {})[key] || {};
+          const value = (active.params || {})[key] ?? active.default_params[key];
+          const t = schema.type || inferType(value);
+          const label = schema.label || key;
+          const row = document.createElement("div");
+          row.className = "setting-row";
+          let input;
+          if (t === "bool") {
+            input = `<input type="checkbox" data-strat-k="${key}" data-strat="${active.name}" data-t="bool" ${value ? "checked" : ""}/>`;
+          } else if (t === "choice" && Array.isArray(schema.options)) {
+            input = `<select data-strat-k="${key}" data-strat="${active.name}" data-t="choice">` +
+              schema.options.map((o) => `<option value="${o}" ${o === value ? "selected" : ""}>${o}</option>`).join("") +
+              `</select>`;
+          } else if (t === "string") {
+            input = `<input type="text" data-strat-k="${key}" data-strat="${active.name}" data-t="string" value="${value ?? ""}"/>`;
+          } else {
+            const step = schema.step || (t === "int" ? 1 : 0.1);
+            input = `<input type="number" data-strat-k="${key}" data-strat="${active.name}" data-t="${t}"
+                            min="${schema.min ?? ""}" max="${schema.max ?? ""}" step="${step}" value="${value ?? ""}"/>`;
+          }
+          row.innerHTML = `<label>${label}<span class="hint">${key}</span></label>${input}`;
+          stratDiv.appendChild(row);
+        }
+        cont.appendChild(stratDiv);
+      }
+
+      // ── Global sections ──
+      for (const [cat, items] of Object.entries(GLOBAL_SCHEMA)) {
         const div = document.createElement("div");
         div.className = "category";
         div.innerHTML = `<div class="category-title">${cat}</div>`;
@@ -145,7 +159,13 @@
         }
         cont.appendChild(div);
       }
-      // attach onchange
+
+      // ── handlers ──
+      const flash = (el, ok) => {
+        el.style.outline = `2px solid ${ok ? "#22c55e" : "#ef4444"}`;
+        setTimeout(() => (el.style.outline = ""), 600);
+      };
+
       cont.querySelectorAll("[data-k]").forEach((el) => {
         el.addEventListener("change", async () => {
           const key = el.dataset.k;
@@ -157,12 +177,25 @@
           else value = el.value;
           try {
             await api("/api/settings", { method: "PUT", body: JSON.stringify({ [key]: value }) });
-            el.style.outline = "2px solid #22c55e";
-            setTimeout(() => (el.style.outline = ""), 600);
-          } catch (e) {
-            el.style.outline = "2px solid #ef4444";
-            console.error(e);
-          }
+            flash(el, true);
+          } catch (e) { flash(el, false); console.error(e); }
+        });
+      });
+      cont.querySelectorAll("[data-strat-k]").forEach((el) => {
+        el.addEventListener("change", async () => {
+          const key = el.dataset.stratK;
+          const strat = el.dataset.strat;
+          const t = el.dataset.t;
+          let value;
+          if (t === "bool") value = el.checked;
+          else if (t === "int") value = parseInt(el.value);
+          else if (t === "float") value = parseFloat(el.value);
+          else value = el.value;
+          try {
+            await api(`/api/strategies/${encodeURIComponent(strat)}/params`,
+                      { method: "PUT", body: JSON.stringify({ [key]: value }) });
+            flash(el, true);
+          } catch (e) { flash(el, false); console.error(e); }
         });
       });
     } catch (e) {

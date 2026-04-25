@@ -114,21 +114,16 @@ class PoDirectFeed:
         self._running = True
         self._recv_task = asyncio.create_task(self._recv_loop(), name="po_direct_recv")
 
-        # wait for successauth — give extra time if relogin is in progress
-        # (Playwright cold-start + login flow can take 30-90s)
-        for attempt in range(3):
-            timeout = 90 if (self._relogin_in_progress or attempt > 0) else 30
-            try:
-                await asyncio.wait_for(self._ready.wait(), timeout=timeout)
-                logger.info("feed ready (assets=%d, balance_demo=%s, balance_real=%s)",
-                            len(self.assets), self.balance_demo, self.balance_real)
-                break
-            except asyncio.TimeoutError:
-                if self._relogin_in_progress:
-                    logger.info("relogin still in progress, waiting another %ds…", timeout)
-                    continue
-                logger.warning("feed not fully ready after %ds — continuing", timeout)
-                break
+        # wait for successauth. If a relogin callback is registered, allow
+        # generous timeout (Playwright cold-start + login takes 30-90s and we
+        # may not see _relogin_in_progress=True yet due to event-loop ordering).
+        timeout = 150 if self._relogin_callback else 30
+        try:
+            await asyncio.wait_for(self._ready.wait(), timeout=timeout)
+            logger.info("feed ready (assets=%d, balance_demo=%s, balance_real=%s)",
+                        len(self.assets), self.balance_demo, self.balance_real)
+        except asyncio.TimeoutError:
+            logger.warning("feed not fully ready after %ds — continuing anyway", timeout)
 
         # Start scheduled relogin loop (only on first connect, not reconnects)
         if (self._relogin_callback and self._scheduled_relogin_task is None

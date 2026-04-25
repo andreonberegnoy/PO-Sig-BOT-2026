@@ -246,6 +246,9 @@ class PoDirectFeed:
     # ---------- WS recv loop ----------
 
     async def _recv_loop(self):
+        """Read frames until WS dies. `_running` stays True (means: bot wants
+        to keep going); only close() flips it False. Background loops (buffer
+        keeper, scheduled relogin) keep running across WS reconnects."""
         try:
             async for raw in self._ws:
                 try:
@@ -257,13 +260,15 @@ class PoDirectFeed:
                     logger.exception("frame handler error")
         except websockets.ConnectionClosed as e:
             logger.warning("WS closed: %s", e)
-            # Schedule auto-reconnect (without re-login) — server may have
-            # temporarily disconnected. This is separate from session-expiry
-            # which is handled via `NotAuthorized` event + `_do_relogin`.
-            if self._running:
-                asyncio.create_task(self._auto_reconnect_loop())
-        finally:
-            self._running = False
+        except Exception:
+            logger.exception("recv loop unexpected error")
+        # Trigger auto-reconnect if bot is still supposed to be running and
+        # we don't already have a reconnect task in flight.
+        if self._running:
+            existing = [t for t in asyncio.all_tasks()
+                        if t.get_name() == "po_auto_reconnect" and not t.done()]
+            if not existing:
+                asyncio.create_task(self._auto_reconnect_loop(), name="po_auto_reconnect")
 
     async def _auto_reconnect_loop(self, max_attempts: int = 10):
         """Reconnect with exponential backoff after a plain WS disconnect.
@@ -588,6 +593,19 @@ class PoDirectFeed:
         key = (symbol, period)
         if key in self._subscribed:
             return
+        # Guard: if WS is dead, don't even try — caller (filter_1000 scan) would
+        # otherwise burn through 30 pairs each yelling 1005. Trigger reconnect
+        # if not already running.
+        if self._ws is None or getattr(self._ws, "state", None) is not None and \
+                getattr(self._ws, "state").name in ("CLOSED", "CLOSING"):
+            logger.warning("subscribe %s: WS not open (%s) — triggering reconnect",
+                           symbol, getattr(getattr(self._ws, "state", None), "name", "None"))
+            if self._running and not any(
+                t.get_name() == "po_direct_recv" and not t.done()
+                for t in asyncio.all_tasks()
+            ):
+                asyncio.create_task(self._auto_reconnect_loop(), name="po_auto_reconnect")
+            raise ConnectionError(f"WS not open, cannot subscribe {symbol}")
         # Pre-fill buffer from local SQLite (persistent history across restarts).
         # Filter by is_demo so demo and real bars never mix.
         try:

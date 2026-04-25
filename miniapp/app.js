@@ -84,6 +84,10 @@
       { k: "schedule.start_hour", t: "int", min: 0, max: 23, label: "Час начала (0-23)" },
       { k: "schedule.end_hour", t: "int", min: 0, max: 24, label: "Час конца (0-24)" },
     ],
+    "📋 Периодический отчёт": [
+      { k: "periodic_report.enabled", t: "bool", label: "Присылать сводку (по окончании торгов или утром при 24/7)" },
+      { k: "periodic_report.hour_when_24_7", t: "int", min: 0, max: 23, label: "Час отправки в режиме 24/7" },
+    ],
   };
 
   function getDeep(o, path) { return path.split(".").reduce((a, p) => a?.[p], o); }

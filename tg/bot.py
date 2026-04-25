@@ -242,3 +242,55 @@ class TelegramBot:
             f"💳 Баланс: ${bal}"
         )
         await self.notify(text)
+
+    # ---------- periodic report (schedule-aware) ----------
+
+    async def periodic_report_loop(self):
+        """Отчёт по таймеру:
+          schedule.enabled=true  → каждый день при наступлении schedule.end_hour
+          schedule.enabled=false → каждый день в periodic_report.hour_when_24_7
+
+        Проверяет каждую минуту, отправляет один раз за календарный день.
+        Если идёт мартингейл — ждёт закрытия цикла перед отправкой."""
+        tz = pytz.timezone(self.cfg["telegram"]["daily_report_timezone"])
+        last_sent_date = None
+        while True:
+            await asyncio.sleep(60)
+            try:
+                pr = self.cfg.get("periodic_report") or {}
+                if not pr.get("enabled"):
+                    continue
+                sched = self.cfg.get("schedule") or {}
+                if sched.get("enabled"):
+                    target_hour = int(sched.get("end_hour", 22)) % 24
+                else:
+                    target_hour = int(pr.get("hour_when_24_7", 9)) % 24
+                now = datetime.now(tz)
+                if now.hour != target_hour or now.minute >= 5:
+                    continue
+                today = now.date()
+                if last_sent_date == today:
+                    continue
+                # Если активный мартингейл — даём ему довестись до WIN.
+                while self.sm and self.sm.state.mg_step > 0:
+                    await asyncio.sleep(30)
+                await self._send_periodic_report()
+                last_sent_date = today
+            except Exception:
+                logger.exception("periodic report loop tick failed")
+
+    async def _send_periodic_report(self):
+        if not self.journal: return
+        since = int(time.time()) - 86400
+        d = self.journal.daily_summary(since, self.cfg["mode"])
+        bal = self.feed.balance() if self.feed else "?"
+        signals = int(d.get("wins", 0)) + int(d.get("losses", 0)) + int(d.get("draws", 0))
+        text = (
+            f"📋 Сводка ({self.cfg['mode']})\n"
+            f"\n"
+            f"💳 Текущий баланс: ${bal}\n"
+            f"💰 Заработано за сутки: *${d['net_profit']:+.2f}*\n"
+            f"📉 Макс. минусов подряд: {d['max_loss_streak']}\n"
+            f"📡 Сигналов: {signals}"
+        )
+        await self.notify(text)

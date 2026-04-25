@@ -95,6 +95,14 @@ telegram:
   daily_report_hour: 7       # UTC+0; час в локальной TZ для отчёта
   daily_report_timezone: "Europe/Kyiv"
 
+# ---- периодический отчёт ----
+# Время отправки зависит от расписания работы:
+#   schedule.enabled=true  → по окончании торгов (schedule.end_hour)
+#   schedule.enabled=false → ежедневно в hour_when_24_7 утра
+periodic_report:
+  enabled: false
+  hour_when_24_7: 9
+
 # ---- хранилище ----
 # Railway Volume mount path: /data (changed from /app/data — earlier path didn't
 # actually mount despite being attached). Files here survive deploys.

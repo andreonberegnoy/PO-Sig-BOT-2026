@@ -53,7 +53,7 @@ class PoDirectFeed:
         is_demo: bool = True,
         ws_url: str = "wss://api-eu.po.market/socket.io/?EIO=4&transport=websocket",
         verify_ssl: bool = True,
-        candles_db_path: str = "data/candles.db",
+        candles_db_path: str = "/data/candles.db",
         relogin_callback=None,
         relogin_interval_hours: float = 12.0,
         relogin_safe_check=None,    # callable() -> bool, True = OK to relogin now

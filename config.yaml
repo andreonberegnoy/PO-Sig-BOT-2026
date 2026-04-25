@@ -86,10 +86,11 @@ telegram:
   daily_report_timezone: "Europe/Kyiv"
 
 # ---- хранилище ----
-# Путь внутри Railway Volume (/app/journal/) — данные переживают рестарты/деплои.
+# Railway Volume mount path: /data (changed from /app/data — earlier path didn't
+# actually mount despite being attached). Files here survive deploys.
 storage:
-  db_path: data/state.db        # внутри Railway Volume → /app/data
-  state_path: data/state.json
+  db_path: /data/state.db
+  state_path: /data/state.json
   log_path: bot.log
   log_level: INFO
 

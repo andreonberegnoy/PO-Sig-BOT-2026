@@ -549,20 +549,26 @@ class PoDirectFeed:
         last_cached_t = int(self._candles[key][-1]["time"]) if self._candles[key] else 0
         gap_sec = now - (last_cached_t + period) if last_cached_t else 0
         if gap_sec > period * 2:
-            # We have a hole between last_cached_t and now — fetch.
+            # We have a hole between last_cached_t and now — fetch backwards
+            # in pages of 200 bars from `now` until we connect to last_cached_t.
             logger.info("subscribe %s P%d: gap of %ds in cache, filling…", symbol, period, gap_sec)
-            # Request multiple pages until we cover the gap (newest first).
             anchor_ts = now
-            for _ in range(15):
+            for it in range(20):
                 await self._request_history_period(symbol, period, 200, end_ts=anchor_ts)
                 await asyncio.sleep(1.0)
-                # Stop once the gap is filled (new bars connect to last_cached_t).
+                # Are bars in [last_cached_t, anchor_ts] dense enough?
                 buf = self._candles[key]
-                if buf and int(buf[-1]["time"]) >= now - period * 3:
-                    # last bar reaches close to "now" — find where new bars start
-                    # if newest bar reaches close to now AND we have density, we're good
-                    break
+                window_bars = [c for c in buf if last_cached_t <= int(c["time"]) <= anchor_ts]
+                expected = max(1, (anchor_ts - last_cached_t) // period)
+                density = len(window_bars) / expected if expected else 1.0
+                # Walk anchor backwards by one full page so next fetch covers
+                # earlier territory. Stop when we've reached close to last_cached_t
+                # OR coverage is ≥95% (some bars may be missing on PO side).
                 anchor_ts -= 200 * period
+                if anchor_ts <= last_cached_t + period or density >= 0.95:
+                    logger.info("subscribe %s P%d: gap filled (density=%.0f%% over %d bars)",
+                                symbol, period, density * 100, expected)
+                    break
 
         # Request more history if buffer still short (cold start case).
         # Bail early if successive requests don't yield new bars (PO depleted).

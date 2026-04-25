@@ -46,6 +46,10 @@ class RuntimeState:
     waiting_resume: bool = False
     day_off_until: int = 0
     mg_step: int = 0
+    # Set to True when bot auto-pauses at end of working hours after closing
+    # a cycle. On reaching start_hour next day, auto-resume (manual /pause
+    # leaves this False so manual pause stays until manual /resume).
+    auto_paused_schedule: bool = False
     # Trade in-flight at the moment of crash/restart. Resolved on startup.
     pending_trade: Optional[dict] = None
     # ↑ {asset, action, amount, pre_balance, open_ts, expiry_sec}
@@ -101,6 +105,34 @@ class StateMachine:
     # ---------- persist ----------
     def _persist(self):
         self.journal.set("runtime_state", self.state.to_dict())
+
+    # ---------- working hours ----------
+    def _within_working_hours(self) -> bool:
+        """Returns True if NOW is within the configured trading window. If
+        schedule.enabled is False, always returns True."""
+        sched = self.cfg.get("schedule") or {}
+        if not sched.get("enabled"):
+            return True
+        try:
+            import datetime as _dt
+            tz_name = (self.cfg.get("telegram") or {}).get("daily_report_timezone") or "Europe/Kyiv"
+            try:
+                import pytz
+                tz = pytz.timezone(tz_name)
+                now = _dt.datetime.now(tz)
+            except Exception:
+                now = _dt.datetime.now()
+            start = int(sched.get("start_hour", 0))
+            end = int(sched.get("end_hour", 24))
+            h = now.hour
+            if start <= end:
+                return start <= h < end
+            else:
+                # window crosses midnight (e.g. 22..6)
+                return h >= start or h < end
+        except Exception:
+            logger.exception("working-hours check failed, defaulting to True")
+            return True
 
     # ---------- analytics: hourly backtest snapshot per pair ----------
     async def _pair_stats_logger_loop(self):
@@ -525,6 +557,16 @@ class StateMachine:
             self._tick_event.clear()
 
             if self.state.paused or self.state.waiting_resume:
+                # Auto-resume if pause was triggered by schedule and working
+                # hours have started again.
+                if (self.state.paused and self.state.auto_paused_schedule
+                        and not self.state.waiting_resume
+                        and self._within_working_hours()):
+                    self.state.paused = False
+                    self.state.auto_paused_schedule = False
+                    self._persist()
+                    await self._notify("☀️ Доброе утро. Рабочее окно открылось — возвращаюсь к торговле.")
+                    continue
                 continue
 
             now = time.time()
@@ -588,6 +630,10 @@ class StateMachine:
 
     # ---------- free scan (no cycle active) ----------
     async def _free_scan_step(self):
+        # Outside working hours: don't ENTER new cycles. (An active MG cycle
+        # goes through _in_cycle_step path, not here, so it keeps running.)
+        if not self._within_working_hours():
+            return
         fired = None
         evaluated = 0
         new_bars = 0
@@ -891,10 +937,23 @@ class StateMachine:
             self.state.session_loss = max(0.0, self.state.session_loss - gained)
             self._reset_cycle()
             self._persist()
-            await self._notify(
-                f"✅ WIN {opened.asset}  +${gained:.2f}  (баланс ${self.feed.balance()}). "
-                f"Сбрасываю мартингейл, возвращаюсь в поиск."
-            )
+            # If we just finished a cycle outside working hours — pause and say
+            # goodnight. We let the cycle finish even after hours (mandatory),
+            # then rest until next start_hour.
+            if not self._within_working_hours():
+                self.state.paused = True
+                self.state.auto_paused_schedule = True
+                self._persist()
+                await self._notify(
+                    f"✅ WIN {opened.asset}  +${gained:.2f}  (баланс ${self.feed.balance()}).\n\n"
+                    f"🌙 Закрыл цикл — пора отдыхать. Хороший день был. "
+                    f"Жду пока наступит рабочее окно (или /resume чтобы возобновить раньше)."
+                )
+            else:
+                await self._notify(
+                    f"✅ WIN {opened.asset}  +${gained:.2f}  (баланс ${self.feed.balance()}). "
+                    f"Сбрасываю мартингейл, возвращаюсь в поиск."
+                )
         elif closed.result == "LOSS":
             self.state.session_loss += opened.amount
             self.state.mg_step += 1

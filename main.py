@@ -301,6 +301,7 @@ async def run(cfg: dict, config_path: str = "config.yaml"):
         asyncio.create_task(sm.run(), name="state_machine"),
         asyncio.create_task(tg.run_polling(), name="tg_polling"),
         asyncio.create_task(tg.daily_report_loop(), name="daily_report"),
+        asyncio.create_task(tg.periodic_report_loop(), name="periodic_report"),
     ]
     if api_task: tasks.append(api_task)
 

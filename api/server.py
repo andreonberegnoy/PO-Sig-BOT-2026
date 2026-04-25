@@ -248,6 +248,33 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
     async def health():
         return {"ok": True}
 
+    @app.get("/api/debug/journal")
+    async def debug_journal(request: Request):
+        """Show journal db path, size, and all state_kv keys with timestamps —
+        helps diagnose why settings don't survive deploys."""
+        _auth(request)
+        import os, sqlite3, time
+        path = getattr(journal, "path", "unknown") if journal else None
+        size = os.path.getsize(path) if path and os.path.exists(path) else None
+        rows = []
+        if journal:
+            try:
+                cur = journal.conn.execute(
+                    "SELECT k, length(v) as vlen, updated_at FROM state_kv ORDER BY k"
+                )
+                rows = [{"key": r[0], "value_bytes": r[1],
+                         "updated_at": r[2],
+                         "updated_ago_sec": int(time.time()) - int(r[2])}
+                        for r in cur.fetchall()]
+            except Exception as e:
+                rows = [{"error": str(e)}]
+        return {
+            "db_path": path,
+            "db_size_bytes": size,
+            "cwd": os.getcwd(),
+            "keys": rows,
+        }
+
     @app.get("/strategy_template")
     async def strategy_template():
         path = Path("strategy/_template.py")

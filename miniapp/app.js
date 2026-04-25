@@ -318,12 +318,12 @@
       { key: "avg_payout",     label: "Средняя выплата" },
       { key: "pct_above_min",  label: "% времени ≥ min" },
       { key: "pct_above_floor",label: "% времени ≥ floor" },
-      { key: "last_wr1",       label: "1-я WR (последн.)" },
+      { key: "last_wr1",       label: "1-я WR" },
       { key: "avg_wr1",        label: "1-я WR (средн.)" },
       { key: "last_wr",        label: "Общая WR" },
       { key: "last_max_streak",label: "Max минусов" },
-      { key: "max_max_streak", label: "Худший streak" },
-      { key: "avg_signals",    label: "Сигналов/окно" },
+      { key: "max_max_streak", label: "Max мин подряд" },
+      { key: "avg_signals",    label: "Кол сигнал" },
       { key: "n_snapshots",    label: "Снапшотов" },
     ];
     // Sort

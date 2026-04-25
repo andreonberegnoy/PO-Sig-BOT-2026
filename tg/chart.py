@@ -116,7 +116,11 @@ def render_chart(
     tick_idx = list(range(0, len(show), step))
     ax.set_xticks(tick_idx)
     ax.set_xticklabels([times[i].strftime("%H:%M") for i in tick_idx])
-    ax.set_xlim(-1, len(show))
+    # Extend right side so the last candle sits at ~2/3 of the chart width
+    # (1/3 of empty space to the right) — matches PocketOption/PoSignals layout
+    # where future space is reserved for the next-bar projection.
+    right_pad = len(show) * 0.5
+    ax.set_xlim(-1, len(show) + right_pad)
     plt.xticks(rotation=0)
     plt.tight_layout()
     plt.savefig(out_path, facecolor=fig.get_facecolor())

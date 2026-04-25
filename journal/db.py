@@ -62,7 +62,9 @@ CREATE TABLE IF NOT EXISTS state_kv (
 
 class Journal:
     def __init__(self, path: str):
+        import os
         self.path = path
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         self.conn = sqlite3.connect(path)
         self.conn.executescript(SCHEMA)
         self.conn.commit()

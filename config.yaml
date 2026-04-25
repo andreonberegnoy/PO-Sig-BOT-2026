@@ -88,8 +88,8 @@ telegram:
 # ---- хранилище ----
 # Путь внутри Railway Volume (/app/journal/) — данные переживают рестарты/деплои.
 storage:
-  db_path: journal/state.db
-  state_path: journal/state.json
+  db_path: data/state.db        # внутри Railway Volume → /app/data
+  state_path: data/state.json
   log_path: bot.log
   log_level: INFO
 

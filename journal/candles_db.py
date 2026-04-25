@@ -19,8 +19,10 @@ logger = logging.getLogger(__name__)
 
 
 class CandlesDB:
-    def __init__(self, path: str = "journal/candles.db"):
+    def __init__(self, path: str = "data/candles.db"):
+        import os
         self.path = path
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         self._lock = threading.Lock()
         self._conn = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
         self._conn.execute("PRAGMA journal_mode=WAL")

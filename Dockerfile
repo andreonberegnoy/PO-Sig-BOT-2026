@@ -11,7 +11,7 @@ COPY . /app
 
 ENV PYTHONUNBUFFERED=1
 
-RUN mkdir -p /app/journal /app/strategy/user
+RUN mkdir -p /app/data /app/strategy/user
 
 EXPOSE 8080
 

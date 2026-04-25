@@ -69,6 +69,8 @@ async def fetch_fresh_ssid(
         logger.error("playwright not installed — auto-relogin disabled")
         return None
 
+    logger.info("auto-relogin: starting headless Chromium (this takes ~30-60s)")
+
     captured: dict = {}
 
     def _on_ws(ws):
@@ -136,13 +138,17 @@ async def fetch_fresh_ssid(
             page.on("websocket", _on_ws)
 
             # 1. Open login page
+            logger.info("auto-relogin: navigating to %s", PO_LOGIN_URL)
             await page.goto(PO_LOGIN_URL, wait_until="domcontentloaded", timeout=30000)
-            await _human_pause(1.0, 2.5)        # человек "оглядывается" на странице
+            logger.info("auto-relogin: page loaded, current URL: %s", page.url)
+            await _human_pause(1.0, 2.5)
 
             # 2. Type credentials char-by-char with realistic delays
             try:
+                logger.info("auto-relogin: typing email")
                 await _human_type(page, "input[name=email], input[type=email]", email)
                 await _human_pause(0.4, 1.0)
+                logger.info("auto-relogin: typing password")
                 await _human_type(page, "input[name=password], input[type=password]", password)
                 await _human_pause(0.5, 1.5)
 
@@ -160,12 +166,15 @@ async def fetch_fresh_ssid(
                         await asyncio.sleep(random.uniform(0.1, 0.3))
                         await page.mouse.move(cx, cy, steps=steps)
                         await _human_pause(0.2, 0.6)
+                    logger.info("auto-relogin: clicking submit")
                     await btn.click()
                 else:
+                    logger.info("auto-relogin: pressing Enter (no submit button found)")
                     await page.keyboard.press("Enter")
             except Exception:
                 logger.exception("login form fill failed")
                 return None
+            logger.info("auto-relogin: form submitted, waiting for WS auth frame…")
 
             # 2. Wait for WS auth frame (handled in event listener)
             deadline = time.time() + timeout_sec

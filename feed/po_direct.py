@@ -79,6 +79,7 @@ class PoDirectFeed:
         self._relogin_in_progress = False
         self._relogin_pending_reason: Optional[str] = None
         self._scheduled_relogin_task: Optional[asyncio.Task] = None
+        self._buffer_keeper_task: Optional[asyncio.Task] = None
         self._pending_event: Optional[str] = None   # for 451- / binary pair
         self._ws: Optional[websockets.ClientConnection] = None
         self._ready = asyncio.Event()
@@ -132,6 +133,13 @@ class PoDirectFeed:
                 self._scheduled_relogin_loop(), name="po_relogin",
             )
 
+        # Start background buffer-keeper: every 60s, check density of last N
+        # bars for each subscribed pair and proactively fill any holes.
+        if self._buffer_keeper_task is None:
+            self._buffer_keeper_task = asyncio.create_task(
+                self._buffer_keeper_loop(), name="po_buffer_keeper",
+            )
+
     async def close(self):
         self._running = False
         try:
@@ -145,6 +153,8 @@ class PoDirectFeed:
             except Exception: logger.exception("recv_task error")
         if self._scheduled_relogin_task and not self._scheduled_relogin_task.done():
             self._scheduled_relogin_task.cancel()
+        if self._buffer_keeper_task and not self._buffer_keeper_task.done():
+            self._buffer_keeper_task.cancel()
 
     # ─── auth refresh ───
     def _is_relogin_safe(self) -> bool:
@@ -519,6 +529,60 @@ class PoDirectFeed:
         if not buf:
             return []
         return list(buf)[-limit:]
+
+    def density(self, symbol: str, period: int = 60, last_n: int = 100) -> float:
+        """Fraction of expected bars present in the most recent `last_n` window.
+        Returns 1.0 if buffer is fully dense, 0.0 if empty.
+
+        Used by state_machine before signal eval — if density < 0.95, indicators
+        would compute on stitched-together candles (skipping gaps) and produce
+        false signals. Skip the tick instead."""
+        buf = self._candles.get((symbol, period))
+        if not buf:
+            return 0.0
+        bars = list(buf)[-last_n:]
+        if len(bars) < 2:
+            return 0.0
+        first_t = int(bars[0]["time"])
+        last_t = int(bars[-1]["time"])
+        expected = max(1, (last_t - first_t) // period + 1)
+        return min(1.0, len(bars) / expected)
+
+    async def _buffer_keeper_loop(self):
+        """Every 60s, scan each subscribed pair's recent buffer for gaps and
+        proactively backfill via loadHistoryPeriod. Keeps signals computing on
+        clean data without depending on subscribe() time."""
+        try:
+            while self._running:
+                await asyncio.sleep(60)
+                for (sym, period) in list(self._subscribed):
+                    try:
+                        d = self.density(sym, period, last_n=120)
+                        if d >= 0.95:
+                            continue
+                        buf = list(self._candles[(sym, period)])
+                        if not buf:
+                            continue
+                        # Fill from newest backwards in pages of 200 until dense
+                        anchor = int(buf[-1]["time"])
+                        first_t = int(buf[0]["time"])
+                        logger.info("buffer keeper: %s P%d density %.0f%% — filling",
+                                    sym, period, d * 100)
+                        for _ in range(8):
+                            await self._request_history_period(sym, period, 200, end_ts=anchor)
+                            await asyncio.sleep(1.0)
+                            new_d = self.density(sym, period, last_n=120)
+                            if new_d >= 0.95:
+                                logger.info("buffer keeper: %s P%d filled (density %.0f%%)",
+                                            sym, period, new_d * 100)
+                                break
+                            anchor -= 200 * period
+                            if anchor <= first_t - 200 * period:
+                                break
+                    except Exception:
+                        logger.exception("buffer keeper failed for %s P%d", sym, period)
+        except asyncio.CancelledError:
+            pass
 
     async def subscribe(self, symbol: str, period: int = 60, history_limit: int = 1060):
         key = (symbol, period)

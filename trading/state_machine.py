@@ -268,6 +268,21 @@ class StateMachine:
         if not buf or len(buf) < 200:
             return None
         closed = buf[:-1]
+        # Buffer-density guard: indicators are meaningless if the recent window
+        # has gaps (RSI/QQE/HTF EMA stitch unrelated bars together → fantom
+        # signals). Background buffer-keeper in feed normally fills these
+        # within ~60s; skip this scan only.
+        period = int(self.cfg.get("filter", {}).get("tf", 60))
+        recent = closed[-100:]
+        if len(recent) >= 2:
+            first_t = int(recent[0]["time"])
+            last_t = int(recent[-1]["time"])
+            expected = max(1, (last_t - first_t) // period + 1)
+            density = len(recent) / expected
+            if density < 0.95:
+                logger.warning("skip %s — buffer density %.0f%% over last %d bars (gap detected)",
+                               symbol, density * 100, len(recent))
+                return None
         # Use active strategy's own params (per-strategy storage), falling back
         # to global cfg["indicator"] if registry unavailable. Time-budget the
         # strategy call so a buggy user plugin can't hang the whole loop.

@@ -299,9 +299,22 @@ class PoDirectFeed:
             except Exception as e:
                 # If server rejects handshake with auth-related status, ssid is
                 # dead — fast-path to relogin instead of burning 10 retries.
-                status = getattr(e, "response", None)
-                code = getattr(status, "status_code", None) if status else None
-                if InvalidStatus and isinstance(e, InvalidStatus) and code in (401, 403):
+                # Check both attribute path and string match (websockets versions
+                # differ: .response.status_code vs .status_code vs only str(e)).
+                msg = str(e)
+                code = None
+                for path in ("response.status_code", "status_code"):
+                    obj = e
+                    for part in path.split("."):
+                        obj = getattr(obj, part, None)
+                        if obj is None: break
+                    if isinstance(obj, int):
+                        code = obj
+                        break
+                if code is None:
+                    if "HTTP 403" in msg: code = 403
+                    elif "HTTP 401" in msg: code = 401
+                if code in (401, 403):
                     logger.warning("WS handshake rejected (HTTP %d) — ssid invalid, "
                                    "fast-path to relogin", code)
                     if self._relogin_callback:

@@ -1,12 +1,12 @@
 :root {
-  --bg: var(--tg-theme-bg-color, #0f1115);
-  --fg: var(--tg-theme-text-color, #e8eaed);
-  --hint: var(--tg-theme-hint-color, #8a93a0);
-  --link: var(--tg-theme-link-color, #6db4ff);
-  --button: var(--tg-theme-button-color, #6db4ff);
-  --button-text: var(--tg-theme-button-text-color, #ffffff);
-  --secondary-bg: var(--tg-theme-secondary-bg-color, #1a1d23);
-  --section-bg: var(--tg-theme-section-bg-color, #1a1d23);
+  --bg: #0f1115;
+  --fg: #e8eaed;
+  --hint: #8a93a0;
+  --link: #6db4ff;
+  --button: #6db4ff;
+  --button-text: #ffffff;
+  --secondary-bg: #1a1d23;
+  --section-bg: #1a1d23;
 }
 
 * { box-sizing: border-box; }

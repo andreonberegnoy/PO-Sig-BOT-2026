@@ -529,6 +529,12 @@ class PoDirectFeed:
         key = (symbol, period)
         buf = self._candles[key]
         bar_time = int(ts // period) * period
+        # Reject obviously stale ticks (after WS reconnect PO sometimes replays
+        # old frames). Without this, append() to the end with an older time
+        # breaks buffer sort order → chart shows duplicate-looking candles
+        # going backwards in time.
+        if buf and bar_time < int(buf[-1]["time"]):
+            return
         bar_rolled_over = False
         if buf and int(buf[-1]["time"]) == bar_time:
             c = buf[-1]

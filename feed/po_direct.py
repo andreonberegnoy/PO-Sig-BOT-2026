@@ -491,7 +491,7 @@ class PoDirectFeed:
         else:
             # new bar — previous bar (buf[-1]) just closed; persist it to DB
             if buf:
-                try: self._candles_db.save(symbol, period, buf[-1])
+                try: self._candles_db.save(symbol, period, buf[-1], is_demo=bool(self.is_demo))
                 except Exception: logger.exception("candles_db.save failed")
                 bar_rolled_over = True
             buf.append({
@@ -521,13 +521,15 @@ class PoDirectFeed:
         key = (symbol, period)
         if key in self._subscribed:
             return
-        # Pre-fill buffer from local SQLite (persistent history across restarts)
+        # Pre-fill buffer from local SQLite (persistent history across restarts).
+        # Filter by is_demo so demo and real bars never mix.
         try:
-            cached = self._candles_db.load(symbol, period, limit=history_limit)
+            cached = self._candles_db.load(symbol, period, limit=history_limit,
+                                           is_demo=bool(self.is_demo))
             if cached:
                 self._candles[key].extend(cached)
-                logger.info("subscribe %s P%d: loaded %d cached candles from db",
-                            symbol, period, len(cached))
+                logger.info("subscribe %s P%d: loaded %d cached candles from db (demo=%s)",
+                            symbol, period, len(cached), bool(self.is_demo))
         except Exception:
             logger.exception("candles_db.load failed for %s", symbol)
 
@@ -647,7 +649,7 @@ class PoDirectFeed:
         self._candles[key].clear()
         self._candles[key].extend(merged)
         # Persist to DB
-        try: self._candles_db.save_many(sym, period, bars)
+        try: self._candles_db.save_many(sym, period, bars, is_demo=bool(self.is_demo))
         except Exception: logger.exception("candles_db.save_many failed")
         logger.info("history %s P%d: +%d bars → total %d in buffer",
                     sym, period, len(bars), len(self._candles[key]))

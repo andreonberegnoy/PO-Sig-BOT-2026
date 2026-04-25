@@ -19,8 +19,13 @@ from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
 
-# Default user-strategy directory (created if absent)
-USER_DIR = Path("strategy/user")
+# Default user-strategy directory: prefer persistent volume so uploads via
+# Mini App survive container redeploys. Falls back to in-image path for local
+# dev (volume not mounted).
+import os as _os
+_VOLUME_DIR = Path("/app/data/user_strategies")
+_REPO_DIR = Path("strategy/user")
+USER_DIR = _VOLUME_DIR if _os.path.isdir("/app/data") else _REPO_DIR
 
 
 class Strategy:

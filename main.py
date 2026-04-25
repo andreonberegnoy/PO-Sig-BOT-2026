@@ -98,6 +98,26 @@ async def run(cfg: dict, config_path: str = "config.yaml"):
 
     journal = Journal(db_path)
 
+    # Apply persistent settings overrides (saved via Mini App PUT /api/settings).
+    # config.yaml lives in the container image and is reset on each deploy;
+    # journal kv_store sits on the volume and survives. Overlay survives.
+    try:
+        overrides = journal.get("settings_overrides") or {}
+        if overrides:
+            def _set_dotted(d, key, value):
+                parts = key.split(".")
+                cur = d
+                for p in parts[:-1]:
+                    if p not in cur or not isinstance(cur[p], dict):
+                        cur[p] = {}
+                    cur = cur[p]
+                cur[parts[-1]] = value
+            for key, value in overrides.items():
+                _set_dotted(cfg, key, value)
+            log.info("applied %d persisted settings overrides", len(overrides))
+    except Exception:
+        log.exception("loading settings_overrides failed")
+
     # 1b. Strategy registry (built-in + user-uploaded plugins).
     # Pass current cfg["indicator"] for one-time migration: if no per-strategy
     # params yet, seed consensus with user's existing config.yaml indicator settings.

@@ -115,7 +115,17 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
             raise HTTPException(400, "expected dict of {dotted_key: value}")
         for key, value in payload.items():
             _set(cfg, key, value)
+        # Persist BOTH to file (dev workflow) AND SQLite (survives redeploy:
+        # config.yaml is baked into container image, kv_store sits on volume).
         _save_yaml(cfg, config_path)
+        if journal:
+            try:
+                overrides = journal.get("settings_overrides") or {}
+                for key, value in payload.items():
+                    overrides[key] = value
+                journal.set("settings_overrides", overrides)
+            except Exception:
+                logger.exception("failed to persist settings_overrides to journal")
         return {"updated": list(payload.keys()), "cfg": cfg}
 
     # ─── strategies ───
@@ -128,7 +138,8 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
     async def get_strategy_code(request: Request, name: str):
         _auth(request)
         # Only user-uploaded strategies expose code (builtin import path)
-        path = Path(f"strategy/user/{name}.py")
+        from strategy.registry import USER_DIR
+        path = USER_DIR / f"{name}.py"
         if path.exists():
             return {"name": name, "code": path.read_text(encoding="utf-8")}
         raise HTTPException(404, "no source available")

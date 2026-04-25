@@ -253,8 +253,9 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
         """Show journal db path, size, and all state_kv keys with timestamps —
         helps diagnose why settings don't survive deploys.
         No auth — read-only, no secrets exposed (only key names + sizes)."""
-        import os, sqlite3, time
+        import os, time
         path = getattr(journal, "path", "unknown") if journal else None
+        abs_path = os.path.abspath(path) if path else None
         size = os.path.getsize(path) if path and os.path.exists(path) else None
         rows = []
         if journal:
@@ -268,11 +269,33 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
                         for r in cur.fetchall()]
             except Exception as e:
                 rows = [{"error": str(e)}]
+        # List /app/data so we can see what's actually persisted on the volume
+        data_dir_listing = []
+        for d in ("/app/data", "data", "/app"):
+            try:
+                if os.path.isdir(d):
+                    items = []
+                    for name in sorted(os.listdir(d)):
+                        full = os.path.join(d, name)
+                        if os.path.isfile(full):
+                            try:
+                                items.append({
+                                    "name": name,
+                                    "size": os.path.getsize(full),
+                                    "mtime": int(os.path.getmtime(full)),
+                                })
+                            except Exception:
+                                pass
+                    data_dir_listing.append({"dir": d, "files": items})
+            except Exception:
+                pass
         return {
-            "db_path": path,
+            "db_path_config": path,
+            "db_path_abs": abs_path,
             "db_size_bytes": size,
             "cwd": os.getcwd(),
             "keys": rows,
+            "filesystem": data_dir_listing,
         }
 
     @app.get("/strategy_template")

@@ -45,9 +45,11 @@ class TelegramBot:
         self.feed = feed
         self._stop_cb = stop_cb
 
-    async def notify(self, text: str):
+    async def notify(self, text: str, parse_mode: Optional[str] = None):
         try:
-            await self.bot.send_message(self.chat_id, text, disable_web_page_preview=True)
+            await self.bot.send_message(self.chat_id, text,
+                                        disable_web_page_preview=True,
+                                        parse_mode=parse_mode)
         except Exception as e:
             logger.warning("tg send failed: %s", e)
 

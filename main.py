@@ -135,19 +135,35 @@ async def run(cfg: dict, config_path: str = "config.yaml"):
             fn = notify_holder.get("fn")
             if not fn:
                 return
+            msg = (
+                "🔴 Pocket Option session протухла — нужно обновить cookies (~раз в месяц).\n"
+                "Торговля остановлена пока не обновишь.\n\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                "ШАГ 1. Открой Terminal на Mac и выполни:\n\n"
+                '<code>cd "/Users/andrii/Desktop/Cloude Projects/MY PO-SIG BOT"\n'
+                "python3 tools/make_storage_state.py</code>\n\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                "ШАГ 2. Откроется окно Chromium:\n"
+                "   • залогинься в Pocket Option (email + пароль)\n"
+                "   • дождись пока загрузится трейдинговая страница\n"
+                "   • закрой модалку Unlock A New Location если появится\n"
+                "   • вернись в Terminal и нажми Enter\n\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                "ШАГ 3. Залей новые cookies в Railway (одна команда):\n\n"
+                '<code>railway variables --set "PO_STORAGE_STATE_B64=$(base64 -i state.json | tr -d \'\\n\')"</code>\n\n'
+                "━━━━━━━━━━━━━━━━━━\n"
+                "ШАГ 4. Railway сам пересоберёт контейнер. Через ~1-2 минуты "
+                "придёт сообщение что бот снова работает."
+            )
             try:
-                await fn(
-                    "🔴 Pocket Option session expired.\n\n"
-                    "Refresh required (≈ once per month):\n"
-                    "1. On your Mac run: python3 tools/make_storage_state.py\n"
-                    "2. Log in manually in the opened browser\n"
-                    "3. Copy the base64 (the script prints the command)\n"
-                    "4. Paste into Railway → Variables → PO_STORAGE_STATE_B64\n"
-                    "5. Redeploy.\n\n"
-                    "Trading is paused until session is refreshed."
-                )
+                await fn(msg, parse_mode="HTML")
+            except TypeError:
+                # Old notify signature — fallback to plain text without <code>
+                plain = msg.replace("<code>", "").replace("</code>", "")
+                try: await fn(plain)
+                except Exception: log.exception("notify session-expired failed")
             except Exception:
-                logger.exception("notify session-expired failed") if False else None
+                log.exception("notify session-expired failed")
 
         po_state_b64 = os.environ.get("PO_STORAGE_STATE_B64")
         po_email = os.environ.get("PO_EMAIL")

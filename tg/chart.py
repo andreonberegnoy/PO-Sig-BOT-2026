@@ -81,17 +81,18 @@ def render_chart(
                 ha="center", color="#ef4444", fontsize=16, fontweight="bold",
             )
 
-    # Title + stats plaque
+    # Title + stats plaque (po-signals.com HUD style, ASCII-safe for matplotlib)
     wr_color = "#86feac" if analysis.wr >= 60 else ("#fdf647" if analysis.wr >= 53 else "#ffffff")
     lines = [
-        f"CONSENSUS 4/5  |  {symbol}  |  expiry {merged_params['expiryBars']} bars",
-        f"Total:   {analysis.wr:.0f}%   (W {analysis.wins} / L {analysis.losses})",
-        f"1st trade WR:   {analysis.wr1:.0f}%",
-        f"Max losses before WIN: {analysis.max_loss_streak_before_win}    overall: {analysis.max_loss_streak_overall}",
+        f"◉ CONSENSUS 4/5    Экспир: {merged_params['expiryBars']} бара",
+        f"◆ Общая: {analysis.wr:.0f}%    ✓ {analysis.wins} : ✗ {analysis.losses}",
+        f"◆ 1-я сделка: {analysis.wr1:.0f}%",
+        f"◆ Макс. минусов до ✓: {analysis.max_loss_streak_before_win}    всего: {analysis.max_loss_streak_overall}",
     ]
     if analysis.recent_results:
-        last = analysis.recent_results[-30:]
-        lines.append(f"Last {len(last)}: " + "".join("+" if x else "-" for x in last))
+        last = analysis.recent_results[-25:]
+        lines.append("")
+        lines.append(f"Последние {len(last)}: " + "".join("✓" if x else "✗" for x in last))
 
     txt = "\n".join(lines)
     ax.text(0.99, 0.97, txt, transform=ax.transAxes, ha="right", va="top",

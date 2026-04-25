@@ -11,7 +11,10 @@ COPY . /app
 
 ENV PYTHONUNBUFFERED=1
 
-RUN mkdir -p /app/data /app/strategy/user
+RUN mkdir -p /app/strategy/user
+# NOTE: do NOT create /app/data here — Railway mounts the persistent volume at
+# /app/data, and pre-existing directory in the image can prevent the mount.
+# main.py creates the dir via os.makedirs() at runtime if needed.
 
 EXPOSE 8080
 

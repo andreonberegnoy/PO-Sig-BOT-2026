@@ -121,16 +121,57 @@ async def run(cfg: dict, config_path: str = "config.yaml"):
             is_demo = is_demo_env.strip() in ("1", "true", "yes")
         else:
             is_demo = (cfg["mode"] == "paper")
-        # Optional: auto-relogin via Playwright (PO_EMAIL + PO_PASSWORD must be set)
+        # Optional: auto-relogin. Two modes (preferred → fallback):
+        #   1. PO_STORAGE_STATE_B64 — base64 of state.json from a real browser
+        #      login (generated locally via tools/make_storage_state.py).
+        #      Bypasses Cloudflare since cookies make us a "returning visitor".
+        #   2. PO_EMAIL + PO_PASSWORD — Playwright fills the form. Blocked by
+        #      Cloudflare on most datacenter IPs (Railway, Fly, etc).
         relogin_cb = None
+        notify_holder: dict = {}            # filled after TelegramBot is created
+        consecutive_failures = {"n": 0}     # avoid spamming on every reconnect
+
+        async def _notify_session_expired():
+            fn = notify_holder.get("fn")
+            if not fn:
+                return
+            try:
+                await fn(
+                    "🔴 Pocket Option session expired.\n\n"
+                    "Refresh required (≈ once per month):\n"
+                    "1. On your Mac run: python3 tools/make_storage_state.py\n"
+                    "2. Log in manually in the opened browser\n"
+                    "3. Copy the base64 (the script prints the command)\n"
+                    "4. Paste into Railway → Variables → PO_STORAGE_STATE_B64\n"
+                    "5. Redeploy.\n\n"
+                    "Trading is paused until session is refreshed."
+                )
+            except Exception:
+                logger.exception("notify session-expired failed") if False else None
+
+        po_state_b64 = os.environ.get("PO_STORAGE_STATE_B64")
         po_email = os.environ.get("PO_EMAIL")
         po_password = os.environ.get("PO_PASSWORD")
-        if po_email and po_password:
+
+        if po_state_b64:
+            from feed.auto_relogin import fetch_fresh_ssid_via_state
+            async def _relogin():
+                fresh = await fetch_fresh_ssid_via_state(po_state_b64, is_demo=is_demo)
+                if fresh:
+                    consecutive_failures["n"] = 0
+                else:
+                    consecutive_failures["n"] += 1
+                    if consecutive_failures["n"] == 2:   # notify once after second fail
+                        await _notify_session_expired()
+                return fresh
+            relogin_cb = _relogin
+            log.info("auto-relogin enabled via storage_state (cookie-based)")
+        elif po_email and po_password:
             from feed.auto_relogin import fetch_fresh_ssid
             async def _relogin():
                 return await fetch_fresh_ssid(po_email, po_password, is_demo=is_demo)
             relogin_cb = _relogin
-            log.info("auto-relogin enabled (every ~12h + on session error)")
+            log.info("auto-relogin enabled via email/password (may be blocked by Cloudflare)")
 
         # Will be wired to state_machine.state.mg_step==0 once sm exists
         feed_relogin_safe_check = lambda: True
@@ -157,6 +198,11 @@ async def run(cfg: dict, config_path: str = "config.yaml"):
 
     # 4. Telegram (bot first so state machine can call notify)
     tg = TelegramBot(cfg)
+    # Wire notify into relogin closure (was created before tg existed)
+    try:
+        notify_holder["fn"] = tg.notify
+    except NameError:
+        pass    # po_feed mode — no relogin closure
     stop_event = asyncio.Event()
     async def stop_all():
         stop_event.set()

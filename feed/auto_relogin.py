@@ -17,6 +17,7 @@ Browser opens for ~30-60 seconds then closes — no persistent overhead.
 """
 
 import asyncio
+import base64
 import json
 import logging
 import random
@@ -45,6 +46,135 @@ async def _human_type(page, selector: str, text: str):
 
 async def _human_pause(min_s: float = 0.4, max_s: float = 1.4):
     await asyncio.sleep(random.uniform(min_s, max_s))
+
+
+def _make_ws_capture():
+    """Build a captured-dict + websocket listener that pulls auth frames.
+
+    Returns (captured: dict, on_ws: callable). The dict is mutated when an
+    auth frame is observed."""
+    captured: dict = {}
+
+    def _on_ws(ws):
+        async def _on_frame_sent(payload_or_data):
+            data = getattr(payload_or_data, "payload", None) or payload_or_data
+            if not isinstance(data, str):
+                return
+            if not data.startswith("42[\"auth\""):
+                return
+            try:
+                m = re.match(r'^42(\[.+\])$', data, re.DOTALL)
+                if not m:
+                    return
+                arr = json.loads(m.group(1))
+                if not isinstance(arr, list) or len(arr) < 2:
+                    return
+                payload = arr[1]
+                if not isinstance(payload, dict):
+                    return
+                if not captured:
+                    captured["ssid"] = payload.get("session")
+                    captured["uid"] = int(payload.get("uid") or 0)
+                    captured["is_demo"] = bool(payload.get("isDemo"))
+                    captured["ws_url"] = ws.url
+                    logger.info("auto-relogin: captured ssid (uid=%d, demo=%s, ws=%s)",
+                                captured["uid"], captured["is_demo"], captured["ws_url"])
+            except Exception:
+                logger.exception("auth frame parse failed")
+        try:
+            ws.on("framesent", _on_frame_sent)
+        except Exception:
+            pass
+
+    return captured, _on_ws
+
+
+async def fetch_fresh_ssid_via_state(
+    state_b64: str,
+    is_demo: bool = True,
+    timeout_sec: int = 60,
+    overall_timeout_sec: int = 180,
+) -> Optional[dict]:
+    """Use a pre-saved storage_state (cookies+localStorage from a real browser
+    login) to skip the login form. Cloudflare won't challenge a returning
+    visitor with valid cookies. Generated locally via tools/make_storage_state.py."""
+    try:
+        return await asyncio.wait_for(
+            _fetch_via_state_impl(state_b64, is_demo, timeout_sec),
+            timeout=overall_timeout_sec,
+        )
+    except asyncio.TimeoutError:
+        logger.error("auto-relogin (state): HARD TIMEOUT after %ds", overall_timeout_sec)
+        return None
+    except Exception:
+        logger.exception("auto-relogin (state): unexpected error")
+        return None
+
+
+async def _fetch_via_state_impl(state_b64: str, is_demo: bool, timeout_sec: int) -> Optional[dict]:
+    try:
+        from playwright.async_api import async_playwright
+    except ImportError:
+        logger.error("playwright not installed")
+        return None
+
+    # Decode + write state.json to a temp file (Playwright wants a path or dict)
+    try:
+        raw = base64.b64decode(state_b64)
+        state_obj = json.loads(raw)
+    except Exception:
+        logger.exception("auto-relogin (state): failed to decode PO_STORAGE_STATE_B64")
+        return None
+
+    captured, on_ws = _make_ws_capture()
+    logger.info("auto-relogin (state): launching chromium with saved session")
+
+    async with async_playwright() as p:
+        browser = await asyncio.wait_for(p.chromium.launch(
+            headless=True,
+            args=[
+                "--no-sandbox",
+                "--disable-blink-features=AutomationControlled",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+            ],
+        ), timeout=60)
+        try:
+            context = await browser.new_context(
+                storage_state=state_obj,
+                user_agent=(
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/147.0.0.0 Safari/537.36"
+                ),
+                viewport={"width": 1280, "height": 800},
+                locale="en-US",
+            )
+            await context.add_init_script(
+                "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});"
+            )
+            page = await context.new_page()
+            page.on("websocket", on_ws)
+
+            target = PO_TRADING_URL if is_demo else "https://pocketoption.com/en/cabinet/quick-high-low/"
+            logger.info("auto-relogin (state): navigating to %s", target)
+            try:
+                await page.goto(target, wait_until="domcontentloaded", timeout=60000)
+            except Exception as e:
+                logger.warning("auto-relogin (state): goto failed (%s) — continuing, WS may still fire", e)
+            logger.info("auto-relogin (state): URL=%s, waiting for WS auth frame…", page.url)
+
+            deadline = time.time() + timeout_sec
+            while time.time() < deadline and not captured:
+                await asyncio.sleep(1)
+
+            if not captured.get("ssid"):
+                logger.error("auto-relogin (state): no auth frame within %ds — session likely expired", timeout_sec)
+                return None
+            return captured
+        finally:
+            try: await browser.close()
+            except Exception: pass
 
 
 async def fetch_fresh_ssid(

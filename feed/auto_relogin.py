@@ -169,10 +169,13 @@ async def _fetch_fresh_ssid_impl(
             # 1. Open login page
             logger.info("auto-relogin: navigating to %s", PO_LOGIN_URL)
             try:
-                await page.goto(PO_LOGIN_URL, wait_until="commit", timeout=60000)
-            except Exception as e:
-                logger.warning("auto-relogin: goto first attempt failed (%s), retrying with load", e)
                 await page.goto(PO_LOGIN_URL, wait_until="load", timeout=60000)
+            except Exception as e:
+                logger.warning("auto-relogin: goto load failed (%s), trying domcontentloaded", e)
+                try:
+                    await page.goto(PO_LOGIN_URL, wait_until="domcontentloaded", timeout=60000)
+                except Exception as e2:
+                    logger.warning("auto-relogin: goto domcontentloaded also failed (%s)", e2)
             logger.info("auto-relogin: page loaded, current URL: %s", page.url)
             # Wait for the login form to actually appear (commit fires very early)
             email_selector = "input[name=email], input[type=email], input[name='email']"
@@ -191,10 +194,15 @@ async def _fetch_fresh_ssid_impl(
                     iframes = await page.evaluate(
                         "() => Array.from(document.querySelectorAll('iframe')).map(f => f.src)"
                     )
-                    logger.warning("auto-relogin: title=%r", title)
+                    html = await page.evaluate(
+                        "() => document.documentElement ? document.documentElement.outerHTML.slice(0, 3000) : 'no html'"
+                    )
+                    ready = await page.evaluate("() => document.readyState")
+                    logger.warning("auto-relogin: title=%r readyState=%s", title, ready)
                     logger.warning("auto-relogin: body[:500]=%r", body_text)
                     logger.warning("auto-relogin: inputs=%s", inputs)
                     logger.warning("auto-relogin: iframes=%s", iframes)
+                    logger.warning("auto-relogin: html[:3000]=%s", html)
                 except Exception:
                     logger.exception("auto-relogin: page dump failed")
             await _human_pause(1.0, 2.5)

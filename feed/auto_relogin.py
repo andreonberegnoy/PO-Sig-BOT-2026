@@ -56,6 +56,11 @@ def _make_ws_capture():
     captured: dict = {}
 
     def _on_ws(ws):
+        # Only capture from real trading endpoints, ignore analytics/events WS
+        # which also send 42["auth", ...] frames with non-trading session tokens.
+        if "api-" not in ws.url or ".po.market" not in ws.url:
+            logger.debug("auto-relogin: ignoring non-trading WS %s", ws.url)
+            return
         async def _on_frame_sent(payload_or_data):
             data = getattr(payload_or_data, "payload", None) or payload_or_data
             if not isinstance(data, str):
@@ -89,6 +94,9 @@ def _make_ws_capture():
     return captured, _on_ws
 
 
+_state_relogin_lock = asyncio.Lock()
+
+
 async def fetch_fresh_ssid_via_state(
     state_b64: str,
     is_demo: bool = True,
@@ -97,18 +105,25 @@ async def fetch_fresh_ssid_via_state(
 ) -> Optional[dict]:
     """Use a pre-saved storage_state (cookies+localStorage from a real browser
     login) to skip the login form. Cloudflare won't challenge a returning
-    visitor with valid cookies. Generated locally via tools/make_storage_state.py."""
-    try:
-        return await asyncio.wait_for(
-            _fetch_via_state_impl(state_b64, is_demo, timeout_sec),
-            timeout=overall_timeout_sec,
-        )
-    except asyncio.TimeoutError:
-        logger.error("auto-relogin (state): HARD TIMEOUT after %ds", overall_timeout_sec)
+    visitor with valid cookies. Generated locally via tools/make_storage_state.py.
+
+    Module-level lock prevents two Playwright instances racing each other
+    (each captures partial state and clobbers the other's results)."""
+    if _state_relogin_lock.locked():
+        logger.warning("auto-relogin (state): another attempt already in progress, skipping")
         return None
-    except Exception:
-        logger.exception("auto-relogin (state): unexpected error")
-        return None
+    async with _state_relogin_lock:
+        try:
+            return await asyncio.wait_for(
+                _fetch_via_state_impl(state_b64, is_demo, timeout_sec),
+                timeout=overall_timeout_sec,
+            )
+        except asyncio.TimeoutError:
+            logger.error("auto-relogin (state): HARD TIMEOUT after %ds", overall_timeout_sec)
+            return None
+        except Exception:
+            logger.exception("auto-relogin (state): unexpected error")
+            return None
 
 
 async def _fetch_via_state_impl(state_b64: str, is_demo: bool, timeout_sec: int) -> Optional[dict]:

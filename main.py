@@ -286,7 +286,7 @@ async def run(cfg: dict, config_path: str = "config.yaml"):
         )
         api_port = int(os.environ.get("PORT") or os.environ.get("API_PORT") or 8080)
         api_config = uvicorn.Config(api_app, host="0.0.0.0", port=api_port,
-                                    log_level="info", access_log=False)
+                                    log_level="info", access_log=True)
         api_server = uvicorn.Server(api_config)
         api_task = asyncio.create_task(api_server.serve(), name="api")
         log.info("🌐 Mini App API on port %d", api_port)

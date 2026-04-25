@@ -109,7 +109,14 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
 
     @app.put("/api/settings")
     async def put_settings(request: Request, payload: dict):
-        _auth(request)
+        logger.info("PUT /api/settings: request received, payload keys=%s, has_init_data=%s",
+                    list(payload.keys()) if isinstance(payload, dict) else type(payload).__name__,
+                    bool(request.headers.get("X-Init-Data") or request.query_params.get("initData")))
+        try:
+            _auth(request)
+        except Exception as e:
+            logger.warning("PUT /api/settings: auth FAILED — %s", e)
+            raise
         # payload format: {"key.path": value, ...}
         if not isinstance(payload, dict):
             raise HTTPException(400, "expected dict of {dotted_key: value}")

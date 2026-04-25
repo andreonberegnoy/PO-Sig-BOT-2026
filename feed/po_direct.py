@@ -272,8 +272,13 @@ class PoDirectFeed:
 
     async def _auto_reconnect_loop(self, max_attempts: int = 10):
         """Reconnect with exponential backoff after a plain WS disconnect.
-        Re-uses the existing ssid (no relogin)."""
+        Re-uses the existing ssid (no relogin) UNLESS the server rejects
+        with HTTP 401/403 — that means ssid is invalid, no point retrying."""
         import random
+        try:
+            from websockets.exceptions import InvalidStatus
+        except Exception:
+            InvalidStatus = None
         for attempt in range(1, max_attempts + 1):
             wait = min(60, 2 ** attempt + random.uniform(0, 1))
             logger.info("WS auto-reconnect attempt %d in %.1fs", attempt, wait)
@@ -291,7 +296,18 @@ class PoDirectFeed:
                 logger.info("WS auto-reconnect successful (attempt %d, %d pairs)",
                             attempt, len(old_subs))
                 return
-            except Exception:
+            except Exception as e:
+                # If server rejects handshake with auth-related status, ssid is
+                # dead — fast-path to relogin instead of burning 10 retries.
+                status = getattr(e, "response", None)
+                code = getattr(status, "status_code", None) if status else None
+                if InvalidStatus and isinstance(e, InvalidStatus) and code in (401, 403):
+                    logger.warning("WS handshake rejected (HTTP %d) — ssid invalid, "
+                                   "fast-path to relogin", code)
+                    if self._relogin_callback:
+                        asyncio.create_task(self._do_relogin(reason=f"http_{code}"),
+                                            name="po_relogin_403")
+                    return
                 logger.exception("auto-reconnect attempt %d failed", attempt)
         logger.error("auto-reconnect gave up after %d attempts — triggering relogin", max_attempts)
         if self._relogin_callback:

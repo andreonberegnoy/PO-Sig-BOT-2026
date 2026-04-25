@@ -107,11 +107,24 @@ async def run(cfg: dict, config_path: str = "config.yaml"):
             is_demo = is_demo_env.strip() in ("1", "true", "yes")
         else:
             is_demo = (cfg["mode"] == "paper")
+        # Optional: auto-relogin via Playwright (PO_EMAIL + PO_PASSWORD must be set)
+        relogin_cb = None
+        po_email = os.environ.get("PO_EMAIL")
+        po_password = os.environ.get("PO_PASSWORD")
+        if po_email and po_password:
+            from feed.auto_relogin import fetch_fresh_ssid
+            async def _relogin():
+                return await fetch_fresh_ssid(po_email, po_password, is_demo=is_demo)
+            relogin_cb = _relogin
+            log.info("auto-relogin enabled (every ~12h + on session error)")
+
         feed = PoDirectFeed(
             ssid=ssid, uid=uid,
             is_demo=is_demo,
             ws_url=ws_url,
             verify_ssl=False,   # macOS-Python cert issue; PO is wss:// pinned anyway
+            relogin_callback=relogin_cb,
+            relogin_interval_hours=float(os.environ.get("PO_RELOGIN_HOURS") or 12.0),
         )
         await feed.connect()
     else:

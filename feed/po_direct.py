@@ -54,6 +54,8 @@ class PoDirectFeed:
         ws_url: str = "wss://api-eu.po.market/socket.io/?EIO=4&transport=websocket",
         verify_ssl: bool = True,
         candles_db_path: str = "journal/candles.db",
+        relogin_callback=None,
+        relogin_interval_hours: float = 12.0,
     ):
         self.ssid = ssid
         self.uid = int(uid)
@@ -70,6 +72,10 @@ class PoDirectFeed:
         self._candles: dict[tuple, deque] = defaultdict(lambda: deque(maxlen=2000))
         self._subscribed: set[tuple] = set()
         self._candles_db = CandlesDB(candles_db_path)
+        self._relogin_callback = relogin_callback   # async () -> {"ssid", "uid", "ws_url"}
+        self._relogin_interval = float(relogin_interval_hours) * 3600
+        self._relogin_in_progress = False
+        self._scheduled_relogin_task: Optional[asyncio.Task] = None
         self._pending_event: Optional[str] = None   # for 451- / binary pair
         self._ws: Optional[websockets.ClientConnection] = None
         self._ready = asyncio.Event()
@@ -113,6 +119,13 @@ class PoDirectFeed:
         except asyncio.TimeoutError:
             logger.warning("feed not fully ready after 30s — continuing; incoming data may still settle")
 
+        # Start scheduled relogin loop (only on first connect, not reconnects)
+        if (self._relogin_callback and self._scheduled_relogin_task is None
+                and self._relogin_interval > 0):
+            self._scheduled_relogin_task = asyncio.create_task(
+                self._scheduled_relogin_loop(), name="po_relogin",
+            )
+
     async def close(self):
         self._running = False
         try:
@@ -124,6 +137,65 @@ class PoDirectFeed:
             try: await self._recv_task
             except asyncio.CancelledError: pass
             except Exception: logger.exception("recv_task error")
+        if self._scheduled_relogin_task and not self._scheduled_relogin_task.done():
+            self._scheduled_relogin_task.cancel()
+
+    # ─── auth refresh ───
+    async def _do_relogin(self, reason: str = "manual"):
+        """Run the relogin callback (typically Playwright auto_relogin), swap
+        ssid in-place, reconnect WebSocket. Idempotent — safe if already running."""
+        if not self._relogin_callback or self._relogin_in_progress:
+            return
+        self._relogin_in_progress = True
+        try:
+            logger.info("relogin start (reason=%s)", reason)
+            fresh = await self._relogin_callback()
+            if not fresh or not fresh.get("ssid"):
+                logger.error("relogin failed — no fresh ssid returned")
+                return
+            self.ssid = fresh["ssid"]
+            if fresh.get("uid"):
+                self.uid = int(fresh["uid"])
+            if fresh.get("ws_url"):
+                self.ws_url = fresh["ws_url"]
+            if "is_demo" in fresh:
+                self.is_demo = 1 if fresh["is_demo"] else 0
+            logger.info("relogin: new ssid acquired, reconnecting WS…")
+
+            # Tear down current WS and reopen with fresh credentials
+            self._ready.clear()
+            try:
+                if self._ws:
+                    await self._ws.close()
+            except Exception:
+                pass
+            # _recv_loop will exit; start a new one via connect()
+            await asyncio.sleep(1.0)
+            await self.connect()
+            # Re-subscribe to all previously tracked pairs
+            old_subs = list(self._subscribed)
+            self._subscribed.clear()
+            for sym, period in old_subs:
+                try: await self.subscribe(sym, period)
+                except Exception: logger.exception("re-subscribe %s failed", sym)
+            logger.info("relogin complete: %d pairs re-subscribed", len(old_subs))
+        finally:
+            self._relogin_in_progress = False
+
+    async def _scheduled_relogin_loop(self):
+        """Periodic relogin every ~relogin_interval hours, with ±2h jitter
+        so logins don't happen at exactly the same time every day (less robotic)."""
+        import random
+        while self._running:
+            jitter = random.uniform(-7200, 7200)   # ±2h
+            wait = max(3600, self._relogin_interval + jitter)
+            try:
+                await asyncio.sleep(wait)
+            except asyncio.CancelledError:
+                return
+            if self._relogin_callback and not self._relogin_in_progress:
+                logger.info("scheduled relogin firing (next in ~%dh)", int(wait/3600))
+                await self._do_relogin(reason="scheduled")
 
     # ---------- WS recv loop ----------
 
@@ -206,6 +278,12 @@ class PoDirectFeed:
             if event == "successauth":
                 logger.info("authenticated: %s", payload)
                 self._ready.set()
+                return
+
+            if event == "NotAuthorized":
+                logger.warning("session NotAuthorized — triggering relogin")
+                if self._relogin_callback and not self._relogin_in_progress:
+                    asyncio.create_task(self._do_relogin(reason="NotAuthorized"))
                 return
 
             if event == "updateAssets":

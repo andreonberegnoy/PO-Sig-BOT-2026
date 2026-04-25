@@ -46,23 +46,21 @@ class RuntimeState:
     waiting_resume: bool = False
     day_off_until: int = 0
     mg_step: int = 0
+    # Trade in-flight at the moment of crash/restart. Resolved on startup.
+    pending_trade: Optional[dict] = None
+    # ↑ {asset, action, amount, pre_balance, open_ts, expiry_sec}
 
     def to_dict(self): return asdict(self)
 
     @classmethod
     def from_dict(cls, d: dict) -> "RuntimeState":
+        """Preserve all fields across restart — bot resumes the cycle exactly
+        where it left off (mg_step, current_pair, direction). pending_trade
+        is recovered separately by _resume_pending_trade()."""
         if not d: return cls()
         s = cls()
         for k, v in d.items():
             if hasattr(s, k): setattr(s, k, v)
-        # Spec: crash mid-martingale → start from base
-        s.mg_step = 0
-        s.current_pair = None
-        s.original_pair = None
-        s.direction = None
-        s.trades_on_pair = 0
-        s.cycle_switches = 0
-        s.switched_pairs = []
         return s
 
 
@@ -345,9 +343,70 @@ class StateMachine:
         return pick_best(pool, exclude)
 
     # ---------- main loop ----------
+    async def _resume_pending_trade(self):
+        """If state has a pending_trade (bot was restarted mid-trade), wait
+        for the trade to expire and classify the result via balance delta.
+        Then update mg_step / cycle as normal."""
+        pt = self.state.pending_trade
+        if not pt:
+            return
+        try:
+            sym = pt["asset"]; action = pt["action"]; amount = float(pt["amount"])
+            pre_balance = float(pt["pre_balance"])
+            open_ts = int(pt["open_ts"]); expiry = int(pt["expiry_sec"])
+            close_ts = open_ts + expiry
+            now = int(time.time())
+            elapsed = now - open_ts
+            await self._notify(
+                f"🔄 Восстановление сделки {sym} {action.upper()} ${amount} "
+                f"(прошло {elapsed}s из {expiry}s). Жду результат…"
+            )
+            # If trade not yet expired, wait the rest
+            if now < close_ts + 5:
+                wait = (close_ts + 5) - now
+                logger.info("resume: waiting %ds for trade %s to close", wait, sym)
+                await asyncio.sleep(max(1, wait))
+            # Now check balance delta
+            post_balance = float(self.feed.balance() or 0.0)
+            for _ in range(15):
+                if abs(post_balance - pre_balance) >= 0.01:
+                    break
+                await asyncio.sleep(1.0)
+                post_balance = float(self.feed.balance() or 0.0)
+            delta = round(post_balance - pre_balance, 2)
+            if delta > 0.005:
+                result = "WIN"; profit = delta + amount
+            elif delta < -0.005:
+                result = "LOSS"; profit = 0.0
+            else:
+                result = "DRAW"; profit = amount
+            logger.info("resume CLOSE %s: delta=%s → %s", sym, delta, result)
+            # Synthesize closed trade and apply it
+            opened = OpenedTrade(
+                trade_id=pt.get("trade_id", "resumed"),
+                asset=sym, action=action, amount=amount,
+                payout=int((self.feed.assets.get(sym) or {}).get("payout", 0)),
+                open_time=open_ts, expiry_sec=expiry,
+            )
+            closed = ClosedTrade(
+                trade_id=opened.trade_id, asset=sym, action=action,
+                amount=amount, profit=profit, result=result,
+                close_time=close_ts,
+                raw={"resumed": True, "pre_balance": pre_balance,
+                     "post_balance": post_balance, "delta": delta},
+            )
+            await self._on_trade_closed(opened, closed)
+        except Exception:
+            logger.exception("_resume_pending_trade failed")
+            # Clear pending so we don't loop on a broken record
+            self.state.pending_trade = None
+            self._persist()
+
     async def run(self):
         self._running = True
         await self._notify(f"🤖 Бот запущен ({self.cfg['mode']})")
+        # Resume any in-flight trade interrupted by the previous restart
+        await self._resume_pending_trade()
 
         await self._rescan_pairs()
         if not self._tracked:
@@ -607,6 +666,17 @@ class StateMachine:
         # turns LOSS (delta = -amount) into DRAW (delta ≈ 0).
         pre_balance = float(self.feed.balance() or 0.0)
         opened = await self.tc.open_trade(sym, amount, action, expiry)
+        # Persist pending trade so we can recover its result if the bot is
+        # restarted before the close-detection logic finishes.
+        if opened:
+            self.state.pending_trade = {
+                "asset": sym, "action": action, "amount": float(amount),
+                "pre_balance": pre_balance,
+                "open_ts": int(time.time()),
+                "expiry_sec": int(expiry),
+                "trade_id": opened.trade_id,
+            }
+            self._persist()
         if not opened:
             await self._notify(f"⚠️ Не удалось открыть сделку {sym}. Пробую снова на следующем сигнале.")
             # Reset cycle if free mode
@@ -690,6 +760,9 @@ class StateMachine:
         await self._on_trade_closed(opened, closed)
 
     async def _on_trade_closed(self, opened: OpenedTrade, closed: ClosedTrade):
+        # Trade resolved — clear the pending-trade marker so a future restart
+        # doesn't try to recover this trade again.
+        self.state.pending_trade = None
         self.state.trades_on_pair += 1
         self.journal.log_trade({
             "trade_id": closed.trade_id,

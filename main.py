@@ -82,7 +82,21 @@ async def run(cfg: dict, config_path: str = "config.yaml"):
     log = logging.getLogger("main")
 
     # 1. Journal
-    journal = Journal(cfg["storage"]["db_path"])
+    db_path = cfg["storage"]["db_path"]
+    # One-time migration: if persistent DB doesn't exist yet but legacy
+    # journal.db (from before storage path change) does — copy into volume so
+    # historical trades and runtime_state survive the deploy.
+    import shutil
+    legacy_db = "journal.db"
+    if not os.path.exists(db_path) and os.path.exists(legacy_db):
+        try:
+            os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
+            shutil.copy2(legacy_db, db_path)
+            log.info("migrated legacy journal.db → %s", db_path)
+        except Exception:
+            log.exception("legacy journal copy failed")
+
+    journal = Journal(db_path)
 
     # 1b. Strategy registry (built-in + user-uploaded plugins).
     # Pass current cfg["indicator"] for one-time migration: if no per-strategy

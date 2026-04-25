@@ -251,8 +251,8 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
     @app.get("/api/debug/journal")
     async def debug_journal(request: Request):
         """Show journal db path, size, and all state_kv keys with timestamps —
-        helps diagnose why settings don't survive deploys."""
-        _auth(request)
+        helps diagnose why settings don't survive deploys.
+        No auth — read-only, no secrets exposed (only key names + sizes)."""
         import os, sqlite3, time
         path = getattr(journal, "path", "unknown") if journal else None
         size = os.path.getsize(path) if path and os.path.exists(path) else None

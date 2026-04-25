@@ -203,9 +203,22 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
         if not sm:
             raise HTTPException(503, "state machine not ready")
         if action == "pause":
-            sm.pause(); return {"ok": True}
+            sm.pause()
+            if sm.notify:
+                import asyncio as _aio
+                _aio.create_task(sm.notify("⏸ Пауза включена через Mini App. /resume чтобы снять."))
+            return {"ok": True}
         if action == "resume":
-            sm.resume(); return {"ok": True}
+            if sm.state.waiting_resume:
+                sm.resume_after_stop_sum()
+                msg = "▶️ Возобновление после стоп-суммы. Мартингейл и потери сброшены."
+            else:
+                sm.resume()
+                msg = "▶️ Торговля возобновлена через Mini App."
+            if sm.notify:
+                import asyncio as _aio
+                _aio.create_task(sm.notify(msg))
+            return {"ok": True}
         raise HTTPException(400, f"unknown action: {action}")
 
     # ─── miniapp static ───

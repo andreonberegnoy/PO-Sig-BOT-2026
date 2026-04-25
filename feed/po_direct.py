@@ -244,8 +244,40 @@ class PoDirectFeed:
                     logger.exception("frame handler error")
         except websockets.ConnectionClosed as e:
             logger.warning("WS closed: %s", e)
+            # Schedule auto-reconnect (without re-login) — server may have
+            # temporarily disconnected. This is separate from session-expiry
+            # which is handled via `NotAuthorized` event + `_do_relogin`.
+            if self._running:
+                asyncio.create_task(self._auto_reconnect_loop())
         finally:
             self._running = False
+
+    async def _auto_reconnect_loop(self, max_attempts: int = 10):
+        """Reconnect with exponential backoff after a plain WS disconnect.
+        Re-uses the existing ssid (no relogin)."""
+        import random
+        for attempt in range(1, max_attempts + 1):
+            wait = min(60, 2 ** attempt + random.uniform(0, 1))
+            logger.info("WS auto-reconnect attempt %d in %.1fs", attempt, wait)
+            await asyncio.sleep(wait)
+            try:
+                self._ready.clear()
+                self._running = True
+                await self.connect()
+                # Re-subscribe to all previously tracked pairs
+                old_subs = list(self._subscribed)
+                self._subscribed.clear()
+                for sym, period in old_subs:
+                    try: await self.subscribe(sym, period)
+                    except Exception: logger.exception("re-subscribe %s failed", sym)
+                logger.info("WS auto-reconnect successful (attempt %d, %d pairs)",
+                            attempt, len(old_subs))
+                return
+            except Exception:
+                logger.exception("auto-reconnect attempt %d failed", attempt)
+        logger.error("auto-reconnect gave up after %d attempts — triggering relogin", max_attempts)
+        if self._relogin_callback:
+            asyncio.create_task(self._do_relogin(reason="reconnect_exhausted"))
 
     async def _handle_text(self, raw: str):
         if not raw:
@@ -528,10 +560,22 @@ class PoDirectFeed:
                 anchor_ts -= 200 * period
 
         # Request more history if buffer still short (cold start case).
+        # Bail early if successive requests don't yield new bars (PO depleted).
+        prev_have = -1
+        stuck_iters = 0
         for _ in range(10):
             have = len(self._candles[key])
             if have >= history_limit:
                 break
+            if have == prev_have:
+                stuck_iters += 1
+                if stuck_iters >= 2:
+                    logger.info("history %s P%d: no progress (%d bars), giving up",
+                                symbol, period, have)
+                    break
+            else:
+                stuck_iters = 0
+            prev_have = have
             oldest_time = int(self._candles[key][0]["time"]) if have else int(time.time())
             await self._request_history_period(symbol, period, history_limit - have, end_ts=oldest_time)
             await asyncio.sleep(1.0)

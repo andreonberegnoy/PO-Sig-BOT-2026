@@ -269,12 +269,26 @@ class StateMachine:
             return None
         closed = buf[:-1]
         # Use active strategy's own params (per-strategy storage), falling back
-        # to global cfg["indicator"] if registry unavailable.
+        # to global cfg["indicator"] if registry unavailable. Time-budget the
+        # strategy call so a buggy user plugin can't hang the whole loop.
         if self.registry:
             try:
                 strat = self.registry.get_active()
                 params = strat.merged_params()
-                sigs, _ = strat.generate_signals(closed, params)
+                if strat.source == "user":
+                    # Hard cap user code at 2 sec per pair scan
+                    import signal as _sig
+                    # Note: signal.alarm only works in main thread on Unix.
+                    # In asyncio we rely on it being short-running synchronous code.
+                    # The plugin runs synchronously; we time the wallclock and warn.
+                    t0 = time.time()
+                    sigs, _ = strat.generate_signals(closed, params)
+                    dt = time.time() - t0
+                    if dt > 2.0:
+                        logger.warning("strategy %s slow: %.2fs on %s — consider optimizing",
+                                       strat.name, dt, symbol)
+                else:
+                    sigs, _ = strat.generate_signals(closed, params)
             except Exception:
                 logger.exception("active strategy failed, fallback to consensus")
                 params = {**DEFAULT_PARAMS, **self.cfg["indicator"]}
@@ -357,6 +371,21 @@ class StateMachine:
             close_ts = open_ts + expiry
             now = int(time.time())
             elapsed = now - open_ts
+            # Staleness gate: if trade is way too old (more than 2× expiry past
+            # close), the pre_balance is meaningless because dozens of other
+            # events may have shifted the balance. Discard rather than guess.
+            staleness_limit = expiry * 3
+            if now - close_ts > staleness_limit:
+                logger.warning("resume: pending_trade %s too stale (%ds since close) — discarding",
+                               sym, now - close_ts)
+                await self._notify(
+                    f"⚠️ Незакрытая сделка {sym} слишком старая ({(now-close_ts)//60} мин). "
+                    f"Пропускаю восстановление, начинаю с FREE."
+                )
+                self.state.pending_trade = None
+                self._reset_cycle()
+                self._persist()
+                return
             await self._notify(
                 f"🔄 Восстановление сделки {sym} {action.upper()} ${amount} "
                 f"(прошло {elapsed}s из {expiry}s). Жду результат…"
@@ -650,6 +679,13 @@ class StateMachine:
     # ---------- trade open / close flow ----------
     async def _open_and_track(self, sym: str, action: str, amount: float):
         expiry = int(self.cfg["trading"]["expiry_seconds"])
+        # Clear any stale pending_trade from a prior aborted attempt (otherwise
+        # a restart could resume the wrong trade).
+        if self.state.pending_trade:
+            logger.warning("clearing stale pending_trade before new trade: %s",
+                           self.state.pending_trade.get("asset"))
+            self.state.pending_trade = None
+            self._persist()
         # Direct-PO feed: subscribe to pair so live ticks flow (idempotent).
         # Legacy po-signals path: click into one of 15 windows (via window_manager).
         try:

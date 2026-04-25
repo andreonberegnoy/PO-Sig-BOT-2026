@@ -166,11 +166,13 @@ async def run(cfg: dict, config_path: str = "config.yaml"):
     sm.registry = registry   # wire active-strategy switch in
 
     # Wire feed's relogin safe-check to state machine: don't re-login during
-    # an active MG cycle (would lose the WS mid-trade) or when paused.
+    # an active MG cycle (would lose WS mid-trade), an in-flight trade
+    # (pending_trade set), or when paused.
     def _safe_to_relogin():
         try:
             s = sm.state
-            return s.mg_step == 0 and not s.paused and not s.waiting_resume
+            return (s.mg_step == 0 and s.pending_trade is None
+                    and not s.paused and not s.waiting_resume)
         except Exception:
             return True
     feed_relogin_safe_check = _safe_to_relogin

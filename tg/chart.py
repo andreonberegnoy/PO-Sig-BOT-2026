@@ -62,33 +62,33 @@ def render_chart(
     ax.tick_params(colors="#94a3b8", labelsize=8)
     ax.grid(True, color="#1e293b", linewidth=0.5, alpha=0.6)
 
-    # Candles
-    width = 0.0006
-    for i, t in enumerate(times):
+    # Index-based x-axis (slot 0..N-1) so missing minutes don't create visual
+    # gaps — matches PocketOption / PoSignals visual layout. Time labels get
+    # mapped from index → wallclock time below.
+    xs = list(range(len(show)))
+    half_w = 0.35
+    for i in xs:
         op, cl, hi, lo = opens[i], closes[i], highs[i], lows[i]
         color = "#22c55e" if cl >= op else "#ef4444"
-        edge = color
-        ax.plot([t, t], [lo, hi], color=edge, linewidth=0.8)
-        # body
+        ax.plot([i, i], [lo, hi], color=color, linewidth=0.8)
         low_y = min(op, cl); high_y = max(op, cl)
-        ax.fill_between([mdates.date2num(t)-0.0003, mdates.date2num(t)+0.0003],
-                        low_y, high_y, color=color, edgecolor=edge, linewidth=0.5)
+        ax.fill_between([i - half_w, i + half_w], low_y, high_y,
+                        color=color, edgecolor=color, linewidth=0.5)
 
-    # Signal markers — only arrows, no labels
+    # Signal markers
     for sig in sigs:
         if sig.i < base_idx: continue
         ci = sig.i - base_idx
-        t = times[ci]
         if sig.side == "buy":
             ax.annotate(
                 "▲",
-                xy=(t, lows[ci]), xytext=(0, -14), textcoords="offset points",
+                xy=(ci, lows[ci]), xytext=(0, -14), textcoords="offset points",
                 ha="center", color="#22c55e", fontsize=16, fontweight="bold",
             )
         else:
             ax.annotate(
                 "▼",
-                xy=(t, highs[ci]), xytext=(0, 10), textcoords="offset points",
+                xy=(ci, highs[ci]), xytext=(0, 10), textcoords="offset points",
                 ha="center", color="#ef4444", fontsize=16, fontweight="bold",
             )
 
@@ -111,8 +111,12 @@ def render_chart(
             bbox=dict(boxstyle="round,pad=0.6", facecolor="#111827", edgecolor="#334155", alpha=0.95))
 
     ax.set_title(f"{symbol}  (last {len(show)} bars)", color="#e2e8f0", fontsize=11, loc="left")
-    ax.xaxis.set_major_locator(mdates.AutoDateLocator())
-    ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+    # Time labels at evenly-spaced indices (every ~10 bars)
+    step = max(1, len(show) // 8)
+    tick_idx = list(range(0, len(show), step))
+    ax.set_xticks(tick_idx)
+    ax.set_xticklabels([times[i].strftime("%H:%M") for i in tick_idx])
+    ax.set_xlim(-1, len(show))
     plt.xticks(rotation=0)
     plt.tight_layout()
     plt.savefig(out_path, facecolor=fig.get_facecolor())

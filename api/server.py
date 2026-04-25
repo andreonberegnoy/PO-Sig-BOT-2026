@@ -209,12 +209,13 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
 
     # ─── pair analytics ───
     @app.get("/api/pair_stats")
-    async def pair_stats(request: Request, range: str = "7d"):
+    async def pair_stats(request: Request, range: str = "7d", work_hours_only: int = 0):
         """Aggregated per-pair stats over a time range.
         range = 24h | 7d | 30d | 60d | all
-        Returns list of {symbol, payout-aggregates, backtest-aggregates}."""
+        work_hours_only = 1 → filter snapshots to local-hour within
+        schedule.start_hour..schedule.end_hour (timezone from telegram cfg)."""
         _auth(request)
-        import time as _t
+        import time as _t, datetime as _dt
         now = int(_t.time())
         ranges = {"24h": 86400, "7d": 7*86400, "30d": 30*86400, "60d": 60*86400}
         if range == "all":
@@ -225,8 +226,29 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
             return {"error": "no journal"}
         min_p = int((cfg.get("filter") or {}).get("min_payout", 92))
         floor_p = int((cfg.get("filter") or {}).get("payout_floor", 85))
-        payout_rows = journal.payout_aggregate(since, min_payout=min_p, floor_payout=floor_p)
-        stats_rows = journal.pair_stats_aggregate(since)
+        # Resolve hour-window + tz offset if requested
+        hour_filter = None
+        tz_offset_sec = 0
+        if work_hours_only:
+            sched = cfg.get("schedule") or {}
+            start_h = int(sched.get("start_hour", 0))
+            end_h = int(sched.get("end_hour", 24))
+            hour_filter = (start_h, end_h)
+            tz_name = (cfg.get("telegram") or {}).get("daily_report_timezone") or "Europe/Kyiv"
+            try:
+                import pytz
+                tz = pytz.timezone(tz_name)
+                offset = tz.utcoffset(_dt.datetime.now())
+                tz_offset_sec = int(offset.total_seconds()) if offset else 0
+            except Exception:
+                tz_offset_sec = 0
+        payout_rows = journal.payout_aggregate(
+            since, min_payout=min_p, floor_payout=floor_p,
+            hour_filter=hour_filter, tz_offset_sec=tz_offset_sec,
+        )
+        stats_rows = journal.pair_stats_aggregate(
+            since, hour_filter=hour_filter, tz_offset_sec=tz_offset_sec,
+        )
         # Merge by symbol
         by_sym: dict[str, dict] = {}
         for r in payout_rows:
@@ -255,6 +277,8 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
             "now_ts": now,
             "min_payout": min_p,
             "floor_payout": floor_p,
+            "work_hours_only": bool(work_hours_only),
+            "hour_filter": list(hour_filter) if hour_filter else None,
             "pairs": result,
         }
 

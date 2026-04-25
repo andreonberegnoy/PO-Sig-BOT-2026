@@ -292,7 +292,7 @@
   };
 
   // ─── Analytics tab ───
-  let analyticsState = { range: "7d", sortKey: "score", sortDir: "desc", data: [] };
+  let analyticsState = { range: "7d", sortKey: "score", sortDir: "desc", data: [], workHoursOnly: false };
 
   function fmt(v, digits = 0, suffix = "") {
     if (v === undefined || v === null || Number.isNaN(v)) return "—";
@@ -388,7 +388,8 @@
     const wrap = document.getElementById("analytics-table");
     wrap.innerHTML = '<div class="status-line">Загрузка…</div>';
     try {
-      const r = await api(`/api/pair_stats?range=${encodeURIComponent(analyticsState.range)}`);
+      const wh = analyticsState.workHoursOnly ? 1 : 0;
+      const r = await api(`/api/pair_stats?range=${encodeURIComponent(analyticsState.range)}&work_hours_only=${wh}`);
       analyticsState.data = r.pairs || [];
       renderAnalyticsTable();
     } catch (e) {
@@ -403,6 +404,13 @@
       loadAnalytics();
     });
   });
+  const workHoursToggle = document.getElementById("analytics-workhours");
+  if (workHoursToggle) {
+    workHoursToggle.addEventListener("change", () => {
+      analyticsState.workHoursOnly = workHoursToggle.checked;
+      loadAnalytics();
+    });
+  }
   document.querySelector('.tab[data-tab="analytics"]').addEventListener("click", loadAnalytics);
 
   // initial load

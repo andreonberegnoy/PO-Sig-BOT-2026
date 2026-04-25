@@ -34,8 +34,8 @@ trading:
 # ---- мартингейл ----
 martingale:
   coefficient: 2.1           # множитель ставки после минуса
-  max_steps: 5               # максимум догонов
-  stop_sum: 50               # стоп-сумма потерь ($): ждём /resume в Telegram
+  max_steps: 10              # максимум догонов
+  stop_sum: 1000             # стоп-сумма потерь ($): ждём /resume в Telegram
   reset_on_win: true         # после плюса возвращаем базовую сумму
 
 # ---- CONSENSUS 4/5 (параметры индикатора) ----
@@ -46,7 +46,7 @@ indicator:
   martingaleSteps: 0          # у индикатора отдельно от торгового мартингейла (для бэктеста)
   drawBehavior: continue
   minConsensus: 4
-  requireAll5OnWeekend: true
+  requireAll5OnWeekend: false       # на выходных тоже хватает 4/5
 
   rsiPeriod: 14
   rsiSmoothing: 5

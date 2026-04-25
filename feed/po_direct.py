@@ -746,15 +746,26 @@ class PoDirectFeed:
                     "volume": float(item.get("volume", 0) or 0),
                 }
             elif isinstance(item, (list, tuple)):
-                # two common orderings in wild: [t,o,c,h,l] or [t,o,h,l,c]
+                # PO returns [time, open, close, high, low]. Auto-detect by
+                # validating which interpretation gives consistent OHLC where
+                # high >= max(open, close) and low <= min(open, close).
                 if len(item) >= 5:
                     t = int(item[0])
                     a, b, d, e = float(item[1]), float(item[2]), float(item[3]), float(item[4])
-                    # guess: if b >= d and b >= e (i.e. high >= close, high >= low) treat as [t,o,h,l,c]
-                    # else treat as [t,o,c,h,l]
-                    # safer: just take max/min of all 4 for high/low, use item[1] as open, item[-1] as close
-                    hi = max(a, b, d, e); lo = min(a, b, d, e)
-                    c = {"time": t, "open": a, "high": hi, "low": lo, "close": e, "volume": 0}
+                    # Try [t,o,c,h,l] (PO's actual format)
+                    o1, c1, h1, l1 = a, b, d, e
+                    ok1 = h1 >= max(o1, c1, l1) and l1 <= min(o1, c1, h1)
+                    # Fallback [t,o,h,l,c] just in case
+                    o2, h2, l2, c2 = a, b, d, e
+                    ok2 = h2 >= max(o2, c2, l2) and l2 <= min(o2, c2, h2)
+                    if ok1:
+                        c = {"time": t, "open": o1, "high": h1, "low": l1, "close": c1, "volume": 0}
+                    elif ok2:
+                        c = {"time": t, "open": o2, "high": h2, "low": l2, "close": c2, "volume": 0}
+                    else:
+                        # Inconsistent — fall back to safest reconstruction
+                        hi = max(a, b, d, e); lo = min(a, b, d, e)
+                        c = {"time": t, "open": a, "high": hi, "low": lo, "close": b, "volume": 0}
             if c and c["time"]:
                 bars.append(c)
         if not bars:

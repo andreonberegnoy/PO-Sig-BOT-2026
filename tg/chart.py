@@ -26,8 +26,11 @@ def render_chart(
     symbol: str,
     last_bars: int = 80,
     out_path: Optional[str] = None,
+    tz_name: str = "Europe/Kyiv",
 ) -> str:
-    """Render PNG chart and return its path. Uses same buffer + same indicator as bot."""
+    """Render PNG chart and return its path. Uses same buffer + same indicator
+    as bot. Time axis is rendered in `tz_name` (default Europe/Kyiv) so the
+    chart visually matches PocketOption / PoSignals which show local time."""
     if out_path is None:
         out_path = f"/tmp/chart_{symbol}_{int(datetime.now().timestamp())}.png"
 
@@ -38,7 +41,15 @@ def render_chart(
     show = candles[-last_bars:]
     base_idx = len(candles) - len(show)
 
-    times = [datetime.utcfromtimestamp(c["time"]) for c in show]
+    try:
+        import pytz
+        tz = pytz.timezone(tz_name)
+    except Exception:
+        tz = None
+    def _to_local(ts: int):
+        dt = datetime.utcfromtimestamp(ts).replace(tzinfo=pytz.utc) if tz else datetime.utcfromtimestamp(ts)
+        return dt.astimezone(tz) if tz else dt
+    times = [_to_local(c["time"]) for c in show]
     opens = [c["open"] for c in show]
     highs = [c["high"] for c in show]
     lows = [c["low"] for c in show]

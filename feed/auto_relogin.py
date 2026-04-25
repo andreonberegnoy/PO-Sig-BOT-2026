@@ -168,8 +168,17 @@ async def _fetch_fresh_ssid_impl(
 
             # 1. Open login page
             logger.info("auto-relogin: navigating to %s", PO_LOGIN_URL)
-            await page.goto(PO_LOGIN_URL, wait_until="domcontentloaded", timeout=30000)
+            try:
+                await page.goto(PO_LOGIN_URL, wait_until="commit", timeout=60000)
+            except Exception as e:
+                logger.warning("auto-relogin: goto first attempt failed (%s), retrying with load", e)
+                await page.goto(PO_LOGIN_URL, wait_until="load", timeout=60000)
             logger.info("auto-relogin: page loaded, current URL: %s", page.url)
+            # Wait for the login form to actually appear (commit fires very early)
+            try:
+                await page.wait_for_selector("input[name=email], input[type=email]", timeout=30000)
+            except Exception:
+                logger.warning("auto-relogin: email input not visible after 30s, current URL: %s", page.url)
             await _human_pause(1.0, 2.5)
 
             # 2. Type credentials char-by-char with realistic delays

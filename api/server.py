@@ -81,6 +81,10 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
         _auth(request)
         s = sm.state if sm else None
         balance = feed.balance() if feed else None
+        try:
+            banned_count = len(journal.active_bans()) if journal else 0
+        except Exception:
+            banned_count = 0
         return {
             "mode": cfg.get("mode"),
             "balance": balance,
@@ -90,8 +94,11 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
             "paused": getattr(s, "paused", False),
             "waiting_resume": getattr(s, "waiting_resume", False),
             "tracked_pairs": len(getattr(sm, "_tracked", set()) or set()) if sm else 0,
+            "banned_pairs": banned_count,
             "active_strategy": registry.active_name if registry else None,
             "active_syms": sum(1 for v in (getattr(sm, "_tick_counts", {}) or {}).values() if v > 0) if sm else 0,
+            "base_amount": (cfg.get("trading") or {}).get("base_amount", 1),
+            "expiry_seconds": (cfg.get("trading") or {}).get("expiry_seconds", 120),
         }
 
     # ─── settings ───

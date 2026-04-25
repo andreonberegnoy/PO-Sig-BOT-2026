@@ -103,6 +103,8 @@ async def run(cfg: dict, config_path: str = "config.yaml"):
     # journal kv_store sits on the volume and survives. Overlay survives.
     try:
         overrides = journal.get("settings_overrides") or {}
+        log.info("settings_overrides at startup: %d keys → %s",
+                 len(overrides), list(overrides.keys()) if overrides else "(none)")
         if overrides:
             def _set_dotted(d, key, value):
                 parts = key.split(".")
@@ -114,7 +116,7 @@ async def run(cfg: dict, config_path: str = "config.yaml"):
                 cur[parts[-1]] = value
             for key, value in overrides.items():
                 _set_dotted(cfg, key, value)
-            log.info("applied %d persisted settings overrides", len(overrides))
+                log.info("  override applied: %s = %r", key, value)
     except Exception:
         log.exception("loading settings_overrides failed")
 

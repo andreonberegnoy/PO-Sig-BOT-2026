@@ -124,8 +124,12 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
                 for key, value in payload.items():
                     overrides[key] = value
                 journal.set("settings_overrides", overrides)
+                logger.info("PUT /api/settings: persisted %d keys to journal (total=%d): %s",
+                            len(payload), len(overrides), list(payload.keys()))
             except Exception:
                 logger.exception("failed to persist settings_overrides to journal")
+        else:
+            logger.warning("PUT /api/settings: no journal — change will NOT survive deploy")
         return {"updated": list(payload.keys()), "cfg": cfg}
 
     # ─── strategies ───

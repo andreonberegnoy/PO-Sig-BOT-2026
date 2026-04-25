@@ -57,6 +57,34 @@ CREATE TABLE IF NOT EXISTS state_kv (
     v TEXT NOT NULL,
     updated_at INTEGER NOT NULL
 );
+
+-- Periodic snapshots of payout per asset (every ~5 min, only when value changed)
+CREATE TABLE IF NOT EXISTS payout_log (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol    TEXT NOT NULL,
+    ts        INTEGER NOT NULL,
+    payout    INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_payout_log_sym_ts ON payout_log(symbol, ts);
+CREATE INDEX IF NOT EXISTS idx_payout_log_ts     ON payout_log(ts);
+
+-- Periodic backtest snapshots (every ~1 hour) of consensus indicator on the
+-- current candle buffer for each tracked pair.
+CREATE TABLE IF NOT EXISTS pair_stats_log (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol          TEXT NOT NULL,
+    ts              INTEGER NOT NULL,
+    bars_in_window  INTEGER NOT NULL,
+    signals_total   INTEGER NOT NULL,
+    wins            INTEGER NOT NULL,
+    losses          INTEGER NOT NULL,
+    wr              REAL NOT NULL,
+    wr1             REAL NOT NULL,
+    max_streak      INTEGER NOT NULL,
+    max_streak_overall INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_pair_stats_sym_ts ON pair_stats_log(symbol, ts);
+CREATE INDEX IF NOT EXISTS idx_pair_stats_ts     ON pair_stats_log(ts);
 """
 
 
@@ -143,6 +171,142 @@ class Journal:
     def delete(self, key: str):
         self.conn.execute("DELETE FROM state_kv WHERE k=?", (key,))
         self.conn.commit()
+
+    # ---------- payout log ----------
+
+    def log_payout(self, symbol: str, payout: int, ts: Optional[int] = None):
+        """Append a payout snapshot. Caller is expected to throttle (skip if
+        unchanged from previous snapshot) to keep the table small."""
+        self.conn.execute(
+            "INSERT INTO payout_log (symbol, ts, payout) VALUES (?,?,?)",
+            (symbol, int(ts or time.time()), int(payout)),
+        )
+        self.conn.commit()
+
+    def last_payout(self, symbol: str) -> Optional[int]:
+        cur = self.conn.execute(
+            "SELECT payout FROM payout_log WHERE symbol=? ORDER BY ts DESC LIMIT 1",
+            (symbol,),
+        )
+        r = cur.fetchone()
+        return int(r[0]) if r else None
+
+    def payout_aggregate(self, since_ts: int, min_payout: int = 92,
+                         floor_payout: int = 85) -> list[dict]:
+        """For each symbol, aggregate over [since_ts, now]:
+          - n_snapshots, avg_payout, min_payout, max_payout
+          - pct_above_min, pct_above_floor
+          - first_seen_ts, last_seen_ts
+        """
+        self.conn.row_factory = sqlite3.Row
+        cur = self.conn.execute(
+            """SELECT symbol,
+                      COUNT(*)               AS n,
+                      AVG(payout)            AS avg_p,
+                      MIN(payout)            AS min_p,
+                      MAX(payout)            AS max_p,
+                      MIN(ts)                AS first_ts,
+                      MAX(ts)                AS last_ts,
+                      SUM(CASE WHEN payout >= ? THEN 1 ELSE 0 END) AS n_above_min,
+                      SUM(CASE WHEN payout >= ? THEN 1 ELSE 0 END) AS n_above_floor
+                 FROM payout_log
+                WHERE ts >= ?
+             GROUP BY symbol""",
+            (min_payout, floor_payout, since_ts),
+        )
+        out = []
+        for r in cur.fetchall():
+            n = int(r["n"]) or 1
+            out.append({
+                "symbol": r["symbol"],
+                "n_snapshots": int(r["n"]),
+                "avg_payout": float(r["avg_p"] or 0),
+                "min_payout": int(r["min_p"] or 0),
+                "max_payout": int(r["max_p"] or 0),
+                "first_ts":   int(r["first_ts"] or 0),
+                "last_ts":    int(r["last_ts"] or 0),
+                "pct_above_min":   round(100.0 * (r["n_above_min"] or 0) / n, 1),
+                "pct_above_floor": round(100.0 * (r["n_above_floor"] or 0) / n, 1),
+            })
+        self.conn.row_factory = None
+        return out
+
+    # ---------- pair stats log ----------
+
+    def log_pair_stats(self, symbol: str, snapshot: dict, ts: Optional[int] = None):
+        """Append a backtest snapshot from consensus.analyze on current buffer."""
+        self.conn.execute(
+            """INSERT INTO pair_stats_log
+               (symbol, ts, bars_in_window, signals_total, wins, losses,
+                wr, wr1, max_streak, max_streak_overall)
+               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            (
+                symbol,
+                int(ts or time.time()),
+                int(snapshot.get("bars", 0)),
+                int(snapshot.get("signals_total", 0)),
+                int(snapshot.get("wins", 0)),
+                int(snapshot.get("losses", 0)),
+                float(snapshot.get("wr", 0.0)),
+                float(snapshot.get("wr1", 0.0)),
+                int(snapshot.get("max_streak", 0)),
+                int(snapshot.get("max_streak_overall", 0)),
+            ),
+        )
+        self.conn.commit()
+
+    def pair_stats_aggregate(self, since_ts: int) -> list[dict]:
+        """For each symbol, aggregate backtest snapshots over [since_ts, now]:
+          - n_snapshots, avg_wr, avg_wr1, avg_signals, max_max_streak
+          - last_wr, last_wr1, last_max_streak (most recent snapshot)
+        """
+        self.conn.row_factory = sqlite3.Row
+        cur = self.conn.execute(
+            """SELECT symbol,
+                      COUNT(*) AS n,
+                      AVG(wr) AS avg_wr,
+                      AVG(wr1) AS avg_wr1,
+                      AVG(signals_total) AS avg_signals,
+                      MAX(max_streak_overall) AS max_max_streak,
+                      MIN(ts) AS first_ts,
+                      MAX(ts) AS last_ts
+                 FROM pair_stats_log
+                WHERE ts >= ?
+             GROUP BY symbol""",
+            (since_ts,),
+        )
+        out = {}
+        for r in cur.fetchall():
+            out[r["symbol"]] = {
+                "symbol": r["symbol"],
+                "n_snapshots": int(r["n"]),
+                "avg_wr":      round(float(r["avg_wr"] or 0), 1),
+                "avg_wr1":     round(float(r["avg_wr1"] or 0), 1),
+                "avg_signals": round(float(r["avg_signals"] or 0), 1),
+                "max_max_streak": int(r["max_max_streak"] or 0),
+                "first_ts":    int(r["first_ts"] or 0),
+                "last_ts":     int(r["last_ts"] or 0),
+            }
+        # Add the most-recent snapshot per symbol for "last" fields
+        cur = self.conn.execute(
+            """SELECT p.symbol, p.wr, p.wr1, p.max_streak, p.max_streak_overall, p.bars_in_window, p.ts
+                 FROM pair_stats_log p
+                 JOIN (SELECT symbol, MAX(ts) AS mts FROM pair_stats_log
+                       WHERE ts >= ? GROUP BY symbol) m
+                  ON m.symbol = p.symbol AND m.mts = p.ts""",
+            (since_ts,),
+        )
+        for r in cur.fetchall():
+            sym = r["symbol"]
+            if sym in out:
+                out[sym].update({
+                    "last_wr":         round(float(r["wr"]), 1),
+                    "last_wr1":        round(float(r["wr1"]), 1),
+                    "last_max_streak": int(r["max_streak"]),
+                    "last_bars":       int(r["bars_in_window"]),
+                })
+        self.conn.row_factory = None
+        return list(out.values())
 
     # ---------- reports ----------
 

@@ -207,6 +207,57 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
             raise HTTPException(404, "strategy not found")
         return {"ok": True, "params": registry.strategies[name].params}
 
+    # ─── pair analytics ───
+    @app.get("/api/pair_stats")
+    async def pair_stats(request: Request, range: str = "7d"):
+        """Aggregated per-pair stats over a time range.
+        range = 24h | 7d | 30d | 60d | all
+        Returns list of {symbol, payout-aggregates, backtest-aggregates}."""
+        _auth(request)
+        import time as _t
+        now = int(_t.time())
+        ranges = {"24h": 86400, "7d": 7*86400, "30d": 30*86400, "60d": 60*86400}
+        if range == "all":
+            since = 0
+        else:
+            since = now - ranges.get(range, 7*86400)
+        if not journal:
+            return {"error": "no journal"}
+        min_p = int((cfg.get("filter") or {}).get("min_payout", 92))
+        floor_p = int((cfg.get("filter") or {}).get("payout_floor", 85))
+        payout_rows = journal.payout_aggregate(since, min_payout=min_p, floor_payout=floor_p)
+        stats_rows = journal.pair_stats_aggregate(since)
+        # Merge by symbol
+        by_sym: dict[str, dict] = {}
+        for r in payout_rows:
+            by_sym[r["symbol"]] = {**r}
+        for r in stats_rows:
+            sym = r["symbol"]
+            by_sym.setdefault(sym, {"symbol": sym})
+            by_sym[sym].update(r)
+        # Add current payout from feed.assets if available
+        if feed and getattr(feed, "assets", None):
+            for sym, info in feed.assets.items():
+                cur_p = int(info.get("payout") or 0)
+                by_sym.setdefault(sym, {"symbol": sym})["current_payout"] = cur_p
+        result = list(by_sym.values())
+        # Default sort: pairs with high last_wr1 AND high pct_above_min on top
+        def _score(r):
+            return (
+                (r.get("last_wr1") or 0) * 0.5 +
+                (r.get("pct_above_min") or 0) * 0.3 -
+                (r.get("last_max_streak") or 0) * 5
+            )
+        result.sort(key=_score, reverse=True)
+        return {
+            "range": range,
+            "since_ts": since,
+            "now_ts": now,
+            "min_payout": min_p,
+            "floor_payout": floor_p,
+            "pairs": result,
+        }
+
     # ─── control ───
     @app.post("/api/control/{action}")
     async def control(request: Request, action: str):

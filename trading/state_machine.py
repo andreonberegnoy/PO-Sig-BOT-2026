@@ -102,6 +102,50 @@ class StateMachine:
     def _persist(self):
         self.journal.set("runtime_state", self.state.to_dict())
 
+    # ---------- analytics: hourly backtest snapshot per pair ----------
+    async def _pair_stats_logger_loop(self):
+        """Run consensus.analyze on every tracked pair's buffer once per hour
+        and persist the result to journal.pair_stats_log. Two months of these
+        accumulate into a useful per-pair performance history (~720 hourly
+        snapshots × ~30 pairs = manageable size)."""
+        # First snapshot ~10 min after start so buffers have time to fill.
+        await asyncio.sleep(600)
+        from strategy.consensus import analyze as _analyze, DEFAULT_PARAMS as _DP
+        params = {**_DP, **(self.cfg.get("indicator") or {})}
+        while self._running:
+            try:
+                pairs = list(self._tracked) or list(self._candles.keys())
+                wrote = 0
+                for sym in pairs:
+                    buf = self._candles.get(sym) or []
+                    if len(buf) < 300:
+                        continue
+                    try:
+                        a = _analyze(buf[:-1], params)
+                    except Exception:
+                        logger.exception("analyze failed for %s", sym)
+                        continue
+                    snap = {
+                        "bars": len(buf) - 1,
+                        "signals_total": int(a.completed),
+                        "wins": int(a.wins),
+                        "losses": int(a.losses),
+                        "wr": float(a.wr),
+                        "wr1": float(a.wr1),
+                        "max_streak": int(a.max_loss_streak_before_win),
+                        "max_streak_overall": int(a.max_loss_streak_overall),
+                    }
+                    try:
+                        self.journal.log_pair_stats(sym, snap)
+                        wrote += 1
+                    except Exception:
+                        logger.exception("log_pair_stats failed for %s", sym)
+                if wrote:
+                    logger.info("pair_stats logger: wrote %d snapshots", wrote)
+            except Exception:
+                logger.exception("pair_stats logger crashed (will retry next hour)")
+            await asyncio.sleep(3600)
+
     # ---------- control ----------
     async def stop(self):
         self._running = False
@@ -449,6 +493,8 @@ class StateMachine:
     async def run(self):
         self._running = True
         await self._notify(f"🤖 Бот запущен ({self.cfg['mode']})")
+        # Background analytics — pair backtest snapshots once an hour.
+        asyncio.create_task(self._pair_stats_logger_loop(), name="pair_stats_logger")
         # Resume any in-flight trade interrupted by the previous restart
         await self._resume_pending_trade()
 

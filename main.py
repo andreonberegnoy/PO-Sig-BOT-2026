@@ -223,6 +223,8 @@ async def run(cfg: dict, config_path: str = "config.yaml"):
             relogin_interval_hours=float(os.environ.get("PO_RELOGIN_HOURS") or 12.0),
             relogin_safe_check=lambda: feed_relogin_safe_check(),
         )
+        # Wire journal in for analytics (payout snapshots).
+        feed._journal_for_logging = journal
         await feed.connect()
     else:
         from feed.po_feed import PoFeed

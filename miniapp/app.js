@@ -79,6 +79,11 @@
       { k: "martingale.max_steps", t: "int", min: 1, max: 20, label: "Макс. шагов" },
       { k: "martingale.stop_sum", t: "float", min: 10, max: 10000, step: 50, label: "Стоп-сумма ($)" },
     ],
+    "⏰ Расписание работы": [
+      { k: "schedule.enabled", t: "bool", label: "Включить расписание" },
+      { k: "schedule.start_hour", t: "int", min: 0, max: 23, label: "Час начала (0-23)" },
+      { k: "schedule.end_hour", t: "int", min: 0, max: 24, label: "Час конца (0-24)" },
+    ],
   };
 
   function getDeep(o, path) { return path.split(".").reduce((a, p) => a?.[p], o); }

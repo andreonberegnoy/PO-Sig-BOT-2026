@@ -31,6 +31,16 @@ trading:
   min_trades_on_pair: 3      # минимум сделок на паре до смены (если нет условий для смены)
   max_pair_switch_per_cycle: 1  # сколько раз можно сменить пару до плюса
 
+# ---- расписание работы ----
+# Бот торгует только в окне [start_hour, end_hour). Если конец окна
+# наступил во время мартингейла — досидит до WIN, после чего поставит
+# себя на паузу и отправит сообщение «отдыхаю». Часы в timezone (см. ниже).
+schedule:
+  enabled: false
+  start_hour: 9
+  end_hour: 22
+  # timezone берётся из telegram.daily_report_timezone
+
 # ---- мартингейл ----
 martingale:
   coefficient: 2.1           # множитель ставки после минуса

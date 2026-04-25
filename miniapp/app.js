@@ -286,6 +286,120 @@
     }
   };
 
+  // ─── Analytics tab ───
+  let analyticsState = { range: "7d", sortKey: "score", sortDir: "desc", data: [] };
+
+  function fmt(v, digits = 0, suffix = "") {
+    if (v === undefined || v === null || Number.isNaN(v)) return "—";
+    return (typeof v === "number" ? v.toFixed(digits) : v) + suffix;
+  }
+  function pctClass(v, good = 60, bad = 45) {
+    if (v === undefined || v === null) return "";
+    if (v >= good) return "cell-good";
+    if (v < bad) return "cell-bad";
+    return "cell-warn";
+  }
+  function streakClass(v) {
+    if (v === undefined || v === null) return "";
+    if (v <= 2) return "cell-good";
+    if (v >= 4) return "cell-bad";
+    return "cell-warn";
+  }
+
+  function renderAnalyticsTable() {
+    const wrap = document.getElementById("analytics-table");
+    if (!analyticsState.data || analyticsState.data.length === 0) {
+      wrap.innerHTML = '<div class="status-line">Данных пока нет — снапшоты пишутся каждые 5 мин (выплаты) и каждый час (бэктест). Подожди и обнови.</div>';
+      return;
+    }
+    const cols = [
+      { key: "symbol",         label: "Пара" },
+      { key: "current_payout", label: "Выплата сейчас" },
+      { key: "avg_payout",     label: "Средняя выплата" },
+      { key: "pct_above_min",  label: "% времени ≥ min" },
+      { key: "pct_above_floor",label: "% времени ≥ floor" },
+      { key: "last_wr1",       label: "1-я WR (последн.)" },
+      { key: "avg_wr1",        label: "1-я WR (средн.)" },
+      { key: "last_wr",        label: "Общая WR" },
+      { key: "last_max_streak",label: "Max минусов" },
+      { key: "max_max_streak", label: "Худший streak" },
+      { key: "avg_signals",    label: "Сигналов/окно" },
+      { key: "n_snapshots",    label: "Снапшотов" },
+    ];
+    // Sort
+    const dir = analyticsState.sortDir === "asc" ? 1 : -1;
+    const key = analyticsState.sortKey;
+    const score = (r) => (r.last_wr1 || 0) * 0.5 + (r.pct_above_min || 0) * 0.3 - (r.last_max_streak || 0) * 5;
+    const sorted = [...analyticsState.data].sort((a, b) => {
+      let av = key === "score" ? score(a) : a[key];
+      let bv = key === "score" ? score(b) : b[key];
+      if (typeof av === "string") return av.localeCompare(bv) * dir;
+      av = av ?? -Infinity; bv = bv ?? -Infinity;
+      return (av - bv) * dir;
+    });
+    const head = cols.map(c => {
+      const cls = c.key === key ? `sort-${analyticsState.sortDir}` : "";
+      return `<th class="${cls}" data-sort="${c.key}">${c.label}</th>`;
+    }).join("");
+    const rows = sorted.map(r => {
+      const wr1 = r.last_wr1, streak = r.last_max_streak;
+      return `<tr>
+        <td><b>${r.symbol}</b></td>
+        <td>${fmt(r.current_payout, 0, "%")}</td>
+        <td>${fmt(r.avg_payout, 1, "%")}</td>
+        <td>${fmt(r.pct_above_min, 1, "%")}</td>
+        <td>${fmt(r.pct_above_floor, 1, "%")}</td>
+        <td class="${pctClass(wr1)}">${fmt(wr1, 0, "%")}</td>
+        <td class="${pctClass(r.avg_wr1)}">${fmt(r.avg_wr1, 0, "%")}</td>
+        <td class="${pctClass(r.last_wr)}">${fmt(r.last_wr, 0, "%")}</td>
+        <td class="${streakClass(streak)}">${fmt(streak)}</td>
+        <td class="${streakClass(r.max_max_streak)}">${fmt(r.max_max_streak)}</td>
+        <td>${fmt(r.avg_signals, 0)}</td>
+        <td>${fmt(r.n_snapshots, 0)}</td>
+      </tr>`;
+    }).join("");
+    wrap.innerHTML = `
+      <div class="analytics-wrap">
+        <table class="analytics">
+          <thead><tr>${head}</tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>`;
+    wrap.querySelectorAll("th[data-sort]").forEach((th) => {
+      th.addEventListener("click", () => {
+        const k = th.dataset.sort;
+        if (analyticsState.sortKey === k) {
+          analyticsState.sortDir = analyticsState.sortDir === "asc" ? "desc" : "asc";
+        } else {
+          analyticsState.sortKey = k;
+          analyticsState.sortDir = "desc";
+        }
+        renderAnalyticsTable();
+      });
+    });
+  }
+
+  async function loadAnalytics() {
+    const wrap = document.getElementById("analytics-table");
+    wrap.innerHTML = '<div class="status-line">Загрузка…</div>';
+    try {
+      const r = await api(`/api/pair_stats?range=${encodeURIComponent(analyticsState.range)}`);
+      analyticsState.data = r.pairs || [];
+      renderAnalyticsTable();
+    } catch (e) {
+      wrap.innerHTML = `<div class="status-line err">Ошибка: ${e.message}</div>`;
+    }
+  }
+  document.querySelectorAll(".range-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      document.querySelectorAll(".range-btn").forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+      analyticsState.range = btn.dataset.range;
+      loadAnalytics();
+    });
+  });
+  document.querySelector('.tab[data-tab="analytics"]').addEventListener("click", loadAnalytics);
+
   // initial load
   loadStatus();
   setInterval(() => {

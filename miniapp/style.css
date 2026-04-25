@@ -76,3 +76,25 @@ ul.strategies li.strategy-active { background: rgba(109, 180, 255, 0.08); }
 .status-line { color: var(--hint); margin-top: 8px; min-height: 18px; }
 .status-line.ok { color: #22c55e; }
 .status-line.err { color: #ef4444; }
+
+/* ─── Analytics tab ─── */
+.hint { color: var(--hint); font-size: 13px; margin: 0 0 12px 0; line-height: 1.4; }
+.range-selector { display: flex; gap: 6px; align-items: center; margin-bottom: 12px;
+                  color: var(--hint); font-size: 13px; flex-wrap: wrap; }
+.range-btn { background: transparent; border: 1px solid rgba(255,255,255,0.15);
+             color: var(--fg); padding: 6px 12px; border-radius: 6px;
+             cursor: pointer; font-size: 13px; }
+.range-btn.active { background: var(--button); color: var(--button-text); border-color: var(--button); }
+table.analytics { width: 100%; border-collapse: collapse; font-size: 12px; }
+table.analytics th { text-align: left; padding: 8px 6px; color: var(--hint);
+                     border-bottom: 1px solid rgba(255,255,255,0.1); cursor: pointer;
+                     user-select: none; white-space: nowrap; }
+table.analytics th.sort-asc::after  { content: " ▲"; color: var(--button); }
+table.analytics th.sort-desc::after { content: " ▼"; color: var(--button); }
+table.analytics td { padding: 6px; border-bottom: 1px solid rgba(255,255,255,0.05);
+                     white-space: nowrap; }
+table.analytics tr:hover { background: rgba(255,255,255,0.03); }
+.analytics-wrap { overflow-x: auto; }
+.cell-good { color: #22c55e; }
+.cell-warn { color: #fdf647; }
+.cell-bad  { color: #ef4444; }

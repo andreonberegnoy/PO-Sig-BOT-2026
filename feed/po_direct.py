@@ -80,6 +80,9 @@ class PoDirectFeed:
         self._relogin_pending_reason: Optional[str] = None
         self._scheduled_relogin_task: Optional[asyncio.Task] = None
         self._buffer_keeper_task: Optional[asyncio.Task] = None
+        self._payout_logger_task: Optional[asyncio.Task] = None
+        self._journal_for_logging = None     # set externally for analytics
+        self._last_logged_payout: dict[str, int] = {}
         self._pending_event: Optional[str] = None   # for 451- / binary pair
         self._ws: Optional[websockets.ClientConnection] = None
         self._ready = asyncio.Event()
@@ -139,6 +142,11 @@ class PoDirectFeed:
             self._buffer_keeper_task = asyncio.create_task(
                 self._buffer_keeper_loop(), name="po_buffer_keeper",
             )
+        # Start payout logger if a journal was attached (analytics).
+        if self._journal_for_logging is not None and self._payout_logger_task is None:
+            self._payout_logger_task = asyncio.create_task(
+                self._payout_logger_loop(), name="po_payout_logger",
+            )
 
     async def close(self):
         self._running = False
@@ -155,6 +163,8 @@ class PoDirectFeed:
             self._scheduled_relogin_task.cancel()
         if self._buffer_keeper_task and not self._buffer_keeper_task.done():
             self._buffer_keeper_task.cancel()
+        if self._payout_logger_task and not self._payout_logger_task.done():
+            self._payout_logger_task.cancel()
 
     # ─── auth refresh ───
     def _is_relogin_safe(self) -> bool:
@@ -587,6 +597,33 @@ class PoDirectFeed:
         last_t = int(bars[-1]["time"])
         expected = max(1, (last_t - first_t) // period + 1)
         return min(1.0, len(bars) / expected)
+
+    async def _payout_logger_loop(self):
+        """Every 5 minutes, snapshot payout for each known asset to journal.
+        Throttled: skip a symbol whose payout hasn't changed since last write."""
+        try:
+            while self._running:
+                await asyncio.sleep(300)
+                if not self._journal_for_logging:
+                    continue
+                wrote = 0
+                for sym, info in list(self.assets.items()):
+                    try:
+                        payout = int(info.get("payout") or 0)
+                        if payout <= 0:
+                            continue
+                        prev = self._last_logged_payout.get(sym)
+                        if prev == payout:
+                            continue
+                        self._journal_for_logging.log_payout(sym, payout)
+                        self._last_logged_payout[sym] = payout
+                        wrote += 1
+                    except Exception:
+                        logger.exception("payout log failed for %s", sym)
+                if wrote:
+                    logger.info("payout logger: wrote %d snapshots", wrote)
+        except asyncio.CancelledError:
+            pass
 
     async def _buffer_keeper_loop(self):
         """Every 60s, scan each subscribed pair's recent buffer for gaps and

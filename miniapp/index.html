@@ -13,6 +13,7 @@
     <button class="tab active" data-tab="status">Статус</button>
     <button class="tab" data-tab="settings">Настройки</button>
     <button class="tab" data-tab="strategies">Стратегии</button>
+    <button class="tab" data-tab="analytics">Аналитика</button>
   </div>
 </header>
 
@@ -46,6 +47,27 @@
   <!-- ─── SETTINGS ─── -->
   <section id="tab-settings" class="tab-panel">
     <div id="settings-list">Загрузка…</div>
+  </section>
+
+  <!-- ─── ANALYTICS ─── -->
+  <section id="tab-analytics" class="tab-panel">
+    <div class="card">
+      <h2>📈 Аналитика по парам</h2>
+      <p class="hint">
+        Бот логирует выплаты каждые 5 мин и прогоняет твою стратегию по буферу свечей раз в час.
+        За 1-2 месяца накапливается история — выбирай пары с высоким <b>1-я WR</b>, низким <b>max_streak</b>
+        и стабильной выплатой выше min_payout.
+      </p>
+      <div class="range-selector">
+        Период:
+        <button class="range-btn" data-range="24h">24ч</button>
+        <button class="range-btn active" data-range="7d">7д</button>
+        <button class="range-btn" data-range="30d">30д</button>
+        <button class="range-btn" data-range="60d">60д</button>
+        <button class="range-btn" data-range="all">всё</button>
+      </div>
+      <div id="analytics-table">Загрузка…</div>
+    </div>
   </section>
 
   <!-- ─── STRATEGIES ─── -->

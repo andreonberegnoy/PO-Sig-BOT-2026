@@ -56,7 +56,9 @@ railway.toml                   Railway deploy config
 
 PO стримит **тики** (price-only), наш feed агрегирует их в M1 OHLC. Дополнительно через `loadHistoryPeriod` запрашиваются **исторические OHLC бары** (с пагинацией до 1060 баров).
 
-[journal/candles_db.py](journal/candles_db.py) сохраняет каждый закрытый бар в SQLite → данные **переживают рестарт контейнера**. При старте бот подгружает кеш из БД, потом докачивает только недостающее.
+[journal/candles_db.py](journal/candles_db.py) сохраняет каждый закрытый бар в SQLite → данные **переживают рестарт контейнера**. При старте бот подгружает кеш из БД.
+
+**Заполнение дыр при рестарте:** если последний кешированный бар старше чем `now - 2 × period`, бот автоматически докачивает недостающий диапазон через `loadHistoryPeriodFast` (~1-2 сек на пару). Без этого после downtime график показывал бы пустой промежуток.
 
 ### 3. Сигналы — CONSENSUS 4/5
 
@@ -147,11 +149,14 @@ Stop-sum ($1000 потерь) или max_steps (10) → waiting_resume
    - Потери сессии, пауза
    - Кнопки Pause / Resume / Обновить
 
-2. **Настройки** — все 30+ параметров live-редактирование, изменения мгновенно в `cfg` + сохраняются в `config.yaml`. Категории:
-   - 📊 Индикатор (правила, RSI-QQE, HTF, ATR, Bollinger, свеча)
-   - 🔍 Фильтр пар
-   - 💰 Торговля
-   - 🎰 Мартингейл
+2. **Настройки** — два уровня:
+   - **🧠 Параметры стратегии: \<имя активной\>** (динамически) — параметры из `DEFAULT_PARAMS` текущей стратегии. Для CONSENSUS это 20 полей: minConsensus, RSI, HTF, ATR, BB, candle. Каждая стратегия хранит свои параметры **отдельно** в `journal.db` и не теряет их при переключении.
+   - **Глобальные** (общие для всех стратегий):
+     - 🔍 Фильтр пар
+     - 💰 Торговля
+     - 🎰 Мартингейл
+
+   Глобальные пишутся в `config.yaml`, параметры стратегии — в `journal.db` под ключом `strategy_params:<name>`. При переключении активной стратегии секция «Параметры стратегии» автоматически обновляется на параметры новой.
 
 3. **Стратегии**
    - Список встроенных + пользовательских
@@ -168,7 +173,13 @@ Stop-sum ($1000 потерь) или max_steps (10) → waiting_resume
 from dataclasses import dataclass
 
 NAME = "My Strategy"
-DEFAULT_PARAMS = {"period": 14}
+DEFAULT_PARAMS = {"fastPeriod": 9, "slowPeriod": 21}
+
+# (опционально) Схема для красивой UI в Mini App
+PARAM_SCHEMA = {
+    "fastPeriod": {"type": "int", "min": 2, "max": 50,  "label": "Fast SMA"},
+    "slowPeriod": {"type": "int", "min": 5, "max": 200, "label": "Slow SMA"},
+}
 
 @dataclass
 class Signal:
@@ -183,7 +194,9 @@ def generate_signals(candles, params):
     return [], {}
 ```
 
-Сигнал засчитывается только если `signals[-1].i == len(candles) - 1` (на последнем закрытом баре).
+- Сигнал засчитывается только если `signals[-1].i == len(candles) - 1` (на последнем закрытом баре).
+- Если `PARAM_SCHEMA` отсутствует — бот сам угадает типы (int/float/bool), но без min/max.
+- После загрузки через Mini App параметры твоей стратегии **сохраняются отдельно** от других, видны в секции «🧠 Параметры стратегии: \<твоё имя\>».
 
 ## Конфигурация
 
@@ -277,10 +290,12 @@ Mini App локально: `http://localhost:8080/`
 - `GET /api/status` — состояние бота
 - `GET /api/settings` — текущая cfg
 - `PUT /api/settings` — `{"key.path": value}` → обновить
-- `GET /api/strategies` — список стратегий
+- `GET /api/strategies` — список стратегий (с `params`, `default_params`, `param_schema`)
 - `POST /api/strategies` — `{name, code}` загрузить новую
 - `DELETE /api/strategies/{name}` — удалить
 - `POST /api/strategies/{name}/activate` — активировать
+- `GET /api/strategies/{name}/params` — параметры стратегии
+- `PUT /api/strategies/{name}/params` — `{key: value}` обновить
 - `POST /api/control/pause` / `resume` — управление
 - `GET /strategy_template` — текст шаблона
 

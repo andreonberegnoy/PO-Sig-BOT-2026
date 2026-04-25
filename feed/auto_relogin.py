@@ -175,10 +175,28 @@ async def _fetch_fresh_ssid_impl(
                 await page.goto(PO_LOGIN_URL, wait_until="load", timeout=60000)
             logger.info("auto-relogin: page loaded, current URL: %s", page.url)
             # Wait for the login form to actually appear (commit fires very early)
+            email_selector = "input[name=email], input[type=email], input[name='email']"
             try:
-                await page.wait_for_selector("input[name=email], input[type=email]", timeout=30000)
+                await page.wait_for_selector(email_selector, timeout=45000, state="visible")
+                logger.info("auto-relogin: email input visible")
             except Exception:
-                logger.warning("auto-relogin: email input not visible after 30s, current URL: %s", page.url)
+                # Dump page state so we can see what's blocking (CF challenge? iframe?)
+                logger.warning("auto-relogin: email input not visible after 45s, URL=%s", page.url)
+                try:
+                    title = await page.title()
+                    body_text = await page.evaluate("() => document.body ? document.body.innerText.slice(0, 500) : 'no body'")
+                    inputs = await page.evaluate(
+                        "() => Array.from(document.querySelectorAll('input')).map(i => ({name:i.name, type:i.type, id:i.id, placeholder:i.placeholder}))"
+                    )
+                    iframes = await page.evaluate(
+                        "() => Array.from(document.querySelectorAll('iframe')).map(f => f.src)"
+                    )
+                    logger.warning("auto-relogin: title=%r", title)
+                    logger.warning("auto-relogin: body[:500]=%r", body_text)
+                    logger.warning("auto-relogin: inputs=%s", inputs)
+                    logger.warning("auto-relogin: iframes=%s", iframes)
+                except Exception:
+                    logger.exception("auto-relogin: page dump failed")
             await _human_pause(1.0, 2.5)
 
             # 2. Type credentials char-by-char with realistic delays

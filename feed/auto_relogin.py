@@ -118,12 +118,27 @@ async def _fetch_via_state_impl(state_b64: str, is_demo: bool, timeout_sec: int)
         logger.error("playwright not installed")
         return None
 
-    # Decode + write state.json to a temp file (Playwright wants a path or dict)
+    # Decode storage state. Accept base64 (preferred, env-var safe) or raw JSON.
+    state_obj = None
+    cleaned = "".join(state_b64.split())   # strip whitespace/newlines
+    # Try base64 first
     try:
-        raw = base64.b64decode(state_b64)
+        raw = base64.b64decode(cleaned, validate=False)
         state_obj = json.loads(raw)
-    except Exception:
-        logger.exception("auto-relogin (state): failed to decode PO_STORAGE_STATE_B64")
+        logger.info("auto-relogin (state): decoded base64 state (%d bytes)", len(raw))
+    except Exception as e1:
+        # Try raw JSON fallback
+        try:
+            state_obj = json.loads(state_b64)
+            logger.info("auto-relogin (state): loaded raw JSON state")
+        except Exception as e2:
+            logger.error("auto-relogin (state): cannot parse PO_STORAGE_STATE_B64 — "
+                         "base64 err=%s, json err=%s, len=%d, head=%r",
+                         e1, e2, len(state_b64), state_b64[:80])
+            return None
+    if not isinstance(state_obj, dict) or "cookies" not in state_obj:
+        logger.error("auto-relogin (state): decoded but doesn't look like Playwright state "
+                     "(no 'cookies' key). Keys: %s", list(state_obj.keys()) if isinstance(state_obj, dict) else type(state_obj))
         return None
 
     captured, on_ws = _make_ws_capture()

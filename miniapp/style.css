@@ -65,6 +65,13 @@ ul.strategies li:last-child { border: 0; }
 ul.strategies li .name { flex: 1; }
 ul.strategies li .badge { font-size: 11px; padding: 2px 6px; border-radius: 4px; background: rgba(255,255,255,0.1); }
 ul.strategies li .badge.active { background: var(--button); color: var(--button-text); }
+ul.strategies li.strategy-active { background: rgba(109, 180, 255, 0.08); }
+.strategy-row { display: flex; flex-direction: column; gap: 8px; flex: 1; }
+.strategy-name { font-weight: 500; display: flex; align-items: center; gap: 8px; }
+.strategy-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.strategy-actions .btn { padding: 6px 12px; font-size: 13px; }
+.badge.source-user { background: rgba(255, 200, 80, 0.2); color: #ffc850; }
+.badge.source-builtin { background: rgba(180, 180, 180, 0.15); color: #aaa; }
 
 .status-line { color: var(--hint); margin-top: 8px; min-height: 18px; }
 .status-line.ok { color: #22c55e; }

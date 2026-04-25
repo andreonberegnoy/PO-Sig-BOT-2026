@@ -54,10 +54,28 @@
     <div class="card">
       <h3>📤 Загрузить новую стратегию</h3>
       <input id="new-strat-name" type="text" placeholder="имя_файла (буквы/цифры/_)" />
-      <textarea id="new-strat-code" rows="14" placeholder="# Python код. Должен экспортировать generate_signals(candles, params).
-# См. strategy/consensus.py для примера."></textarea>
+      <textarea id="new-strat-code" rows="20" placeholder="# Вставь Python-код своей стратегии. Минимальный интерфейс:
+#
+# from dataclasses import dataclass
+# NAME = 'My Strategy'
+# DEFAULT_PARAMS = {'period': 14}
+#
+# @dataclass
+# class Signal:
+#     side: str   # 'buy' или 'sell'
+#     i: int
+#     votes: dict
+#     total: int
+#
+# def generate_signals(candles, params):
+#     # candles: [{time, open, high, low, close, volume}, ...]
+#     # вернуть (list[Signal], diag_dict)
+#     return [], {}
+#
+# Полный шаблон — strategy/_template.py в репозитории."></textarea>
       <div class="actions">
-        <button id="btn-upload-strat" class="btn primary">Сохранить и активировать</button>
+        <button id="btn-load-template" class="btn">📋 Загрузить шаблон</button>
+        <button id="btn-upload-strat" class="btn primary">💾 Сохранить и активировать</button>
       </div>
       <div id="strat-status" class="status-line"></div>
     </div>

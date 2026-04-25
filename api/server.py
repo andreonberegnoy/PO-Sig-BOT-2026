@@ -183,4 +183,12 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
     async def health():
         return {"ok": True}
 
+    @app.get("/strategy_template")
+    async def strategy_template():
+        path = Path("strategy/_template.py")
+        if path.exists():
+            return Response(content=path.read_text(encoding="utf-8"),
+                            media_type="text/plain; charset=utf-8")
+        return Response(content="# template not found", media_type="text/plain")
+
     return app

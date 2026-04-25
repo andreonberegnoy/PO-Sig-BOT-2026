@@ -176,10 +176,26 @@
       list.innerHTML = "";
       for (const s of data.strategies) {
         const li = document.createElement("li");
+        li.classList.toggle("strategy-active", s.active);
+        const activeBadge = s.active
+          ? `<span class="badge active">✓ Активна</span>`
+          : `<span class="badge source-${s.source}">${s.source === "user" ? "своя" : "встроенная"}</span>`;
+        // For active strategies — show "Switch to consensus" (so user can disable
+        // a custom strategy and fall back to builtin). For inactive — "Активировать".
+        let actionBtn = "";
+        if (!s.active) {
+          actionBtn = `<button class="btn primary" data-act="activate" data-name="${s.name}">▶ Активировать</button>`;
+        } else if (s.name !== "consensus") {
+          actionBtn = `<button class="btn" data-act="activate" data-name="consensus">⏹ Выключить (на consensus)</button>`;
+        }
+        const delBtn = (s.source === "user" && !s.active)
+          ? `<button class="btn" data-act="delete" data-name="${s.name}">🗑 Удалить</button>`
+          : "";
         li.innerHTML = `
-          <span class="name">${s.name} <span class="badge ${s.active ? "active" : ""}">${s.active ? "АКТИВНА" : s.source}</span></span>
-          ${s.active ? "" : `<button class="btn" data-act="activate" data-name="${s.name}">Использовать</button>`}
-          ${s.source === "user" ? `<button class="btn" data-act="delete" data-name="${s.name}">Удалить</button>` : ""}
+          <div class="strategy-row">
+            <div class="strategy-name">${s.name} ${activeBadge}</div>
+            <div class="strategy-actions">${actionBtn}${delBtn}</div>
+          </div>
         `;
         list.appendChild(li);
       }
@@ -190,16 +206,31 @@
           if (act === "activate") {
             await api(`/api/strategies/${encodeURIComponent(name)}/activate`, { method: "POST" });
           } else if (act === "delete") {
-            if (!confirm(`Удалить ${name}?`)) return;
+            if (!confirm(`Удалить стратегию "${name}"?`)) return;
             await api(`/api/strategies/${encodeURIComponent(name)}`, { method: "DELETE" });
           }
           loadStrategies();
+          loadStatus();
         });
       });
     } catch (e) {
       list.innerHTML = `<li class="err">${e.message}</li>`;
     }
   }
+
+  // Load template into textarea
+  document.getElementById("btn-load-template").onclick = async () => {
+    try {
+      const r = await fetch("/strategy_template");
+      const code = await r.text();
+      document.getElementById("new-strat-code").value = code;
+      if (!document.getElementById("new-strat-name").value) {
+        document.getElementById("new-strat-name").value = "my_strategy";
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  };
 
   document.getElementById("btn-upload-strat").onclick = async () => {
     const name = document.getElementById("new-strat-name").value.trim();

@@ -118,6 +118,9 @@ async def run(cfg: dict, config_path: str = "config.yaml"):
             relogin_cb = _relogin
             log.info("auto-relogin enabled (every ~12h + on session error)")
 
+        # Will be wired to state_machine.state.mg_step==0 once sm exists
+        feed_relogin_safe_check = lambda: True
+
         feed = PoDirectFeed(
             ssid=ssid, uid=uid,
             is_demo=is_demo,
@@ -125,6 +128,7 @@ async def run(cfg: dict, config_path: str = "config.yaml"):
             verify_ssl=False,   # macOS-Python cert issue; PO is wss:// pinned anyway
             relogin_callback=relogin_cb,
             relogin_interval_hours=float(os.environ.get("PO_RELOGIN_HOURS") or 12.0),
+            relogin_safe_check=lambda: feed_relogin_safe_check(),
         )
         await feed.connect()
     else:
@@ -146,6 +150,16 @@ async def run(cfg: dict, config_path: str = "config.yaml"):
     # 5. State machine
     sm = StateMachine(cfg, feed, tc, journal, notify=tg.notify, send_chart=tg.send_chart)
     sm.registry = registry   # wire active-strategy switch in
+
+    # Wire feed's relogin safe-check to state machine: don't re-login during
+    # an active MG cycle (would lose the WS mid-trade) or when paused.
+    def _safe_to_relogin():
+        try:
+            s = sm.state
+            return s.mg_step == 0 and not s.paused and not s.waiting_resume
+        except Exception:
+            return True
+    feed_relogin_safe_check = _safe_to_relogin
 
     tg.attach(state_machine=sm, journal=journal, feed=feed, stop_cb=stop_all)
 

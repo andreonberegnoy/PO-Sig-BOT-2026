@@ -56,6 +56,7 @@ class PoDirectFeed:
         candles_db_path: str = "journal/candles.db",
         relogin_callback=None,
         relogin_interval_hours: float = 12.0,
+        relogin_safe_check=None,    # callable() -> bool, True = OK to relogin now
     ):
         self.ssid = ssid
         self.uid = int(uid)
@@ -73,8 +74,10 @@ class PoDirectFeed:
         self._subscribed: set[tuple] = set()
         self._candles_db = CandlesDB(candles_db_path)
         self._relogin_callback = relogin_callback   # async () -> {"ssid", "uid", "ws_url"}
+        self._relogin_safe_check = relogin_safe_check   # bool — gate relogin on safe state
         self._relogin_interval = float(relogin_interval_hours) * 3600
         self._relogin_in_progress = False
+        self._relogin_pending_reason: Optional[str] = None
         self._scheduled_relogin_task: Optional[asyncio.Task] = None
         self._pending_event: Optional[str] = None   # for 451- / binary pair
         self._ws: Optional[websockets.ClientConnection] = None
@@ -141,12 +144,31 @@ class PoDirectFeed:
             self._scheduled_relogin_task.cancel()
 
     # ─── auth refresh ───
+    def _is_relogin_safe(self) -> bool:
+        """Check via callback if it's safe to relogin right now (e.g., not
+        during a martingale cycle). Default: always safe."""
+        if not self._relogin_safe_check:
+            return True
+        try:
+            return bool(self._relogin_safe_check())
+        except Exception:
+            logger.exception("relogin safe-check raised, assuming unsafe")
+            return False
+
     async def _do_relogin(self, reason: str = "manual"):
         """Run the relogin callback (typically Playwright auto_relogin), swap
-        ssid in-place, reconnect WebSocket. Idempotent — safe if already running."""
+        ssid in-place, reconnect WebSocket. Idempotent — safe if already running.
+
+        Honours `relogin_safe_check` — if it returns False (e.g. martingale
+        cycle in progress), defers and tries again later."""
         if not self._relogin_callback or self._relogin_in_progress:
             return
+        if not self._is_relogin_safe():
+            self._relogin_pending_reason = reason
+            logger.info("relogin deferred (reason=%s) — unsafe state (MG cycle?)", reason)
+            return
         self._relogin_in_progress = True
+        self._relogin_pending_reason = None
         try:
             logger.info("relogin start (reason=%s)", reason)
             fresh = await self._relogin_callback()
@@ -183,18 +205,29 @@ class PoDirectFeed:
             self._relogin_in_progress = False
 
     async def _scheduled_relogin_loop(self):
-        """Periodic relogin every ~relogin_interval hours, with ±2h jitter
-        so logins don't happen at exactly the same time every day (less robotic)."""
+        """Periodic relogin every ~relogin_interval hours (with ±2h jitter so
+        timing is not robotically exact). Also retries any deferred relogin
+        every 60 seconds while the safe-check is False (e.g. waits out an
+        active martingale cycle before refreshing the session)."""
         import random
         while self._running:
             jitter = random.uniform(-7200, 7200)   # ±2h
             wait = max(3600, self._relogin_interval + jitter)
+            slept = 0.0
             try:
-                await asyncio.sleep(wait)
+                # Sleep in 60-sec increments so we can pick up deferred relogins
+                while slept < wait and self._running:
+                    await asyncio.sleep(60)
+                    slept += 60
+                    if self._relogin_pending_reason and self._is_relogin_safe():
+                        reason = self._relogin_pending_reason
+                        logger.info("deferred relogin firing now (reason=%s, safe)", reason)
+                        await self._do_relogin(reason=reason)
             except asyncio.CancelledError:
                 return
             if self._relogin_callback and not self._relogin_in_progress:
-                logger.info("scheduled relogin firing (next in ~%dh)", int(wait/3600))
+                logger.info("scheduled relogin tick (next in ~%dh ± jitter)",
+                            int(self._relogin_interval/3600))
                 await self._do_relogin(reason="scheduled")
 
     # ---------- WS recv loop ----------

@@ -80,7 +80,7 @@
       { k: "martingale.stop_sum", t: "float", min: 10, max: 10000, step: 50, label: "Стоп-сумма ($)" },
     ],
     "⏰ Расписание работы": [
-      { k: "schedule.enabled", t: "bool", label: "Включить расписание" },
+      { k: "schedule.enabled", t: "bool", label: "Работать по расписанию (снять = 24/7 круглосуточно)" },
       { k: "schedule.start_hour", t: "int", min: 0, max: 23, label: "Час начала (0-23)" },
       { k: "schedule.end_hour", t: "int", min: 0, max: 24, label: "Час конца (0-24)" },
     ],

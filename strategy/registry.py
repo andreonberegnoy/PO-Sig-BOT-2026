@@ -23,9 +23,9 @@ logger = logging.getLogger(__name__)
 # Mini App survive container redeploys. Falls back to in-image path for local
 # dev (volume not mounted).
 import os as _os
-_VOLUME_DIR = Path("/app/data/user_strategies")
+_VOLUME_DIR = Path("/data/user_strategies")
 _REPO_DIR = Path("strategy/user")
-USER_DIR = _VOLUME_DIR if _os.path.isdir("/app/data") else _REPO_DIR
+USER_DIR = _VOLUME_DIR if _os.path.isdir("/data") else _REPO_DIR
 
 
 class Strategy:

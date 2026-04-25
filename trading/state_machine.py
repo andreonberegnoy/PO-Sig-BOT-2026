@@ -594,18 +594,10 @@ class StateMachine:
         sym, action = fired
         payout = int(self.feed.assets.get(sym, {}).get("payout", 0))
         amt = self._amount_for_step(0)
-        await self._notify(
-            f"📡 Сигнал {sym} → {action.upper()} (payout {payout}%). Захожу в сделку ${amt}."
-        )
-        # Send chart for visual verification against site HUD
-        if self.send_chart:
-            try:
-                from tg.chart import render_chart
-                params = {**self.cfg["indicator"]}
-                png = render_chart(self._candles[sym], params, sym)
-                await self.send_chart(png, caption=f"📊 {sym} — сигнал {action.upper()}")
-            except Exception:
-                logger.exception("send_chart failed")
+
+        # CRITICAL: open trade FIRST. TG notifications/chart go in background —
+        # PNG render + upload can take 5-30s, must not delay entry past the
+        # current bar (would shift the actual entry vs the signal bar).
         self.state.current_pair = sym
         self.state.original_pair = sym
         self.state.direction = action
@@ -614,6 +606,24 @@ class StateMachine:
         self.state.cycle_switches = 0
         self.state.switched_pairs = []
         self._persist()
+
+        # Fire-and-forget notification + chart (don't await, don't block trade)
+        async def _notify_bg():
+            try:
+                await self._notify(
+                    f"📡 Сигнал {sym} → {action.upper()} (payout {payout}%). Захожу в сделку ${amt}."
+                )
+            except Exception:
+                logger.exception("notify failed")
+            if self.send_chart:
+                try:
+                    from tg.chart import render_chart
+                    params = {**self.cfg["indicator"]}
+                    png = render_chart(self._candles[sym], params, sym)
+                    await self.send_chart(png, caption=f"📊 {sym} — сигнал {action.upper()}")
+                except Exception:
+                    logger.exception("send_chart failed")
+        asyncio.create_task(_notify_bg(), name=f"notify_{sym}")
 
         await self._open_and_track(sym, action, amt)
 
@@ -686,9 +696,9 @@ class StateMachine:
             self.state.direction = action
             self._persist()
 
-        await self._notify(
-            f"📡 Новый сигнал {sym} → {action.upper()}. МГ-шаг {self.state.mg_step}, ставка ${next_amt}."
-        )
+        # Fire-and-forget notify; never block trade entry on TG latency
+        msg = f"📡 Новый сигнал {sym} → {action.upper()}. МГ-шаг {self.state.mg_step}, ставка ${next_amt}."
+        asyncio.create_task(self._notify(msg), name=f"notify_mg_{sym}")
         await self._open_and_track(sym, action, next_amt)
 
     # ---------- trade open / close flow ----------

@@ -285,6 +285,32 @@ class TelegramBot:
         d = self.journal.daily_summary(since, self.cfg["mode"])
         bal = self.feed.balance() if self.feed else "?"
         signals = int(d.get("wins", 0)) + int(d.get("losses", 0)) + int(d.get("draws", 0))
+        # Минимальный payout среди WIN-сделок что закрыли цикл после ≥1 минуса.
+        # Показывает «худшую выплату на которой я всё-таки вытащил мартингейл».
+        min_win_p = None
+        recovered_n = 0
+        last_win_p = None
+        try:
+            wp_rows = self.journal.win_payout_aggregate(
+                since, mode=self.cfg["mode"], after_loss_only=True,
+            )
+            if wp_rows:
+                # overall min across all pairs in the period
+                vals = [int(r["min_win_payout"]) for r in wp_rows if r.get("min_win_payout")]
+                if vals:
+                    min_win_p = min(vals)
+                recovered_n = sum(int(r.get("n_recovered_wins", 0)) for r in wp_rows)
+                # most recent overall
+                last_pair = max(wp_rows, key=lambda r: r.get("last_win_payout", 0) and 1, default=None)
+                last_win_p = last_pair.get("last_win_payout") if last_pair else None
+        except Exception:
+            logger.exception("win_payout_aggregate failed")
+        recovered_line = ""
+        if recovered_n:
+            recovered_line = (
+                f"\n🎯 Min выплата при +: {min_win_p}%   "
+                f"(вытащено циклов: {recovered_n})"
+            )
         text = (
             f"📋 Сводка ({self.cfg['mode']})\n"
             f"\n"
@@ -292,5 +318,6 @@ class TelegramBot:
             f"💰 Заработано за сутки: *${d['net_profit']:+.2f}*\n"
             f"📉 Макс. минусов подряд: {d['max_loss_streak']}\n"
             f"📡 Сигналов: {signals}"
+            f"{recovered_line}"
         )
         await self.notify(text)

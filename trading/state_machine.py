@@ -205,6 +205,54 @@ class StateMachine:
         self._persist()
         logger.info("RESUMED after stop-sum — fresh cycle")
 
+    def force_reset_cycle(self):
+        """Принудительный сброс цикла в FREE-режим.
+        МГ-шаг → 0, пара → None, потери сессии сохраняются (деньги потрачены).
+        Бот сразу начинает искать новый сигнал на любой паре."""
+        old_pair = self.state.current_pair
+        old_step = self.state.mg_step
+        self._reset_cycle()
+        self.state.day_off_until = 0   # снять day-off если он был
+        self._persist()
+        self._force_rescan = True
+        self._tick_event.set()
+        logger.info("FORCE RESET CYCLE: was %s MG%d → FREE", old_pair, old_step)
+
+    async def force_switch_pair(self) -> str | None:
+        """Принудительная смена пары внутри текущего цикла.
+        МГ-шаг сохраняется. Возвращает символ новой пары или None если нет вариантов."""
+        exclude = {self.state.current_pair, *(self.state.switched_pairs or [])}
+        pick = self._pick_switch_pair(exclude)
+        if not pick:
+            # Попробуем без исключений кроме текущей
+            pick = self._pick_switch_pair({self.state.current_pair})
+        if not pick:
+            logger.warning("force_switch_pair: no eligible pair found")
+            return None
+        old_pair = self.state.current_pair
+        self.state.switched_pairs.append(old_pair)
+        self.state.cycle_switches += 1
+        self.state.current_pair = pick.symbol
+        self.state.trades_on_pair = 0
+        self._persist()
+        # Загрузить историю если пара не в трекере
+        if pick.symbol not in self._tracked:
+            try:
+                await self._load_history(pick.symbol)
+                self._tracked.add(pick.symbol)
+            except Exception:
+                logger.exception("force_switch_pair: _load_history %s failed", pick.symbol)
+            if hasattr(self.feed, "subscribe"):
+                try:
+                    await self.feed.subscribe(pick.symbol, int(self.cfg["filter"]["tf"]))
+                except Exception:
+                    logger.exception("force_switch_pair: subscribe %s failed", pick.symbol)
+        self._last_closed_bar_time.pop(pick.symbol, None)
+        self._force_rescan = True
+        self._tick_event.set()
+        logger.info("FORCE SWITCH PAIR: %s → %s  MG%d saved", old_pair, pick.symbol, self.state.mg_step)
+        return pick.symbol
+
     def _amount_for_step(self, step: int) -> float:
         base = float(self.cfg["trading"]["base_amount"])
         coef = float(self.cfg["martingale"]["coefficient"])

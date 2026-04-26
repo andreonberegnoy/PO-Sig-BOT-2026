@@ -76,26 +76,31 @@ class TelegramBot:
             if m.chat.id != self.chat_id: return
             await m.answer(
                 "Команды:\n"
-                "/status — состояние\n"
+                "/status — состояние + кнопки управления циклом\n"
                 "/balance — баланс\n"
-                "/ping — проверить живость бота 🩺\n"
+                "/ping — диагностика бота 🩺\n"
                 "/pause — пауза\n"
                 "/resume — продолжить\n"
                 "/stop — остановить бота\n"
                 "/bans — активные баны\n"
-                "/test SYMBOL call|put [amount] — тестовая сделка\n"
+                "/test SYMBOL call|put [amount] — тестовая сделка\n\n"
+                "В /status доступны кнопки:\n"
+                "🔀 Сменить пару — взять лучшую, МГ-шаг сохранится\n"
+                "🔄 Сбросить цикл — вернуться в FREE (MG→0)\n"
             )
 
-        @dp.message(Command("status"))
-        async def _status(m: Message):
-            if m.chat.id != self.chat_id: return
+        def _build_status_text() -> str:
             if not self.sm:
-                return await m.answer("Бот ещё не запущен.")
+                return "Бот ещё не запущен."
             s = self.sm.state
             tracked = len(getattr(self.sm, "_tracked", set()) or set())
             ticks = sum((getattr(self.sm, "_tick_counts", {}) or {}).values())
             active = sum(1 for v in (getattr(self.sm, "_tick_counts", {}) or {}).values() if v > 0)
-            text = (
+            day_off = ""
+            if s.day_off_until and s.day_off_until > int(time.time()):
+                mins = (s.day_off_until - int(time.time())) // 60
+                day_off = f"\n😴 Day-off: ещё {mins} мин"
+            return (
                 f"Режим: {self.cfg['mode']}\n"
                 f"Пара: {s.current_pair or '—'}\n"
                 f"МГ-шаг: {s.mg_step}  (сумма ${self.sm._amount_for_step(s.mg_step):.2f})\n"
@@ -105,8 +110,88 @@ class TelegramBot:
                 f"Пауза: {'ДА' if s.paused else 'нет'}   Стоп-сумма: {'ЖДУ /resume' if s.waiting_resume else 'нет'}\n"
                 f"Баланс: {self.feed.balance() if self.feed else '?'}\n"
                 f"Tracked пар: {tracked}  |  live-тиков: {ticks} (активных пар {active})"
+                f"{day_off}"
             )
-            await m.answer(text)   # plain text — underscores in symbols break Markdown
+
+        def _build_status_keyboard() -> InlineKeyboardMarkup:
+            s = self.sm.state if self.sm else None
+            in_cycle = s and s.mg_step > 0 and s.current_pair
+            rows = []
+            if in_cycle:
+                rows.append([
+                    InlineKeyboardButton(text="🔀 Сменить пару (МГ сохранить)", callback_data="sm:switch_pair"),
+                    InlineKeyboardButton(text="🔄 Сбросить цикл (FREE)", callback_data="sm:reset_cycle"),
+                ])
+            rows.append([
+                InlineKeyboardButton(text="⏸ Пауза" if (s and not s.paused) else "▶️ Продолжить",
+                                     callback_data="sm:pause" if (s and not s.paused) else "sm:resume"),
+                InlineKeyboardButton(text="🔃 Обновить", callback_data="sm:refresh_status"),
+            ])
+            return InlineKeyboardMarkup(inline_keyboard=rows)
+
+        @dp.message(Command("status"))
+        async def _status(m: Message):
+            if m.chat.id != self.chat_id: return
+            await m.answer(_build_status_text(), reply_markup=_build_status_keyboard())
+
+        @dp.callback_query(F.data.startswith("sm:"))
+        async def _sm_callback(cb: CallbackQuery):
+            if cb.message.chat.id != self.chat_id:
+                return await cb.answer("Нет доступа", show_alert=True)
+            action = cb.data.split(":", 1)[1]
+
+            if action == "refresh_status":
+                await cb.message.edit_text(_build_status_text(),
+                                           reply_markup=_build_status_keyboard())
+                await cb.answer("Обновлено ✅")
+
+            elif action == "pause":
+                if self.sm: self.sm.pause()
+                await cb.answer("⏸ Пауза включена")
+                await cb.message.edit_text(_build_status_text(),
+                                           reply_markup=_build_status_keyboard())
+
+            elif action == "resume":
+                if self.sm:
+                    if self.sm.state.waiting_resume:
+                        self.sm.resume_after_stop_sum()
+                        await cb.answer("▶️ Перезапуск после стоп-суммы")
+                    else:
+                        self.sm.resume()
+                        await cb.answer("▶️ Торговля возобновлена")
+                await cb.message.edit_text(_build_status_text(),
+                                           reply_markup=_build_status_keyboard())
+
+            elif action == "reset_cycle":
+                if not self.sm:
+                    return await cb.answer("SM не запущен", show_alert=True)
+                s = self.sm.state
+                old = f"{s.current_pair} MG{s.mg_step}"
+                self.sm.force_reset_cycle()
+                await cb.answer(f"🔄 Цикл сброшен ({old} → FREE)")
+                await cb.message.edit_text(
+                    _build_status_text() + f"\n\n♻️ Сброшен цикл {old} → FREE. Ищу новый сигнал…",
+                    reply_markup=_build_status_keyboard()
+                )
+
+            elif action == "switch_pair":
+                if not self.sm:
+                    return await cb.answer("SM не запущен", show_alert=True)
+                if not (self.sm.state.mg_step > 0 and self.sm.state.current_pair):
+                    return await cb.answer("Нет активного цикла для смены пары", show_alert=True)
+                await cb.answer("🔀 Ищу лучшую пару…")
+                old_pair = self.sm.state.current_pair
+                new_pair = await self.sm.force_switch_pair()
+                if new_pair:
+                    await cb.message.edit_text(
+                        _build_status_text() + f"\n\n🔀 Вручную сменена пара: {old_pair} → {new_pair}",
+                        reply_markup=_build_status_keyboard()
+                    )
+                else:
+                    await cb.message.edit_text(
+                        _build_status_text() + "\n\n⚠️ Нет доступных пар для смены. Жду сигнал на текущей.",
+                        reply_markup=_build_status_keyboard()
+                    )
 
         @dp.message(Command("balance"))
         async def _balance(m: Message):

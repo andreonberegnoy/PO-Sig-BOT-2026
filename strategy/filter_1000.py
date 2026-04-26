@@ -4,6 +4,7 @@ Rules from spec:
   ≤ max_losses_in_row (обычно 3) минусов подряд → пара ДОПУСТИМА
   2 или 1 минус подряд до плюса → пара в ПРИОРИТЕТЕ (меньше догонов = лучше)
   > 4 минусов подряд → пара в БАН на ban_hours
+  WR1 (% первой плюсовой сделки) < min_wr1 → пара пропускается (skip, не бан)
 
 Returns classified dict: {symbol: PairScore}
 """
@@ -41,6 +42,7 @@ def classify(
     candles: list[dict],
     params: dict,
     max_losses_in_row: int,
+    min_wr1: float = 0.0,
 ) -> PairScore:
     a = analyze(candles, params)
     score = PairScore(
@@ -60,6 +62,15 @@ def classify(
     if a.max_loss_streak_overall > max_losses_in_row:
         score.ban = True
         score.reason = f"макс. минусов подряд {a.max_loss_streak_overall} > {max_losses_in_row} → бан"
+        return score
+
+    # First-trade win rate filter — pair must historically win the first trade
+    # (no martingale needed) at least `min_wr1`% of the time. Otherwise skip
+    # (not banned — it might recover; just unattractive vs alternatives).
+    if min_wr1 > 0 and a.wr1 < min_wr1:
+        score.reason = (
+            f"WR1 {a.wr1:.0f}% < {min_wr1:.0f}% — низкая проходимость первой сделки"
+        )
         return score
 
     # Allowed. Priority: fewer consecutive losses before a win = better
@@ -86,6 +97,7 @@ async def scan_all_pairs(
         ind_cfg["statsLookbackBars"] = f_cfg["stats_lookback_bars"]
     min_payout = f_cfg["min_payout"]
     max_losses = f_cfg["max_losses_in_row"]
+    min_wr1 = float(f_cfg.get("min_wr1", 0) or 0)
     limit = f_cfg["history_candles"]
     tf = f_cfg["tf"]
 
@@ -112,7 +124,7 @@ async def scan_all_pairs(
             if len(candles) < 200:
                 logger.info("skip %s — only %d candles", sym, len(candles))
                 return
-            score = classify(sym, payout, candles, ind_cfg, max_losses)
+            score = classify(sym, payout, candles, ind_cfg, max_losses, min_wr1)
             scores[sym] = score
 
     await asyncio.gather(*[work(s) for s in candidates])

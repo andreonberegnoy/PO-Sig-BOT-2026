@@ -73,6 +73,7 @@ CATEGORIES: dict[str, list[Setting]] = {
         Setting("filter.min_payout", "Минимум payout (%)", "int", 50, 95, 1),
         Setting("filter.payout_floor", "Порог смены пары (%)", "int", 50, 90, 1),
         Setting("filter.max_losses_in_row", "Макс. минусов до бана", "int", 1, 10, 1),
+        Setting("filter.min_wr1", "Мин. % 1-й сделки (WR1)", "int", 0, 100, 5),
         Setting("filter.history_candles", "Размер истории (бары)", "int", 200, 2000, 50),
         Setting("filter.ban_hours", "Бан пары (часов)", "int", 1, 72, 1),
         Setting("filter.day_off_hours", "День-офф (часов)", "int", 1, 24, 1),

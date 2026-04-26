@@ -465,6 +465,91 @@ class TelegramBot:
         )
         await self.notify(text)
 
+    # ---------- proactive health watchdog ----------
+
+    async def health_watchdog_loop(self):
+        """Quietly checks bot health every CHECK_INTERVAL_SEC. Sends a
+        Telegram alert ONLY when something is wrong — no "I'm alive"
+        notifications during normal operation.
+
+        Catches the failure modes that simpler watchdogs (WS freeze, stall)
+        miss: critical asyncio task missing, balance unreachable, scan
+        machinery silently broken.
+
+        Cooldowns per category prevent spam during long outages.
+        """
+        CHECK_INTERVAL_SEC = 30 * 60   # 30 min
+        FRAME_AGE_BAD = 5 * 60         # WS frame older than 5 min → alert
+        TASK_NAMES_CRITICAL = {"state_machine", "tg_polling", "po_direct_recv"}
+        cooldowns: dict[str, float] = {}
+
+        def _alert_once(category: str, text: str, cooldown_sec: int = 60 * 60) -> None:
+            now = time.time()
+            if now - cooldowns.get(category, 0) < cooldown_sec:
+                return
+            cooldowns[category] = now
+            asyncio.create_task(
+                self.notify(text, parse_mode="HTML"), name=f"health_alert_{category}"
+            )
+
+        # Wait one full interval before first check — gives the bot time to
+        # finish initial scan, history-loading, etc., so we don't false-alarm.
+        await asyncio.sleep(60)
+
+        while True:
+            try:
+                await asyncio.sleep(CHECK_INTERVAL_SEC)
+                problems: list[str] = []
+
+                # 1. Critical asyncio tasks alive?
+                live = {t.get_name() for t in asyncio.all_tasks() if not t.done()}
+                missing = TASK_NAMES_CRITICAL - live
+                if missing:
+                    problems.append(
+                        f"❌ Отсутствуют критичные задачи: <code>{', '.join(sorted(missing))}</code>"
+                    )
+
+                # 2. Last WS frame fresh?
+                if self.feed is not None:
+                    last_frame = getattr(self.feed, "_last_frame_ts", None)
+                    if last_frame:
+                        age = int(time.time() - last_frame)
+                        if age > FRAME_AGE_BAD:
+                            problems.append(
+                                f"❌ Последний WS-фрейм {age}с назад "
+                                f"(порог {FRAME_AGE_BAD}с)"
+                            )
+
+                # 3. Balance reachable? (None usually means feed lost auth)
+                if self.feed is not None:
+                    try:
+                        bal = self.feed.balance()
+                        if bal is None:
+                            problems.append("⚠️ Баланс недоступен — возможно сессия протухла")
+                    except Exception:
+                        problems.append("⚠️ feed.balance() бросает исключение")
+
+                # 4. State machine healthy? (paused without user action is suspect)
+                # We don't alert on paused — user might have done it via /pause.
+                # But waiting_resume is a stop-loss state user already knows about.
+
+                if problems:
+                    msg = (
+                        "🩺 <b>Watchdog: нашёл проблемы</b>\n\n"
+                        + "\n".join(problems)
+                        + "\n\n👉 Нажми /ping для подробной диагностики, "
+                        + "посмотри логи Railway если не очевидно."
+                    )
+                    _alert_once("health_problems", msg)
+                else:
+                    # Reset cooldown so next problem fires immediately
+                    cooldowns.pop("health_problems", None)
+
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                logger.exception("health_watchdog_loop tick failed (will continue)")
+
     # ---------- periodic report (schedule-aware) ----------
 
     async def periodic_report_loop(self):

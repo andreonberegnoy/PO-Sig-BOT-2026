@@ -45,6 +45,15 @@ USER_AGENT = (
 )
 
 
+async def _swallow(coro):
+    """Run a coroutine and silently log any exception. Used so on_alert
+    failures (e.g. Telegram down) don't propagate and crash watchdog tasks."""
+    try:
+        await coro
+    except Exception:
+        logger.exception("alert callback failed")
+
+
 class PoDirectFeed:
     def __init__(
         self,
@@ -99,6 +108,13 @@ class PoDirectFeed:
         self.on_trade_open: Optional[Callable[[dict], None]] = None
         self.on_trade_close: Optional[Callable[[dict], None]] = None
         self.on_balance_update: Optional[Callable[[dict], None]] = None
+        # Async user-visible alert callback. Wired to TelegramBot.notify by
+        # main.py so the user gets a TG ping when the WS freezes / reconnect
+        # struggles. Kept best-effort: if the callback raises we just log it.
+        self.on_alert: Optional[Callable[[str], "asyncio.Future"]] = None
+        # Track last alert per category to avoid spamming (e.g. heartbeat
+        # firing every 30s during a long outage shouldn't send 100 messages).
+        self._alert_cooldown: dict[str, float] = {}
 
     # ---------- connect / disconnect ----------
 
@@ -181,6 +197,24 @@ class PoDirectFeed:
             self._payout_logger_task.cancel()
         if self._heartbeat_task and not self._heartbeat_task.done():
             self._heartbeat_task.cancel()
+
+    # ─── user-visible alert helper ───
+    def _alert(self, category: str, text: str, cooldown_sec: int = 600) -> None:
+        """Best-effort fire-and-forget alert to user (via on_alert). Anti-spam:
+        same `category` won't fire again within `cooldown_sec` (default 10 min)."""
+        if not self.on_alert:
+            return
+        now = time.time()
+        last = self._alert_cooldown.get(category, 0.0)
+        if now - last < cooldown_sec:
+            return
+        self._alert_cooldown[category] = now
+        try:
+            res = self.on_alert(text)
+            if asyncio.iscoroutine(res):
+                asyncio.create_task(_swallow(res), name=f"alert_{category}")
+        except Exception:
+            logger.exception("on_alert callback raised")
 
     # ─── auth refresh ───
     def _is_relogin_safe(self) -> bool:
@@ -310,6 +344,12 @@ class PoDirectFeed:
                     "connection appears frozen, triggering reconnect",
                     silence, dead_threshold,
                 )
+                self._alert(
+                    "ws_freeze",
+                    f"⚠️ WebSocket замолчал на {int(silence)}с — связи с Pocket "
+                    f"Option нет. Принудительный реконнект. Если не восстановится "
+                    f"за пару минут — проверь логи.",
+                )
                 # Reset timestamp so we don't fire again while reconnect runs
                 self._last_frame_ts = now
                 # Close current WS — _recv_loop will start _auto_reconnect_loop
@@ -373,6 +413,16 @@ class PoDirectFeed:
                 # Phase 2: slow persistent retry
                 wait = 120 + random.uniform(0, 10)
                 relogin_round += 1
+                # Phase-2 alert: 10 fast attempts already failed, this is now a
+                # serious outage. Notify user once (cooldown handles repeats).
+                self._alert(
+                    "ws_persistent",
+                    f"❌ WebSocket не восстанавливается уже {max_fast_attempts}+ "
+                    f"попыток (~5 мин). Перешёл в режим persistent retry. "
+                    f"Возможные причины: бан Railway IP, миграция endpoint'а PO. "
+                    f"Если за 10 мин не отпустит — попробуй redeploy на Railway.",
+                    cooldown_sec=1800,   # 30 min — серьёзный алерт, повторяем не часто
+                )
                 # Trigger a relogin every 3 rounds in phase 2 (not on first to
                 # avoid spamming Playwright right after 10 fast failures)
                 if relogin_round % 3 == 0 and self._relogin_callback and not self._relogin_in_progress:
@@ -399,6 +449,23 @@ class PoDirectFeed:
                     except Exception: logger.exception("re-subscribe %s failed", sym)
                 logger.info("WS auto-reconnect successful (attempt %d, %d pairs)",
                             attempt, len(old_subs))
+                # Notify only if user already heard about an outage (i.e. a
+                # ws_freeze or ws_persistent alert was sent earlier). Otherwise
+                # quick reconnects are silent — no notification spam.
+                if (self._alert_cooldown.get("ws_freeze")
+                        or self._alert_cooldown.get("ws_persistent")):
+                    # Bypass cooldown for the recovery message — user needs to
+                    # know the outage ended.
+                    self._alert_cooldown["ws_recovered"] = 0.0
+                    self._alert(
+                        "ws_recovered",
+                        f"✅ WebSocket восстановлен (попытка {attempt}, "
+                        f"{len(old_subs)} пар переподписано). Торговля продолжается.",
+                        cooldown_sec=60,
+                    )
+                    # Reset outage cooldowns so a fresh outage sends new alert
+                    self._alert_cooldown.pop("ws_freeze", None)
+                    self._alert_cooldown.pop("ws_persistent", None)
                 return   # success — exit loop
             except Exception as e:
                 # HTTP 401/403 = ssid invalid → fast-path relogin, then keep retrying

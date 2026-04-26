@@ -346,6 +346,44 @@ async def run(cfg: dict, config_path: str = "config.yaml"):
         notify_holder["fn"] = tg.notify
     except NameError:
         pass    # po_feed mode — no relogin closure
+
+    # Wire user-visible WS health alerts to Telegram. PoDirectFeed will call
+    # feed.on_alert(text) when the WS freezes / can't reconnect / etc.
+    # This is *the* fix for "I don't know when the bot stopped working".
+    if hasattr(feed, "on_alert"):
+        feed.on_alert = tg.notify
+
+    # If a previous run() invocation crashed, the supervisor in main() left a
+    # marker in the journal. Now that TG is up, send a one-time alert so the
+    # user knows about the outage. (Best-effort — wrap in try.)
+    try:
+        crash_marker = journal.get("last_supervisor_crash")
+        if crash_marker:
+            import datetime as _dt
+            ts = crash_marker.get("ts", 0)
+            err = (crash_marker.get("error") or "")[:300]
+            when = _dt.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S") if ts else "?"
+            # Escape HTML special chars in error to avoid breaking parse_mode=HTML
+            err_safe = err.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            try:
+                await tg.notify(
+                    f"🔴 Бот падал и перезапустился сам.\n"
+                    f"Когда: {when}\n"
+                    f"Ошибка: <code>{err_safe}</code>\n\n"
+                    f"Сейчас всё работает. Если хочешь — посмотри логи Railway.",
+                    parse_mode="HTML",
+                )
+            except Exception:
+                # Fallback to plain text
+                await tg.notify(
+                    f"🔴 Бот падал и перезапустился сам.\n"
+                    f"Когда: {when}\nОшибка: {err}\n\n"
+                    f"Сейчас всё работает. Если хочешь — посмотри логи Railway."
+                )
+            journal.delete("last_supervisor_crash")
+    except Exception:
+        log.exception("supervisor-crash alert failed (non-fatal)")
+
     stop_event = asyncio.Event()
     async def stop_all():
         stop_event.set()
@@ -405,6 +443,7 @@ async def run(cfg: dict, config_path: str = "config.yaml"):
         asyncio.create_task(tg.run_polling(), name="tg_polling"),
         asyncio.create_task(tg.daily_report_loop(), name="daily_report"),
         asyncio.create_task(tg.periodic_report_loop(), name="periodic_report"),
+        asyncio.create_task(tg.health_watchdog_loop(), name="health_watchdog"),
     ]
     if api_task: tasks.append(api_task)
 
@@ -416,6 +455,7 @@ async def run(cfg: dict, config_path: str = "config.yaml"):
         "state_machine": lambda: sm.run(),
         "daily_report":  lambda: tg.daily_report_loop(),
         "periodic_report": lambda: tg.periodic_report_loop(),
+        "health_watchdog": lambda: tg.health_watchdog_loop(),
         # tg_polling has its own restart loop now; supervisor keeps it as a
         # belt-and-suspenders backup.
     }
@@ -498,7 +538,7 @@ def main():
             break
         except SystemExit:
             raise
-        except BaseException:
+        except BaseException as e:
             now = time.time()
             # Reset crash counter if last crash was long ago (stable run)
             if now - last_crash_ts > 600:
@@ -510,6 +550,24 @@ def main():
                 "TOP-LEVEL crash #%d in run() — restarting in %.1fs (process stays alive)",
                 crash_count, wait,
             )
+            # Persist a marker so the next successful startup notifies TG.
+            # We can't notify TG directly here — TG bot was created inside
+            # run() which just blew up, so its event loop is gone. The next
+            # run() will read this marker and ping the user.
+            try:
+                import traceback as _tb
+                from journal.db import Journal as _J
+                _journal_path = (cfg.get("journal", {}) or {}).get("path") or "journal/journal.sqlite"
+                _j = _J(_journal_path)
+                _j.set("last_supervisor_crash", {
+                    "ts": int(now),
+                    "error": f"{type(e).__name__}: {e}",
+                    "traceback": _tb.format_exc()[-2000:],
+                    "crash_count": crash_count,
+                })
+                _j.close()
+            except Exception:
+                log.exception("failed to persist supervisor crash marker")
             try:
                 time.sleep(wait)
             except KeyboardInterrupt:

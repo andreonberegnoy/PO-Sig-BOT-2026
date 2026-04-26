@@ -65,6 +65,7 @@
       { k: "filter.min_payout", t: "int", min: 50, max: 95, label: "Минимум payout (%)" },
       { k: "filter.payout_floor", t: "int", min: 50, max: 90, label: "Порог смены пары (%)" },
       { k: "filter.max_losses_in_row", t: "int", min: 1, max: 10, label: "Макс. минусов до бана" },
+      { k: "filter.min_wr1", t: "int", min: 0, max: 100, step: 5, label: "Мин. % 1-й сделки (WR1)" },
       { k: "filter.history_candles", t: "int", min: 200, max: 2000, label: "Размер истории" },
       { k: "filter.ban_hours", t: "int", min: 1, max: 72, label: "Бан пары (часов)" },
       { k: "filter.day_off_hours", t: "int", min: 1, max: 24, label: "День-офф (часов)" },

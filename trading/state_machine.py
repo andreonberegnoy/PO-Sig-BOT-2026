@@ -546,15 +546,44 @@ class StateMachine:
         last_scan = time.time()
         last_bar_minute = -1   # track minute boundary for bar-aligned refresh
         last_autoset = 0.0     # track auto window assignment
+        last_tick_ts = time.time()   # stall watchdog: last time any tick arrived
+        stall_notified = False       # don't spam TG on every check
 
         # Signal check cadence: poll every 1–2s to catch bar close promptly.
         check_interval = max(1, int(self.cfg.get("misc", {}).get("poll_interval_sec", 1)))
         while self._running:
             try:
                 await asyncio.wait_for(self._tick_event.wait(), timeout=check_interval)
+                last_tick_ts = time.time()   # tick received — reset stall timer
+                stall_notified = False
             except asyncio.TimeoutError:
                 pass
             self._tick_event.clear()
+
+            # ── Stall watchdog: if we have tracked pairs but no tick for
+            # STALL_LIMIT seconds, subscriptions were likely lost after a
+            # reconnect. Force a resubscription + feed reconnect.
+            STALL_LIMIT = 600   # 10 minutes
+            if (self._tracked and not self.state.paused
+                    and not self.state.waiting_resume
+                    and time.time() - last_tick_ts > STALL_LIMIT):
+                logger.warning("stall watchdog: no ticks for %.0fs on %d tracked pairs — forcing reconnect",
+                               time.time() - last_tick_ts, len(self._tracked))
+                if not stall_notified:
+                    stall_notified = True
+                    await self._notify(
+                        f"⚠️ Нет тиков {STALL_LIMIT//60} мин на {len(self._tracked)} парах. "
+                        f"Принудительный реконнект WS…"
+                    )
+                last_tick_ts = time.time()   # reset so we don't spam
+                # Force feed WebSocket close → auto_reconnect_loop takes over
+                try:
+                    ws = getattr(self.feed, "_ws", None)
+                    if ws:
+                        await ws.close()
+                except Exception:
+                    logger.exception("stall watchdog: ws.close() failed")
+                continue
 
             if self.state.paused or self.state.waiting_resume:
                 # Auto-resume if pause was triggered by schedule and working
@@ -585,48 +614,56 @@ class StateMachine:
                     self._persist()
                     continue
 
-            # Periodic rescan (every 5 min) OR forced (e.g., assets arrived late)
-            if self._force_rescan or now - last_scan > 300:
-                self._force_rescan = False
-                last_scan = now
-                await self._rescan_pairs()
-                self.journal.prune_bans()
+            # ── Main loop body wrapped in broad try/except so a single bad tick
+            # or unexpected exception never kills the entire trading loop.
+            try:
+                # Periodic rescan (every 5 min) OR forced (e.g., assets arrived late)
+                if self._force_rescan or now - last_scan > 300:
+                    self._force_rescan = False
+                    last_scan = now
+                    await self._rescan_pairs()
+                    self.journal.prune_bans()
 
-            # Periodic auto-assignment of multi-chart windows — ONLY for legacy
-            # po-signals browser path. Direct-PO feed doesn't need any clicks
-            # (live ticks stream for every subscribed pair automatically).
-            if (autoset_windows is not None
-                    and self.state.mg_step == 0
-                    and now - last_autoset > 90
-                    and getattr(self.feed, "_page", None)):
-                last_autoset = now
-                try:
-                    summary = await autoset_windows(
-                        self.feed._page,
-                        min_payout=self.cfg["filter"]["min_payout"],
-                        max_payout=92,
-                    )
-                    if summary.get("windows"):
-                        logger.info("autoset windows: %s", summary)
-                except Exception:
-                    logger.exception("autoset_windows failed")
+                # Periodic auto-assignment of multi-chart windows — ONLY for legacy
+                # po-signals browser path. Direct-PO feed doesn't need any clicks
+                # (live ticks stream for every subscribed pair automatically).
+                if (autoset_windows is not None
+                        and self.state.mg_step == 0
+                        and now - last_autoset > 90
+                        and getattr(self.feed, "_page", None)):
+                    last_autoset = now
+                    try:
+                        summary = await autoset_windows(
+                            self.feed._page,
+                            min_payout=self.cfg["filter"]["min_payout"],
+                            max_payout=92,
+                        )
+                        if summary.get("windows"):
+                            logger.info("autoset windows: %s", summary)
+                    except Exception:
+                        logger.exception("autoset_windows failed")
 
-            # Bar-aligned force refresh: right after each minute boundary, pull all pairs
-            # so that a freshly closed bar is available within ~1–2s of close.
-            tf = self.cfg["filter"]["tf"]
-            bar_key = int(now) // tf
-            if bar_key != last_bar_minute:
-                last_bar_minute = bar_key
-                await self._maybe_refresh_all(min_interval_sec=0)
-            else:
-                # Between boundaries keep a loose refresh (fallback if tick stream lagged)
-                await self._maybe_refresh_all(min_interval_sec=15)
+                # Bar-aligned force refresh: right after each minute boundary, pull all pairs
+                # so that a freshly closed bar is available within ~1–2s of close.
+                tf = self.cfg["filter"]["tf"]
+                bar_key = int(now) // tf
+                if bar_key != last_bar_minute:
+                    last_bar_minute = bar_key
+                    await self._maybe_refresh_all(min_interval_sec=0)
+                else:
+                    # Between boundaries keep a loose refresh (fallback if tick stream lagged)
+                    await self._maybe_refresh_all(min_interval_sec=15)
 
-            # Branch: in-cycle vs free
-            if self.state.mg_step > 0 and self.state.current_pair:
-                await self._in_cycle_step()
-            else:
-                await self._free_scan_step()
+                # Branch: in-cycle vs free
+                if self.state.mg_step > 0 and self.state.current_pair:
+                    await self._in_cycle_step()
+                else:
+                    await self._free_scan_step()
+
+            except asyncio.CancelledError:
+                raise   # propagate cancellation — bot is shutting down
+            except Exception:
+                logger.exception("state_machine loop tick crashed — continuing on next tick")
 
     # ---------- free scan (no cycle active) ----------
     async def _free_scan_step(self):

@@ -344,19 +344,44 @@ class PoDirectFeed:
             if not existing:
                 asyncio.create_task(self._auto_reconnect_loop(), name="po_auto_reconnect")
 
-    async def _auto_reconnect_loop(self, max_attempts: int = 10):
-        """Reconnect with exponential backoff after a plain WS disconnect.
-        Re-uses the existing ssid (no relogin) UNLESS the server rejects
-        with HTTP 401/403 — that means ssid is invalid, no point retrying."""
+    async def _auto_reconnect_loop(self, max_fast_attempts: int = 10):
+        """Reconnect with exponential backoff — NEVER gives up.
+
+        Phase 1 (fast): attempts 1-10, backoff 2^n up to 60s each.
+          - HTTP 401/403 → fast-path to relogin immediately.
+          - All other errors → keep retrying.
+
+        Phase 2 (persistent): after phase 1 exhausted without success,
+          keep retrying every 120s and trigger a relogin every 3 rounds.
+          This ensures the bot recovers even if the network is down for
+          minutes or the relogin takes time.
+        """
         import random
-        try:
-            from websockets.exceptions import InvalidStatus
-        except Exception:
-            InvalidStatus = None
-        for attempt in range(1, max_attempts + 1):
-            wait = min(60, 2 ** attempt + random.uniform(0, 1))
-            logger.info("WS auto-reconnect attempt %d in %.1fs", attempt, wait)
+        attempt = 0
+        relogin_round = 0   # how many phase-2 rounds since last relogin
+
+        while self._running:
+            attempt += 1
+            if attempt <= max_fast_attempts:
+                wait = min(60, 2 ** attempt + random.uniform(0, 1))
+            else:
+                # Phase 2: slow persistent retry
+                wait = 120 + random.uniform(0, 10)
+                relogin_round += 1
+                # Trigger a relogin every 3 rounds in phase 2 (not on first to
+                # avoid spamming Playwright right after 10 fast failures)
+                if relogin_round % 3 == 0 and self._relogin_callback and not self._relogin_in_progress:
+                    logger.warning("persistent reconnect: triggering relogin (round %d)", relogin_round)
+                    asyncio.create_task(self._do_relogin(reason="persistent_reconnect"),
+                                        name="po_relogin_persistent")
+
+            logger.info("WS auto-reconnect attempt %d in %.1fs%s",
+                        attempt, wait,
+                        " [phase-2 persistent]" if attempt > max_fast_attempts else "")
             await asyncio.sleep(wait)
+            if not self._running:
+                return
+
             try:
                 self._ready.clear()
                 self._running = True
@@ -369,12 +394,9 @@ class PoDirectFeed:
                     except Exception: logger.exception("re-subscribe %s failed", sym)
                 logger.info("WS auto-reconnect successful (attempt %d, %d pairs)",
                             attempt, len(old_subs))
-                return
+                return   # success — exit loop
             except Exception as e:
-                # If server rejects handshake with auth-related status, ssid is
-                # dead — fast-path to relogin instead of burning 10 retries.
-                # Check both attribute path and string match (websockets versions
-                # differ: .response.status_code vs .status_code vs only str(e)).
+                # HTTP 401/403 = ssid invalid → fast-path relogin, then keep retrying
                 msg = str(e)
                 code = None
                 for path in ("response.status_code", "status_code"):
@@ -383,22 +405,22 @@ class PoDirectFeed:
                         obj = getattr(obj, part, None)
                         if obj is None: break
                     if isinstance(obj, int):
-                        code = obj
-                        break
+                        code = obj; break
                 if code is None:
                     if "HTTP 403" in msg: code = 403
                     elif "HTTP 401" in msg: code = 401
                 if code in (401, 403):
-                    logger.warning("WS handshake rejected (HTTP %d) — ssid invalid, "
-                                   "fast-path to relogin", code)
-                    if self._relogin_callback:
+                    logger.warning("WS handshake HTTP %d — ssid invalid, triggering relogin", code)
+                    if self._relogin_callback and not self._relogin_in_progress:
                         asyncio.create_task(self._do_relogin(reason=f"http_{code}"),
                                             name="po_relogin_403")
-                    return
-                logger.exception("auto-reconnect attempt %d failed", attempt)
-        logger.error("auto-reconnect gave up after %d attempts — triggering relogin", max_attempts)
-        if self._relogin_callback:
-            asyncio.create_task(self._do_relogin(reason="reconnect_exhausted"))
+                    # Don't return — keep looping; relogin will update ssid and
+                    # the next attempt will use the fresh credentials.
+                    await asyncio.sleep(15)   # brief pause while relogin starts
+                    continue
+                logger.warning("auto-reconnect attempt %d failed: %s", attempt, e)
+
+        logger.info("auto-reconnect loop exiting (bot stopped)")
 
     async def _handle_text(self, raw: str):
         if not raw:

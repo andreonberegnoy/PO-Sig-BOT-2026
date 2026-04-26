@@ -305,6 +305,49 @@ async def run(cfg: dict, config_path: str = "config.yaml"):
     ]
     if api_task: tasks.append(api_task)
 
+    # ── Task supervisor: monitors critical asyncio tasks and restarts them
+    # if they die unexpectedly. This is the last line of defence — if
+    # state_machine or tg_polling crash despite all inner guards, the
+    # supervisor brings them back automatically.
+    _RESTARTABLE = {
+        "state_machine": lambda: sm.run(),
+        "daily_report":  lambda: tg.daily_report_loop(),
+        "periodic_report": lambda: tg.periodic_report_loop(),
+        # tg_polling has its own restart loop now; supervisor keeps it as a
+        # belt-and-suspenders backup.
+    }
+
+    async def _supervisor():
+        while not stop_event.is_set():
+            await asyncio.sleep(30)
+            if stop_event.is_set():
+                return
+            for name, factory in _RESTARTABLE.items():
+                # Find existing task by name
+                existing = next(
+                    (t for t in asyncio.all_tasks() if t.get_name() == name and not t.done()),
+                    None
+                )
+                if existing:
+                    continue   # still running — all good
+                log.error("supervisor: task '%s' is dead — restarting in 5s", name)
+                try:
+                    await tg.notify(f"🚨 Задача <b>{name}</b> упала — перезапускаю автоматически…",
+                                    parse_mode="HTML")
+                except Exception:
+                    pass
+                await asyncio.sleep(5)
+                if stop_event.is_set():
+                    return
+                try:
+                    new_task = asyncio.create_task(factory(), name=name)
+                    tasks.append(new_task)
+                    log.info("supervisor: task '%s' restarted", name)
+                except Exception:
+                    log.exception("supervisor: failed to restart task '%s'", name)
+
+    tasks.append(asyncio.create_task(_supervisor(), name="supervisor"))
+
     # Wait for stop signal
     await stop_event.wait()
     log.info("shutdown requested, cleaning up…")

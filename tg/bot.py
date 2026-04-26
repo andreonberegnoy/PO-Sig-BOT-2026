@@ -316,8 +316,25 @@ class TelegramBot:
     # ---------- polling ----------
 
     async def run_polling(self):
-        logger.info("telegram polling started")
-        await self.dp.start_polling(self.bot, handle_signals=False)
+        """Start Telegram polling with automatic restart on any exception.
+        Aiogram polling can die on network blips or Telegram API errors;
+        without a restart the bot goes silent (no commands work)."""
+        import asyncio as _asyncio
+        retry_delay = 5
+        while True:
+            try:
+                logger.info("telegram polling started")
+                await self.dp.start_polling(self.bot, handle_signals=False)
+                # start_polling returned normally — bot was stopped intentionally
+                logger.info("telegram polling stopped normally")
+                return
+            except _asyncio.CancelledError:
+                logger.info("telegram polling cancelled")
+                return
+            except Exception as e:
+                logger.warning("telegram polling crashed (%s) — restart in %ds", e, retry_delay)
+                await _asyncio.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, 60)   # exponential backoff up to 60s
 
     async def close(self):
         try:

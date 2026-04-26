@@ -225,7 +225,36 @@ async def run(cfg: dict, config_path: str = "config.yaml"):
         )
         # Wire journal in for analytics (payout snapshots).
         feed._journal_for_logging = journal
-        await feed.connect()
+        # Initial connect with infinite retry. The in-feed _auto_reconnect_loop
+        # only kicks in *after* a successful connect; if the very first WS
+        # handshake fails (Railway cold-start network blip, Cloudflare, etc.)
+        # the exception would otherwise kill the process and Railway would
+        # restart the container. Mirror the auto-reconnect backoff here so the
+        # bot survives a flaky first handshake without a container restart.
+        import random as _rnd
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                await feed.connect()
+                if attempt > 1:
+                    log.info("initial WS connect succeeded on attempt %d", attempt)
+                break
+            except Exception as e:
+                wait = min(60.0, 2 ** min(attempt, 6) + _rnd.uniform(0, 1))
+                log.warning("initial WS connect attempt %d failed: %s — retrying in %.1fs",
+                            attempt, e, wait)
+                # Make sure feed is in a clean state before next attempt:
+                # ._running may have been flipped to True inside connect().
+                try:
+                    feed._running = False
+                    if getattr(feed, "_ws", None) is not None:
+                        try: await feed._ws.close()
+                        except Exception: pass
+                        feed._ws = None
+                except Exception:
+                    pass
+                await asyncio.sleep(wait)
     else:
         from feed.po_feed import PoFeed
         feed = PoFeed(mode=cfg["mode"], auth_cfg=cfg.get("auth") or {})
@@ -377,10 +406,41 @@ def main():
         cfg["mode"] = args.mode
     setup_logging(cfg)
 
-    try:
-        asyncio.run(run(cfg, config_path=args.config))
-    except KeyboardInterrupt:
-        pass
+    # Top-level supervisor: NEVER let the process die from an uncaught
+    # exception. If run() blows up for any reason (network, third-party lib,
+    # whatever), we wait with exponential backoff and start it over again.
+    # The only ways out are SIGINT (Ctrl-C) and SIGTERM via stop_all().
+    log = logging.getLogger("main")
+    import time, random
+    crash_count = 0
+    last_crash_ts = 0.0
+    while True:
+        try:
+            asyncio.run(run(cfg, config_path=args.config))
+            # run() returned cleanly (stop_event was set) → exit normally
+            break
+        except KeyboardInterrupt:
+            log.info("KeyboardInterrupt — exiting")
+            break
+        except SystemExit:
+            raise
+        except BaseException:
+            now = time.time()
+            # Reset crash counter if last crash was long ago (stable run)
+            if now - last_crash_ts > 600:
+                crash_count = 0
+            crash_count += 1
+            last_crash_ts = now
+            wait = min(60.0, 2 ** min(crash_count, 6) + random.uniform(0, 1))
+            log.exception(
+                "TOP-LEVEL crash #%d in run() — restarting in %.1fs (process stays alive)",
+                crash_count, wait,
+            )
+            try:
+                time.sleep(wait)
+            except KeyboardInterrupt:
+                log.info("KeyboardInterrupt during supervisor backoff — exiting")
+                break
 
 
 if __name__ == "__main__":

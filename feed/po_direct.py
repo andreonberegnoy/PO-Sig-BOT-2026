@@ -118,6 +118,11 @@ class PoDirectFeed:
             },
             max_size=16 * 1024 * 1024,
             ping_interval=None,  # we handle socket.io ping ourselves
+            # Default open_timeout is 10s — too tight on Railway cold-start
+            # (DNS + TLS + Cloudflare IUAM check can take 15-25s on first hit).
+            # Generous timeout here means a slow handshake retries via the
+            # outer reconnect loop instead of failing prematurely.
+            open_timeout=45,
         )
         self._running = True
         self._recv_task = asyncio.create_task(self._recv_loop(), name="po_direct_recv")

@@ -134,6 +134,13 @@ async def run(cfg: dict, config_path: str = "config.yaml"):
         ws_url = (os.environ.get("PO_WS_URL")
                   or (cfg.get("po") or {}).get("ws_url")
                   or "wss://api-eu.po.market/socket.io/?EIO=4&transport=websocket")
+        # Optional region pin: when set, bot stays on this URL even if PO's
+        # Playwright login captures a different one (e.g. user wants api-eu
+        # but PO routes account to api-msk). Has a circuit breaker — if PO
+        # rejects the preferred URL 3 times → temporary fallback. See
+        # PoDirectFeed.preferred_ws_url for details.
+        preferred_ws_url = (os.environ.get("PO_PREFERRED_WS_URL")
+                            or (cfg.get("po") or {}).get("preferred_ws_url"))
         # PO session is captured with a specific isDemo flag (from when user
         # logged into the site). Match the session: if user extracted ssid
         # while on demo account → PO_IS_DEMO=1; while on real → PO_IS_DEMO=0.
@@ -222,7 +229,10 @@ async def run(cfg: dict, config_path: str = "config.yaml"):
             relogin_callback=relogin_cb,
             relogin_interval_hours=float(os.environ.get("PO_RELOGIN_HOURS") or 12.0),
             relogin_safe_check=lambda: feed_relogin_safe_check(),
+            preferred_ws_url=preferred_ws_url,
         )
+        if preferred_ws_url:
+            log.info("region pin active: PO_PREFERRED_WS_URL=%s", preferred_ws_url)
         # Wire journal in for analytics (payout snapshots).
         feed._journal_for_logging = journal
         # Initial connect with infinite retry. The in-feed _auto_reconnect_loop

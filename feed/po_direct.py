@@ -66,12 +66,23 @@ class PoDirectFeed:
         relogin_callback=None,
         relogin_interval_hours: float = 12.0,
         relogin_safe_check=None,    # callable() -> bool, True = OK to relogin now
+        preferred_ws_url: Optional[str] = None,  # if set, override Playwright-captured ws_url
     ):
         self.ssid = ssid
         self.uid = int(uid)
         self.is_demo = 1 if is_demo else 0
         self.ws_url = ws_url
         self.verify_ssl = verify_ssl
+        # Region-pinning: when set, ignore the ws_url that Playwright relogin
+        # captures and keep using this URL. Useful when user wants to stay on
+        # api-eu even though PO would route them to api-msk. Has a circuit
+        # breaker (see _preferred_ws_failures): after 3 consecutive auth
+        # failures on the preferred URL, falls back to whatever PO suggests.
+        self.preferred_ws_url: Optional[str] = preferred_ws_url
+        self._preferred_ws_failures: int = 0
+        # If set, on next relogin we surrender to PO's choice for this many
+        # cycles before trying preferred again.
+        self._preferred_ws_disabled_cycles: int = 0
 
         # state mirrors po-signals feed so state_machine works identically
         self.assets: dict[str, dict] = {}
@@ -251,10 +262,45 @@ class PoDirectFeed:
             self.ssid = fresh["ssid"]
             if fresh.get("uid"):
                 self.uid = int(fresh["uid"])
-            if fresh.get("ws_url"):
-                self.ws_url = fresh["ws_url"]
             if "is_demo" in fresh:
                 self.is_demo = 1 if fresh["is_demo"] else 0
+            # Region pinning logic. Three cases:
+            # (a) preferred_ws_url not set → use whatever PO suggested (legacy)
+            # (b) preferred set, circuit breaker open (auth keeps failing) →
+            #     surrender to PO's choice for N cycles before retrying
+            # (c) preferred set, breaker closed → override PO's URL with
+            #     preferred. Authentication may fail; if it does we'll bump
+            #     _preferred_ws_failures and eventually trip the breaker.
+            captured_url = fresh.get("ws_url")
+            if captured_url:
+                if not self.preferred_ws_url:
+                    self.ws_url = captured_url
+                elif self._preferred_ws_disabled_cycles > 0:
+                    self._preferred_ws_disabled_cycles -= 1
+                    self.ws_url = captured_url
+                    logger.warning(
+                        "relogin: preferred_ws_url=%s temporarily disabled "
+                        "(circuit breaker, %d cycles left) — using %s",
+                        self.preferred_ws_url, self._preferred_ws_disabled_cycles,
+                        captured_url,
+                    )
+                elif captured_url != self.preferred_ws_url:
+                    logger.warning(
+                        "relogin: PO suggested %s but PO_PREFERRED_WS_URL=%s — "
+                        "overriding to preferred (auth may fail)",
+                        captured_url, self.preferred_ws_url,
+                    )
+                    self._alert(
+                        "ws_region_override",
+                        f"⚠️ PO предложил <code>{captured_url}</code>, но настроен "
+                        f"лок на <code>{self.preferred_ws_url}</code>. Использую "
+                        f"preferred. Если auth упадёт 3 раза — лок временно "
+                        f"снимется (~один цикл).",
+                        cooldown_sec=3600,
+                    )
+                    self.ws_url = self.preferred_ws_url
+                else:
+                    self.ws_url = captured_url
             logger.info("relogin: new ssid acquired, reconnecting WS…")
 
             # Tear down current WS and reopen with fresh credentials
@@ -558,10 +604,35 @@ class PoDirectFeed:
             if event == "successauth":
                 logger.info("authenticated: %s", payload)
                 self._ready.set()
+                # Reset region-pin breaker — preferred URL was accepted
+                if self.preferred_ws_url and self.ws_url == self.preferred_ws_url:
+                    self._preferred_ws_failures = 0
                 return
 
             if event == "NotAuthorized":
                 logger.warning("session NotAuthorized — triggering relogin")
+                # Region-pin circuit breaker: if NotAuthorized arrived while we
+                # were on the preferred URL (override active), bump the failure
+                # counter. After 3 consecutive failures, surrender to PO's
+                # routing for 5 cycles before retrying the preferred URL.
+                if self.preferred_ws_url and self.ws_url == self.preferred_ws_url:
+                    self._preferred_ws_failures += 1
+                    logger.warning(
+                        "preferred_ws_url=%s rejected by PO (failure %d/3)",
+                        self.preferred_ws_url, self._preferred_ws_failures,
+                    )
+                    if self._preferred_ws_failures >= 3:
+                        self._preferred_ws_disabled_cycles = 5
+                        self._preferred_ws_failures = 0
+                        self._alert(
+                            "ws_region_breaker",
+                            f"❌ PO 3 раза подряд отклонил <code>{self.preferred_ws_url}</code> "
+                            f"для твоего аккаунта. Видимо, PO перевёл аккаунт на другой "
+                            f"регион насовсем. Временно отключаю регион-лок (5 циклов "
+                            f"релогина), чтобы бот не висел в петле. Если хочешь "
+                            f"навсегда — убери PO_PREFERRED_WS_URL на Railway.",
+                            cooldown_sec=3600,
+                        )
                 if self._relogin_callback and not self._relogin_in_progress:
                     asyncio.create_task(self._do_relogin(reason="NotAuthorized"))
                 return

@@ -250,6 +250,57 @@ class Journal:
         self.conn.row_factory = None
         return out
 
+    # ---------- winning-trade payouts (per pair) ----------
+
+    def win_payout_aggregate(self, since_ts: int, mode: str,
+                             after_loss_only: bool = True) -> list[dict]:
+        """For each symbol, aggregate the payout of the WIN trade that closed
+        a martingale cycle. By default only counts WINs that came AFTER ≥1
+        loss in the cycle (mg_step > 0) — these are 'recovered' wins where
+        the user's question 'with what payout did it finally close +' applies.
+
+        Returns per-symbol: min_win_payout, avg_win_payout, last_win_payout,
+        n_recovered_wins."""
+        self.conn.row_factory = sqlite3.Row
+        cond = "result='WIN'" + (" AND mg_step > 0" if after_loss_only else "")
+        cur = self.conn.execute(
+            f"""SELECT symbol,
+                       COUNT(*) AS n,
+                       MIN(payout) AS min_p,
+                       AVG(payout) AS avg_p,
+                       MAX(payout) AS max_p
+                  FROM trades
+                 WHERE close_ts >= ? AND mode = ? AND {cond}
+              GROUP BY symbol""",
+            (since_ts, mode),
+        )
+        out = {}
+        for r in cur.fetchall():
+            out[r["symbol"]] = {
+                "n_recovered_wins": int(r["n"] or 0),
+                "min_win_payout":   int(r["min_p"] or 0),
+                "avg_win_payout":   round(float(r["avg_p"] or 0), 1),
+                "max_win_payout":   int(r["max_p"] or 0),
+            }
+        # Last winning payout per symbol (most recent close_ts)
+        cur = self.conn.execute(
+            f"""SELECT t.symbol, t.payout, t.close_ts
+                  FROM trades t
+                  JOIN (SELECT symbol, MAX(close_ts) AS mts
+                          FROM trades
+                         WHERE close_ts >= ? AND mode = ? AND {cond}
+                      GROUP BY symbol) m
+                    ON m.symbol = t.symbol AND m.mts = t.close_ts
+                 WHERE t.mode = ?""",
+            (since_ts, mode, mode),
+        )
+        for r in cur.fetchall():
+            sym = r["symbol"]
+            if sym in out:
+                out[sym]["last_win_payout"] = int(r["payout"] or 0)
+        self.conn.row_factory = None
+        return [{"symbol": s, **v} for s, v in out.items()]
+
     # ---------- pair stats log ----------
 
     def log_pair_stats(self, symbol: str, snapshot: dict, ts: Optional[int] = None):

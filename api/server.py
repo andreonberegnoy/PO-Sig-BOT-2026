@@ -249,11 +249,18 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
         stats_rows = journal.pair_stats_aggregate(
             since, hour_filter=hour_filter, tz_offset_sec=tz_offset_sec,
         )
+        win_payout_rows = journal.win_payout_aggregate(
+            since, mode=cfg.get("mode", "real"), after_loss_only=True,
+        )
         # Merge by symbol
         by_sym: dict[str, dict] = {}
         for r in payout_rows:
             by_sym[r["symbol"]] = {**r}
         for r in stats_rows:
+            sym = r["symbol"]
+            by_sym.setdefault(sym, {"symbol": sym})
+            by_sym[sym].update(r)
+        for r in win_payout_rows:
             sym = r["symbol"]
             by_sym.setdefault(sym, {"symbol": sym})
             by_sym[sym].update(r)

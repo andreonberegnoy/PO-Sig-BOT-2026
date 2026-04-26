@@ -81,6 +81,7 @@ class PoDirectFeed:
         self._scheduled_relogin_task: Optional[asyncio.Task] = None
         self._buffer_keeper_task: Optional[asyncio.Task] = None
         self._payout_logger_task: Optional[asyncio.Task] = None
+        self._heartbeat_task: Optional[asyncio.Task] = None
         self._journal_for_logging = None     # set externally for analytics
         self._last_logged_payout: dict[str, int] = {}
         self._pending_event: Optional[str] = None   # for 451- / binary pair
@@ -88,6 +89,9 @@ class PoDirectFeed:
         self._ready = asyncio.Event()
         self._recv_task: Optional[asyncio.Task] = None
         self._running = False
+        # Watchdog: timestamp of last frame received from server (any frame).
+        # Heartbeat loop checks this every 30s; if >90s silent → force reconnect.
+        self._last_frame_ts: float = time.time()
 
         # callbacks (set externally)
         self.on_tick: Optional[Callable[[str, int, dict], None]] = None
@@ -147,6 +151,11 @@ class PoDirectFeed:
             self._payout_logger_task = asyncio.create_task(
                 self._payout_logger_loop(), name="po_payout_logger",
             )
+        # Start WS heartbeat watchdog (survives reconnects, started once).
+        if self._heartbeat_task is None or self._heartbeat_task.done():
+            self._heartbeat_task = asyncio.create_task(
+                self._heartbeat_loop(), name="po_heartbeat",
+            )
 
     async def close(self):
         self._running = False
@@ -165,6 +174,8 @@ class PoDirectFeed:
             self._buffer_keeper_task.cancel()
         if self._payout_logger_task and not self._payout_logger_task.done():
             self._payout_logger_task.cancel()
+        if self._heartbeat_task and not self._heartbeat_task.done():
+            self._heartbeat_task.cancel()
 
     # ─── auth refresh ───
     def _is_relogin_safe(self) -> bool:
@@ -253,6 +264,56 @@ class PoDirectFeed:
                             int(self._relogin_interval/3600))
                 await self._do_relogin(reason="scheduled")
 
+    # ---------- WS heartbeat watchdog ----------
+
+    async def _heartbeat_loop(self, check_interval: int = 30, dead_threshold: int = 90):
+        """Proactive dead-connection detector.
+
+        Every `check_interval` seconds (30s) we check how long ago the last
+        frame was received. If silence exceeds `dead_threshold` (90s), the TCP
+        connection is frozen — trigger a reconnect (or relogin if ssid is bad).
+
+        We also proactively send an Engine.IO ping ("2") every 25 seconds so
+        the server knows we're alive (some PO regions stop sending server-side
+        pings after 60–90s idle).
+        """
+        PING_INTERVAL = 25   # send our own EIO ping every 25s
+        last_ping_ts = time.time()
+        while self._running:
+            try:
+                await asyncio.sleep(check_interval)
+            except asyncio.CancelledError:
+                return
+            if not self._running:
+                return
+            now = time.time()
+            # Send proactive Engine.IO ping to keep server-side idle timer reset
+            if self._ws and (now - last_ping_ts) >= PING_INTERVAL:
+                try:
+                    await self._ws.send("2")
+                    last_ping_ts = now
+                except Exception:
+                    pass   # WS already dead — watchdog will handle below
+
+            silence = now - self._last_frame_ts
+            if silence > dead_threshold:
+                if self._relogin_in_progress:
+                    logger.info("heartbeat: silent %ds but relogin in progress — skip", int(silence))
+                    continue
+                logger.warning(
+                    "heartbeat: no WS frames for %.0fs (threshold=%ds) — "
+                    "connection appears frozen, triggering reconnect",
+                    silence, dead_threshold,
+                )
+                # Reset timestamp so we don't fire again while reconnect runs
+                self._last_frame_ts = now
+                # Close current WS — _recv_loop will start _auto_reconnect_loop
+                try:
+                    if self._ws:
+                        await self._ws.close()
+                except Exception:
+                    pass
+
     # ---------- WS recv loop ----------
 
     async def _recv_loop(self):
@@ -261,6 +322,8 @@ class PoDirectFeed:
         keeper, scheduled relogin) keep running across WS reconnects."""
         try:
             async for raw in self._ws:
+                # Update watchdog timestamp on every received frame.
+                self._last_frame_ts = time.time()
                 try:
                     if isinstance(raw, bytes):
                         self._handle_binary(raw)
@@ -272,9 +335,10 @@ class PoDirectFeed:
             logger.warning("WS closed: %s", e)
         except Exception:
             logger.exception("recv loop unexpected error")
-        # Trigger auto-reconnect if bot is still supposed to be running and
-        # we don't already have a reconnect task in flight.
-        if self._running:
+        # Trigger auto-reconnect ONLY if not already in a relogin (Fix 3: race
+        # condition — _do_relogin closes WS intentionally; don't start a
+        # competing reconnect that will race with the fresh-ssid connect).
+        if self._running and not self._relogin_in_progress:
             existing = [t for t in asyncio.all_tasks()
                         if t.get_name() == "po_auto_reconnect" and not t.done()]
             if not existing:

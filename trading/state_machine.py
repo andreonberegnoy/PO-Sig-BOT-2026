@@ -738,6 +738,25 @@ class StateMachine:
                     f"Причина: payout {payout}% < {floor}%. МГ-шаг {self.state.mg_step} сохранён."
                 )
                 sym = pick.symbol
+                # ── KEY FIX: ensure the new pair has history + WS subscription ──
+                # _pick_switch_pair returns any scored pair, not necessarily one
+                # already in _tracked. Without history, buf will be None and the
+                # bot loops in _in_cycle_step doing nothing forever (the "freeze
+                # after pair switch" bug).
+                if sym not in self._tracked:
+                    logger.info("in-cycle switch: loading history for %s (not yet tracked)", sym)
+                    try:
+                        await self._load_history(sym)
+                        self._tracked.add(sym)
+                    except Exception:
+                        logger.exception("in-cycle switch: _load_history %s failed", sym)
+                    if hasattr(self.feed, "subscribe"):
+                        try:
+                            await self.feed.subscribe(sym, int(self.cfg["filter"]["tf"]))
+                        except Exception:
+                            logger.exception("in-cycle switch: subscribe %s failed", sym)
+                # Reset bar-time so the next closed bar on the new pair is evaluated
+                self._last_closed_bar_time.pop(sym, None)
 
         # Stop-sum guardrail
         next_amt = self._amount_for_step(self.state.mg_step)

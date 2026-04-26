@@ -7,6 +7,7 @@ Commands:
   /resume    — возобновить (или перезапустить после стоп-суммы)
   /stop      — остановить бота полностью
   /bans      — показать активные баны пар
+  /ping      — проверить живость бота + кнопка принудительного реконнекта
   /help
 """
 
@@ -17,9 +18,14 @@ from datetime import datetime, timedelta
 from typing import Callable, Optional
 import pytz
 
-from aiogram import Bot, Dispatcher
+from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import (
+    Message,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    CallbackQuery,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +78,7 @@ class TelegramBot:
                 "Команды:\n"
                 "/status — состояние\n"
                 "/balance — баланс\n"
+                "/ping — проверить живость бота 🩺\n"
                 "/pause — пауза\n"
                 "/resume — продолжить\n"
                 "/stop — остановить бота\n"
@@ -192,6 +199,119 @@ class TelegramBot:
             lines = [f"{sym} — до {datetime.fromtimestamp(exp).strftime('%Y-%m-%d %H:%M')} ({(exp-now)//60} мин)"
                      for sym, exp in bans]
             await m.answer("Активные баны:\n" + "\n".join(lines))
+
+        # ── /ping — health check + кнопки действий ──────────────────────────
+
+        def _build_ping_text() -> str:
+            """Собирает диагностику состояния бота."""
+            lines = ["🩺 <b>Диагностика бота</b>"]
+            # Feed / WS status
+            feed = self.feed
+            if feed is None:
+                lines.append("❌ Feed не подключён")
+            else:
+                last_frame = getattr(feed, "_last_frame_ts", None)
+                if last_frame:
+                    age = int(time.time() - last_frame)
+                    icon = "✅" if age < 60 else ("⚠️" if age < 120 else "❌")
+                    lines.append(f"{icon} WS: последний фрейм {age}с назад")
+                else:
+                    lines.append("⚠️ WS: нет данных о фреймах")
+                ws = getattr(feed, "_ws", None)
+                ws_state = "open" if (ws and not getattr(ws, "closed", True)) else "closed"
+                lines.append(f"🔌 WebSocket: <code>{ws_state}</code>")
+                relogin_in = getattr(feed, "_relogin_in_progress", False)
+                if relogin_in:
+                    lines.append("🔄 Relogin: в процессе…")
+                bal = feed.balance()
+                lines.append(f"💳 Баланс: <b>${bal}</b>")
+            # State machine
+            sm = self.sm
+            if sm:
+                s = sm.state
+                pair = s.current_pair or "—"
+                mg = s.mg_step
+                paused = "⏸ ПАУЗА" if s.paused else ("⏳ ОЖИДАНИЕ /resume" if s.waiting_resume else "▶️ активен")
+                lines.append(f"🤖 SM: {paused}  |  пара: {pair}  |  МГ-шаг: {mg}")
+                tracked = len(getattr(sm, "_tracked", set()) or set())
+                tick_counts = getattr(sm, "_tick_counts", {}) or {}
+                active_ticks = sum(1 for v in tick_counts.values() if v > 0)
+                total_ticks = sum(tick_counts.values())
+                lines.append(f"📡 Пар в трекере: {tracked}  |  активных тик-потоков: {active_ticks}  |  тиков всего: {total_ticks}")
+            # Asyncio tasks
+            task_names = {t.get_name() for t in asyncio.all_tasks() if not t.done()}
+            critical = {"state_machine", "tg_polling", "po_direct_recv", "po_heartbeat"}
+            missing = critical - task_names
+            if missing:
+                lines.append(f"❌ Отсутствуют задачи: {', '.join(sorted(missing))}")
+            else:
+                lines.append(f"✅ Все критичные задачи живы ({len(task_names)} всего)")
+            lines.append(f"\n🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            return "\n".join(lines)
+
+        def _build_ping_keyboard() -> InlineKeyboardMarkup:
+            return InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="🔄 Реконнект WS", callback_data="ping:reconnect"),
+                    InlineKeyboardButton(text="🔑 Relogin (новый SSID)", callback_data="ping:relogin"),
+                ],
+                [
+                    InlineKeyboardButton(text="🔃 Обновить статус", callback_data="ping:refresh"),
+                ],
+            ])
+
+        @dp.message(Command("ping"))
+        async def _ping(m: Message):
+            if m.chat.id != self.chat_id: return
+            await m.answer(_build_ping_text(), parse_mode="HTML",
+                           reply_markup=_build_ping_keyboard())
+
+        @dp.callback_query(F.data.startswith("ping:"))
+        async def _ping_callback(cb: CallbackQuery):
+            if cb.message.chat.id != self.chat_id:
+                return await cb.answer("Нет доступа", show_alert=True)
+            action = cb.data.split(":", 1)[1]
+
+            if action == "refresh":
+                await cb.message.edit_text(_build_ping_text(), parse_mode="HTML",
+                                           reply_markup=_build_ping_keyboard())
+                await cb.answer("Обновлено ✅")
+
+            elif action == "reconnect":
+                feed = self.feed
+                if feed is None:
+                    return await cb.answer("Feed не подключён", show_alert=True)
+                await cb.answer("Запускаю реконнект…")
+                await cb.message.edit_text("🔄 Принудительный реконнект WS…\n"
+                                           "Жди ~10-15 секунд, потом нажми 🔃 Обновить статус.",
+                                           parse_mode="HTML", reply_markup=_build_ping_keyboard())
+                async def _do_reconnect():
+                    try:
+                        ws = getattr(feed, "_ws", None)
+                        if ws:
+                            await ws.close()
+                        # Сброс watchdog-таймера чтоб не зациклился
+                        feed._last_frame_ts = time.time()
+                    except Exception as e:
+                        logger.warning("ping reconnect failed: %s", e)
+                asyncio.create_task(_do_reconnect(), name="ping_reconnect")
+
+            elif action == "relogin":
+                feed = self.feed
+                if feed is None:
+                    return await cb.answer("Feed не подключён", show_alert=True)
+                if not getattr(feed, "_relogin_callback", None):
+                    return await cb.answer("Relogin callback не настроен (нет PO_STORAGE_STATE_B64?)",
+                                           show_alert=True)
+                if getattr(feed, "_relogin_in_progress", False):
+                    return await cb.answer("Relogin уже выполняется…", show_alert=True)
+                await cb.answer("Запускаю relogin…")
+                await cb.message.edit_text("🔑 Принудительный relogin…\n"
+                                           "Playwright открывает Chromium (30–60с). "
+                                           "Нажми 🔃 Обновить статус через минуту.",
+                                           parse_mode="HTML", reply_markup=_build_ping_keyboard())
+                asyncio.create_task(feed._do_relogin(reason="manual_tg"),
+                                    name="ping_relogin")
 
     # ---------- polling ----------
 

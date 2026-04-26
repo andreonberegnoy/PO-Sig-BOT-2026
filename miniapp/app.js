@@ -332,6 +332,9 @@
       { key: "last_wr",        label: "Общая WR" },
       { key: "last_max_streak",label: "Max минусов" },
       { key: "max_max_streak", label: "Max мин подряд" },
+      { key: "min_win_payout", label: "Min % при +" },
+      { key: "last_win_payout",label: "Последн. % при +" },
+      { key: "n_recovered_wins", label: "Вытащено циклов" },
       { key: "avg_signals",    label: "Кол сигнал" },
       { key: "n_snapshots",    label: "Снапшотов" },
     ];
@@ -363,6 +366,9 @@
         <td class="${pctClass(r.last_wr)}">${fmt(r.last_wr, 0, "%")}</td>
         <td class="${streakClass(streak)}">${fmt(streak)}</td>
         <td class="${streakClass(r.max_max_streak)}">${fmt(r.max_max_streak)}</td>
+        <td class="${pctClass(r.min_win_payout, 88, 78)}">${fmt(r.min_win_payout, 0, "%")}</td>
+        <td>${fmt(r.last_win_payout, 0, "%")}</td>
+        <td>${fmt(r.n_recovered_wins, 0)}</td>
         <td>${fmt(r.avg_signals, 0)}</td>
         <td>${fmt(r.n_snapshots, 0)}</td>
       </tr>`;

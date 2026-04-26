@@ -303,7 +303,15 @@ class TelegramBot:
                 else:
                     lines.append("⚠️ WS: нет данных о фреймах")
                 ws = getattr(feed, "_ws", None)
-                ws_state = "open" if (ws and not getattr(ws, "closed", True)) else "closed"
+                # websockets 13+ removed .closed; use .state enum.
+                # Fallback to .closed for older versions.
+                ws_state = "?"
+                if ws is not None:
+                    state_attr = getattr(ws, "state", None)
+                    if state_attr is not None:
+                        ws_state = getattr(state_attr, "name", str(state_attr)).lower()
+                    elif hasattr(ws, "closed"):
+                        ws_state = "closed" if ws.closed else "open"
                 lines.append(f"🔌 WebSocket: <code>{ws_state}</code>")
                 relogin_in = getattr(feed, "_relogin_in_progress", False)
                 if relogin_in:
@@ -323,10 +331,18 @@ class TelegramBot:
                 active_ticks = sum(1 for v in tick_counts.values() if v > 0)
                 total_ticks = sum(tick_counts.values())
                 lines.append(f"📡 Пар в трекере: {tracked}  |  активных тик-потоков: {active_ticks}  |  тиков всего: {total_ticks}")
-            # Asyncio tasks
+            # Asyncio tasks. If recv-task is missing by name BUT WS frames are
+            # arriving fresh (<60s), treat it as healthy — task may have been
+            # renamed during a reconnect and we don't want to false-alarm.
             task_names = {t.get_name() for t in asyncio.all_tasks() if not t.done()}
             critical = {"state_machine", "tg_polling", "po_direct_recv", "po_heartbeat"}
             missing = critical - task_names
+            # Behavioural override: live frames mean the recv loop is alive
+            # regardless of what its task is named.
+            if "po_direct_recv" in missing and feed is not None:
+                lf = getattr(feed, "_last_frame_ts", None)
+                if lf and (time.time() - lf) < 60:
+                    missing.discard("po_direct_recv")
             if missing:
                 lines.append(f"❌ Отсутствуют задачи: {', '.join(sorted(missing))}")
             else:
@@ -501,9 +517,15 @@ class TelegramBot:
                 await asyncio.sleep(CHECK_INTERVAL_SEC)
                 problems: list[str] = []
 
-                # 1. Critical asyncio tasks alive?
+                # 1. Critical asyncio tasks alive? Behavioural override: if
+                # frames are arriving fresh, treat recv as alive even if its
+                # task name is missing (renamed across reconnects, etc.).
                 live = {t.get_name() for t in asyncio.all_tasks() if not t.done()}
                 missing = TASK_NAMES_CRITICAL - live
+                if "po_direct_recv" in missing and self.feed is not None:
+                    lf = getattr(self.feed, "_last_frame_ts", None)
+                    if lf and (time.time() - lf) < 60:
+                        missing.discard("po_direct_recv")
                 if missing:
                     problems.append(
                         f"❌ Отсутствуют критичные задачи: <code>{', '.join(sorted(missing))}</code>"

@@ -227,14 +227,56 @@ async def run(cfg: dict, config_path: str = "config.yaml"):
         feed._journal_for_logging = journal
         # Initial connect with infinite retry. The in-feed _auto_reconnect_loop
         # only kicks in *after* a successful connect; if the very first WS
-        # handshake fails (Railway cold-start network blip, Cloudflare, etc.)
-        # the exception would otherwise kill the process and Railway would
-        # restart the container. Mirror the auto-reconnect backoff here so the
-        # bot survives a flaky first handshake without a container restart.
+        # handshake fails (Railway cold-start network blip, Cloudflare, PO
+        # endpoint rotated, IP blackholed by CF, etc.) the exception would
+        # otherwise kill the process. Mirror the auto-reconnect backoff here
+        # so the bot survives a flaky first handshake without a container
+        # restart. Also: every N failed attempts we trigger relogin to refresh
+        # the ws_url — if PO migrated the account to another regional endpoint
+        # (api-msk, api-l, api-ap, …) Playwright login captures the new URL.
         import random as _rnd
+        import socket as _socket
+        from urllib.parse import urlparse as _urlparse
+
+        def _tcp_probe(url: str, timeout_sec: float = 5.0) -> tuple[bool, str]:
+            """Best-effort TCP reachability probe. Returns (ok, detail)."""
+            try:
+                u = _urlparse(url)
+                host = u.hostname or ""
+                port = u.port or (443 if u.scheme in ("wss", "https") else 80)
+                if not host:
+                    return False, "empty hostname"
+                try:
+                    addrs = _socket.getaddrinfo(host, port, type=_socket.SOCK_STREAM)
+                except _socket.gaierror as ge:
+                    return False, f"DNS fail: {ge}"
+                family, socktype, proto, _, sockaddr = addrs[0]
+                s = _socket.socket(family, socktype, proto)
+                s.settimeout(timeout_sec)
+                try:
+                    s.connect(sockaddr)
+                    return True, f"TCP ok ({sockaddr[0]}:{sockaddr[1]})"
+                finally:
+                    try: s.close()
+                    except Exception: pass
+            except _socket.timeout:
+                return False, "TCP timeout (host appears blackholed)"
+            except OSError as oe:
+                return False, f"TCP error: {oe}"
+            except Exception as e:
+                return False, f"probe error: {e}"
+
         attempt = 0
+        relogin_after = 3   # trigger relogin after this many consecutive failures
         while True:
             attempt += 1
+            # Quick pre-flight: tells us instantly whether the host is even
+            # reachable, so a 45s WS timeout doesn't hide a clear network issue.
+            ok, detail = _tcp_probe(feed.ws_url)
+            if ok:
+                log.info("pre-flight: %s — proceeding to WS handshake", detail)
+            else:
+                log.warning("pre-flight: %s — WS handshake will likely time out", detail)
             try:
                 await feed.connect()
                 if attempt > 1:
@@ -244,8 +286,7 @@ async def run(cfg: dict, config_path: str = "config.yaml"):
                 wait = min(60.0, 2 ** min(attempt, 6) + _rnd.uniform(0, 1))
                 log.warning("initial WS connect attempt %d failed: %s — retrying in %.1fs",
                             attempt, e, wait)
-                # Make sure feed is in a clean state before next attempt:
-                # ._running may have been flipped to True inside connect().
+                # Clean up partial state before next attempt.
                 try:
                     feed._running = False
                     if getattr(feed, "_ws", None) is not None:
@@ -254,6 +295,39 @@ async def run(cfg: dict, config_path: str = "config.yaml"):
                         feed._ws = None
                 except Exception:
                     pass
+                # Every N failures, run relogin to refresh ssid + ws_url.
+                # Playwright goes via pocketoption.com (different infra than
+                # api-eu.po.market), so even if the WS endpoint is blackholed,
+                # the login itself usually works and returns the *current*
+                # ws_url that PO is serving for this account — which may be a
+                # different region than what we have hardcoded.
+                if relogin_cb is not None and attempt % relogin_after == 0:
+                    log.warning("initial connect: %d consecutive failures — running relogin "
+                                "to refresh ssid and discover current ws_url", attempt)
+                    try:
+                        fresh = await asyncio.wait_for(relogin_cb(), timeout=180)
+                        if fresh and fresh.get("ssid"):
+                            old_url = feed.ws_url
+                            feed.ssid = fresh["ssid"]
+                            if fresh.get("uid"):
+                                feed.uid = int(fresh["uid"])
+                            if fresh.get("ws_url"):
+                                feed.ws_url = fresh["ws_url"]
+                            if "is_demo" in fresh:
+                                feed.is_demo = 1 if fresh["is_demo"] else 0
+                            if feed.ws_url != old_url:
+                                log.warning("relogin: ws_url changed %s → %s — endpoint rotated",
+                                            old_url, feed.ws_url)
+                            else:
+                                log.info("relogin: ssid refreshed (ws_url unchanged)")
+                        else:
+                            log.error("relogin returned no ssid — likely Cloudflare blocked "
+                                      "Playwright; consider redeploying Railway service "
+                                      "to get a fresh egress IP")
+                    except asyncio.TimeoutError:
+                        log.error("relogin timed out after 180s — Playwright stuck")
+                    except Exception:
+                        log.exception("relogin during initial-connect retry failed")
                 await asyncio.sleep(wait)
     else:
         from feed.po_feed import PoFeed

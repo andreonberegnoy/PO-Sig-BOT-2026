@@ -295,10 +295,10 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
         _auth(request)
         if not sm:
             raise HTTPException(503, "state machine not ready")
+        import asyncio as _aio
         if action == "pause":
             sm.pause()
             if sm.notify:
-                import asyncio as _aio
                 _aio.create_task(sm.notify("⏸ Пауза включена через Mini App. /resume чтобы снять."))
             return {"ok": True}
         if action == "resume":
@@ -309,9 +309,34 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
                 sm.resume()
                 msg = "▶️ Торговля возобновлена через Mini App."
             if sm.notify:
-                import asyncio as _aio
                 _aio.create_task(sm.notify(msg))
             return {"ok": True}
+        if action == "reset_cycle":
+            s = sm.state
+            old = f"{s.current_pair} MG{s.mg_step}" if s.current_pair else "FREE"
+            sm.force_reset_cycle()
+            if sm.notify:
+                _aio.create_task(sm.notify(
+                    f"🔄 Цикл сброшен через Mini App ({old} → FREE). Ищу новый сигнал…"
+                ))
+            return {"ok": True, "old": old}
+        if action == "switch_pair":
+            if not (sm.state.mg_step > 0 and sm.state.current_pair):
+                raise HTTPException(400, "no active cycle to switch")
+            old_pair = sm.state.current_pair
+            new_pair = await sm.force_switch_pair()
+            if not new_pair:
+                if sm.notify:
+                    _aio.create_task(sm.notify(
+                        f"⚠️ Mini App: попытка смены пары {old_pair} — нет доступных альтернатив."
+                    ))
+                return {"ok": False, "old": old_pair, "new": None,
+                        "reason": "no eligible pair"}
+            if sm.notify:
+                _aio.create_task(sm.notify(
+                    f"🔀 Через Mini App вручную сменена пара: {old_pair} → {new_pair}"
+                ))
+            return {"ok": True, "old": old_pair, "new": new_pair}
         raise HTTPException(400, f"unknown action: {action}")
 
     # ─── miniapp static ───

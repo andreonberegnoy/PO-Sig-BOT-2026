@@ -108,6 +108,13 @@ ul.strategies li.strategy-active { background: rgba(109, 180, 255, 0.08); }
 .status-line.ok { color: #22c55e; }
 .status-line.err { color: #ef4444; }
 
+.action-msg { color: var(--hint); font-size: 13px; min-height: 18px;
+              padding: 4px 0; line-height: 1.4; }
+.action-msg.ok   { color: #22c55e; }
+.action-msg.err  { color: #ef4444; }
+.action-msg.warn { color: #fdf647; }
+.action-msg.info { color: var(--hint); }
+
 /* ─── Analytics tab ─── */
 .hint { color: var(--hint); font-size: 13px; margin: 0 0 12px 0; line-height: 1.4; }
 .range-selector { display: flex; gap: 6px; align-items: center; margin-bottom: 12px;

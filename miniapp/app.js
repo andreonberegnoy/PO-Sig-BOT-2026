@@ -21,6 +21,8 @@
   };
 
   // ─── Tab switching ───
+  // Note: /api/status auto-poll every 5s while Status tab is active is set up
+  // at the bottom of this file (search for `setInterval`). No need to wire it here.
   document.querySelectorAll(".tab").forEach((t) => {
     t.addEventListener("click", () => {
       document.querySelectorAll(".tab").forEach((x) => x.classList.remove("active"));
@@ -34,6 +36,17 @@
   });
 
   // ─── STATUS ───
+  function showActionMsg(text, kind = "info") {
+    const el = document.getElementById("action-msg");
+    if (!el) return;
+    el.textContent = text;
+    el.className = `action-msg ${kind}`;
+    if (text) {
+      clearTimeout(showActionMsg._t);
+      showActionMsg._t = setTimeout(() => { el.textContent = ""; el.className = "action-msg"; }, 6000);
+    }
+  }
+
   async function loadStatus() {
     try {
       const s = await api("/api/status");
@@ -49,13 +62,50 @@
       document.getElementById("m-mg").textContent = s.mg_step ?? 0;
       document.getElementById("m-loss").textContent = `$${(+(s.session_loss || 0)).toFixed(2)}`;
       document.getElementById("m-paused").textContent = s.paused ? "ДА" : "нет";
+      // Cycle-only buttons (switch pair, reset cycle): show only when MG cycle active.
+      const inCycle = (s.mg_step ?? 0) > 0 && !!s.current_pair;
+      const ca = document.getElementById("cycle-actions");
+      if (ca) ca.style.display = inCycle ? "" : "none";
     } catch (e) {
       console.error(e);
     }
   }
   document.getElementById("btn-refresh").onclick = loadStatus;
-  document.getElementById("btn-pause").onclick = () => api("/api/control/pause", { method: "POST" }).then(loadStatus);
-  document.getElementById("btn-resume").onclick = () => api("/api/control/resume", { method: "POST" }).then(loadStatus);
+  document.getElementById("btn-pause").onclick = async () => {
+    try { await api("/api/control/pause", { method: "POST" }); showActionMsg("⏸ Пауза включена", "ok"); }
+    catch (e) { showActionMsg(`❌ ${e.message || e}`, "err"); }
+    loadStatus();
+  };
+  document.getElementById("btn-resume").onclick = async () => {
+    try { await api("/api/control/resume", { method: "POST" }); showActionMsg("▶ Возобновлено", "ok"); }
+    catch (e) { showActionMsg(`❌ ${e.message || e}`, "err"); }
+    loadStatus();
+  };
+  document.getElementById("btn-switch-pair").onclick = async () => {
+    showActionMsg("🔀 Ищу лучшую пару…", "info");
+    try {
+      const r = await api("/api/control/switch_pair", { method: "POST" });
+      if (r && r.ok && r.new) {
+        showActionMsg(`🔀 Сменена пара: ${r.old} → ${r.new}`, "ok");
+      } else {
+        showActionMsg("⚠️ Нет доступных пар для смены. Жду сигнал на текущей.", "warn");
+      }
+    } catch (e) {
+      showActionMsg(`❌ ${e.message || e}`, "err");
+    }
+    loadStatus();
+  };
+  document.getElementById("btn-reset-cycle").onclick = async () => {
+    if (!confirm("Сбросить текущий цикл и вернуться в FREE-режим?\n\nМГ-шаг и пара сбросятся, бот начнёт искать новый сигнал с базовой ставки.")) return;
+    try {
+      const r = await api("/api/control/reset_cycle", { method: "POST" });
+      const old = (r && r.old) ? r.old : "цикл";
+      showActionMsg(`♻️ Сброшен ${old} → FREE. Ищу новый сигнал…`, "ok");
+    } catch (e) {
+      showActionMsg(`❌ ${e.message || e}`, "err");
+    }
+    loadStatus();
+  };
 
   // ─── SETTINGS ───
   // Global (cross-strategy) settings only. Indicator parameters are now

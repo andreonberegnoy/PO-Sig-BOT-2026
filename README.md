@@ -2,16 +2,19 @@
 
 Торговый бот для Pocket Option с **прямым подключением через WebSocket**, индикатором **CONSENSUS 4/5**, **Telegram Mini App** для визуального управления и **системой пользовательских стратегий**. Работает 24/7 на Railway без браузера.
 
+---
+
 ## Архитектура
 
 ```
 config.yaml                    все параметры (фильтр, мартингейл, индикатор)
 .env                           секреты (PO_SSID, telegram токены) — не в git
-main.py                        оркестратор: feed + strategy + api + telegram
-Dockerfile                     python:3.12-slim, ~80 MB RAM
+main.py                        оркестратор: feed + strategy + api + telegram + supervisor
+Dockerfile                     mcr.microsoft.com/playwright/python (Chromium для relogin)
 railway.toml                   Railway deploy config
 ├── feed/
-│   ├── po_direct.py           прямое подключение к PO (websockets, без Chrome)
+│   ├── po_direct.py           прямое WS-подключение к PO + heartbeat watchdog
+│   ├── auto_relogin.py        Playwright авто-релогин через storage_state
 │   └── history.py             адаптер fetch_candles над feed.subscribe()
 ├── strategy/
 │   ├── consensus.py           встроенная CONSENSUS 4/5 (1:1 с JS-индикатором)
@@ -22,7 +25,7 @@ railway.toml                   Railway deploy config
 │   └── user/                  *.py — пользовательские (загруженные через UI)
 ├── trading/
 │   ├── ws_client.py           open_trade через feed.send_open_order
-│   ├── state_machine.py       свободный скан + сигнал-гейтнутый мартингейл
+│   ├── state_machine.py       свободный скан + сигнал-гейтнутый мартингейл + stall-watchdog
 │   └── window_manager.py      legacy (po-signals); не используется на PO direct
 ├── api/
 │   ├── server.py              FastAPI: REST endpoints + Mini App static
@@ -35,30 +38,118 @@ railway.toml                   Railway deploy config
 │   ├── db.py                  SQLite: trades, bans, sessions, kv_store
 │   └── candles_db.py          SQLite: candles persist между рестартами
 ├── tg/
-│   ├── bot.py                 команды /status /test /pause и т.п.
+│   ├── bot.py                 команды /status /ping /pause и т.п. + авто-рестарт polling
 │   └── chart.py               рендер свечного графика для Telegram
 └── tools/                     standalone-утилиты (probe, smoke-test)
 ```
+
+---
+
+## Многоуровневая система стабильности
+
+Бот защищён **6 независимыми слоями** — каждый из них подхватывает управление, если предыдущий не справился.
+
+```
+Слой 1 — WS Heartbeat Watchdog (po_direct.py)
+  ├─ каждые 30с: проверяет время последнего фрейма от сервера
+  ├─ каждые 25с: отправляет проактивный Engine.IO ping ("2")
+  └─ тишина > 90с → ws.close() → auto_reconnect_loop подхватывает
+
+Слой 2 — auto_reconnect_loop (НИКОГДА не сдаётся)
+  ├─ Фаза 1 (быстрая): 10 попыток, экспоненциальный backoff до 60с
+  ├─ HTTP 401/403 → немедленный fast-path relogin, цикл продолжается
+  └─ Фаза 2 (бесконечная): каждые 120с навсегда + relogin каждые 3 раунда
+
+Слой 3 — Stall Watchdog в state_machine
+  ├─ tracked пары есть, но нет ни одного тика > 10 мин
+  └─ уведомление в TG + принудительный ws.close()
+
+Слой 4 — Защита главного торгового цикла
+  └─ try/except вокруг каждой итерации: ошибка логируется, цикл продолжается
+
+Слой 5 — Telegram polling с авто-рестартом
+  └─ aiogram упал → перезапуск через 5-60с (exponential backoff)
+
+Слой 6 — Task Supervisor (main.py)
+  ├─ каждые 30с: проверяет что state_machine/daily_report/periodic_report живы
+  └─ упала задача → уведомление в TG + автоматический рестарт через 5с
+```
+
+### Что фиксировали конкретно
+
+| Баг | Симптом | Исправление |
+|-----|---------|-------------|
+| **Freeze при смене пары** | После LOSS и смены пары бот зависал навсегда | `_in_cycle_step` теперь загружает history + WS-подписку для новой пары прямо при переключении |
+| **Frozen WS** | TCP жив, но данные не идут — бот думает что всё ок | Heartbeat watchdog с таймером `_last_frame_ts` |
+| **Race condition relogin** | `_do_relogin` закрывает WS → `_recv_loop` запускал параллельный `_auto_reconnect` | `_recv_loop` проверяет `_relogin_in_progress` перед спавном reconnect-задачи |
+| **Reconnect сдаётся после 10 попыток** | Если сеть упала надолго или relogin тоже завис — бот умирал | Бесконечный цикл с фазой 2 |
+| **Нет тиков после реконнекта** | Пары подписаны, WS живой, но тики не приходят | Stall watchdog принудительно переподключает |
+| **Умершие asyncio-задачи** | state_machine или polling падали тихо | Task supervisor перезапускает с TG-уведомлением |
+
+---
+
+## Telegram команды
+
+| Команда | Описание |
+|---------|---------|
+| `/status` | Пара, МГ-шаг, баланс, tracked пары |
+| `/ping` | 🩺 Полная диагностика + inline-кнопки (см. ниже) |
+| `/balance` | Текущий баланс |
+| `/pause` | Поставить на паузу |
+| `/resume` | Возобновить / сбросить stop-sum |
+| `/stop` | Остановить бота |
+| `/bans` | Активные баны пар |
+| `/chart SYMBOL` | Свечной график пары |
+| `/test SYMBOL call\|put [amount]` | Тестовая сделка |
+| `/help` | Список команд |
+
+### Команда /ping — диагностика и ручное управление
+
+Отправь `/ping` и получишь живой статус:
+
+```
+🩺 Диагностика бота
+✅ WS: последний фрейм 4с назад
+🔌 WebSocket: open
+💳 Баланс: $205.91
+🤖 SM: ▶️ активен  |  пара: JODCNY_otc  |  МГ-шаг: 1
+📡 Пар в трекере: 12  |  активных тик-потоков: 8  |  тиков всего: 14 302
+✅ Все критичные задачи живы (7 всего)
+🕐 2026-04-26 14:35:12
+```
+
+Inline-кнопки под сообщением:
+
+| Кнопка | Действие |
+|--------|---------|
+| 🔄 **Реконнект WS** | Принудительно закрыть WebSocket → авто-реконнект (без нового SSID, ~5с) |
+| 🔑 **Relogin (новый SSID)** | Запустить Playwright прямо сейчас → обновить токен сессии (~30-60с) |
+| 🔃 **Обновить статус** | Обновить текст диагностики in-place |
+
+### Автоуведомления
+
+- `📡` Сигнал + график
+- `✅ WIN` / `❌ LOSS` / `➖ DRAW`
+- `🔄` Смена пары (payout упал)
+- `🛑` Stop-sum или max_steps → ждёт `/resume`
+- `⚠️` Нет тиков 10 мин на N парах — принудительный реконнект
+- `🚨` Задача упала — перезапускаю автоматически (из супервизора)
+- `🔴` Сессия PO протухла — пошаговая инструкция по обновлению cookies
+- `📊` Ежедневный отчёт (WR, прибыль, баланс)
+
+---
 
 ## Полная стратегия работы
 
 ### 1. Подключение к Pocket Option
 
-[feed/po_direct.py](feed/po_direct.py) подключается к `wss://demo-api-eu.po.market/socket.io/` (или `api-eu` для real) от твоего имени. Авторизация через **session cookie (ssid)**, извлечённый из браузера один раз. Сессия живёт ~24 часа.
-
-Преимущества vs предыдущая схема через po-signals:
-- **Нет браузера/Chrome/CDP** — чистый Python WS-клиент
-- **Низкий fingerprint** — выглядит как обычный SDK-пользователь
-- **Дёшево** — 80 МБ RAM, любой VPS / Railway free tier
-- **Быстро** — нет CDP overhead
+[feed/po_direct.py](feed/po_direct.py) подключается к `wss://api-eu.po.market/socket.io/` напрямую. Авторизация через **session cookie (ssid)**. Сессия живёт ~12-24 часа и **обновляется автоматически** через Playwright + storage_state (~раз в 12 часов или по `NotAuthorized`).
 
 ### 2. Свечи
 
-PO стримит **тики** (price-only), наш feed агрегирует их в M1 OHLC. Дополнительно через `loadHistoryPeriod` запрашиваются **исторические OHLC бары** (с пагинацией до 1060 баров).
+PO стримит **тики** (price-only), бот агрегирует их в M1 OHLC. Дополнительно через `loadHistoryPeriod` запрашиваются **исторические OHLC бары** (с пагинацией до 1060 баров).
 
-[journal/candles_db.py](journal/candles_db.py) сохраняет каждый закрытый бар в SQLite → данные **переживают рестарт контейнера**. При старте бот подгружает кеш из БД.
-
-**Заполнение дыр при рестарте:** если последний кешированный бар старше чем `now - 2 × period`, бот автоматически докачивает недостающий диапазон через `loadHistoryPeriodFast` (~1-2 сек на пару). Без этого после downtime график показывал бы пустой промежуток.
+[journal/candles_db.py](journal/candles_db.py) сохраняет каждый закрытый бар в SQLite → данные **переживают рестарт контейнера**.
 
 ### 3. Сигналы — CONSENSUS 4/5
 
@@ -72,7 +163,7 @@ PO стримит **тики** (price-only), наш feed агрегирует и
 | 4 | **Bollinger zone** | Цена в нижних 30% канала BB(20, 2σ) для BUY или верхних 30% для SELL. |
 | 5 | **Candle** | Тело < 2× ATR + направление свечи совпадает. |
 
-**Вход разрешён** при ≥ 4 голосах из 5. На выходных — настраивается (`requireAll5OnWeekend`).
+**Вход разрешён** при ≥ 4 голосах из 5.
 
 ### 4. Фильтр пар (раз в 5 мин)
 
@@ -80,123 +171,30 @@ PO стримит **тики** (price-only), наш feed агрегирует и
 1. Currency OTC с payout ≥ 92%
 2. Прогон CONSENSUS на 1060 свечах
 3. **`max_loss_streak_overall > 3` → БАН** на 12 часов
-4. **Приоритет** = `max_loss_streak_before_win`:
-   - 0-1 → priority 1 (идеал)
-   - 2 → priority 2
-   - 3 → priority 3 (макс. допустимо)
+4. **Приоритет** = `max_loss_streak_before_win` (0-1 → p1, 2 → p2, 3 → p3)
 5. Скан в порядке priority — лучшие пары первыми
 
-### 5. Скан-цикл (каждую секунду)
-
-Для каждой tracked-пары:
-1. Eligible? (не забанена, payout ≥ 92%)
-2. Новый закрытый бар?
-3. **Staleness < 25 сек** (если опоздали — пропуск)
-4. CONSENSUS на закрытом баре → если есть → открываем сделку
-
-### 6. Открытие сделки
-
-1. `ensure_pair_in_window` — для PO direct это `feed.subscribe` (live тики)
-2. Запоминаем `pre_balance`
-3. Шлём `42["openOrder", {asset, amount, action, time, isDemo, requestId}]`
-4. Telegram: 📡 сигнал + график + «Захожу $X»
-
-### 7. Детект закрытия
-
-**Приоритет 1** — событие `updateClosedDeals` от PO с полем `profit`:
-- `profit > 0` → WIN
-- `profit < 0` → LOSS
-- `profit ≈ 0` → DRAW
-
-**Fallback** — баланс-дельта (если событие не пришло за 15 сек):
-- `delta > 0` → WIN, `delta + amount` = gross return
-- `delta < 0` → LOSS
-- `delta ≈ 0` → DRAW
-
-### 8. Мартингейл с сигнал-гейтом
+### 5. Мартингейл с сигнал-гейтом
 
 ```
 LOSS → mg_step++, current_pair заморожена
   ↓
-Ждём новый CONSENSUS-сигнал на этой паре (staleness 25 сек)
+Ждём новый CONSENSUS-сигнал на этой паре (freshness < 25с)
   ↓
-Сигнал пришёл → открываем сделку с base × 2.1^step
-  │ (на step=1: $2.10, step=2: $4.41, ..., step=10: $1668)
-  ├─ если сигнал в ту же direction → классический МГ
-  └─ если в противоположную → следуем (обновляем direction)
+Сигнал пришёл → открываем base × 2.1^step
 
-После смены пары (max 1 раз за цикл) → торгуем ЛЮБОЙ сигнал
-   на новой паре игнорируя дальнейшее падение payout
-
-WIN → сброс цикла, FREE режим, $1
-Stop-sum ($1000 потерь) или max_steps (10) → waiting_resume
-   Ждёт /resume в Telegram
+WIN → сброс цикла, FREE режим, base $
+Stop-sum ($1000) или max_steps (10) → waiting_resume → /resume
 ```
 
-## Telegram Mini App
+При смене пары (payout упал < 85%) бот немедленно загружает историю и подписывается на тики новой пары — задержки нет.
 
-`https://po-sig-bot-2026-production.up.railway.app/` (твой URL)
+### 6. Детект закрытия сделки
 
-Подключается через @BotFather → Bot Settings → Menu Button. Авторизация — Telegram WebApp `initData`, доступ только указанному `chat_id`.
+**Приоритет 1** — событие `updateClosedDeals` с полем `profit` (profit > 0 → WIN, < 0 → LOSS).
+**Fallback** — баланс-дельта, если событие не пришло за 15 секунд.
 
-### Вкладки
-
-1. **Статус**
-   - Режим, баланс, активная стратегия
-   - Tracked / live / в бане
-   - Текущая пара, MG-шаг
-   - Сумма первой сделки, экспирация
-   - Потери сессии, пауза
-   - Кнопки Pause / Resume / Обновить
-
-2. **Настройки** — два уровня:
-   - **🧠 Параметры стратегии: \<имя активной\>** (динамически) — параметры из `DEFAULT_PARAMS` текущей стратегии. Для CONSENSUS это 20 полей: minConsensus, RSI, HTF, ATR, BB, candle. Каждая стратегия хранит свои параметры **отдельно** в `journal.db` и не теряет их при переключении.
-   - **Глобальные** (общие для всех стратегий):
-     - 🔍 Фильтр пар
-     - 💰 Торговля
-     - 🎰 Мартингейл
-
-   Глобальные пишутся в `config.yaml`, параметры стратегии — в `journal.db` под ключом `strategy_params:<name>`. При переключении активной стратегии секция «Параметры стратегии» автоматически обновляется на параметры новой.
-
-3. **Стратегии**
-   - Список встроенных + пользовательских
-   - **▶ Активировать** на неактивных
-   - **⏹ Выключить (на consensus)** на активной кастомной
-   - **🗑 Удалить** на неактивных пользовательских
-   - **Загрузка кода**: textarea + кнопка «📋 Загрузить шаблон» (подгружает [strategy/_template.py](strategy/_template.py)) → правишь → «💾 Сохранить и активировать»
-
-## Стратегии — как писать свои
-
-Полная инструкция в [STRATEGY.md](STRATEGY.md). Минимум:
-
-```python
-from dataclasses import dataclass
-
-NAME = "My Strategy"
-DEFAULT_PARAMS = {"fastPeriod": 9, "slowPeriod": 21}
-
-# (опционально) Схема для красивой UI в Mini App
-PARAM_SCHEMA = {
-    "fastPeriod": {"type": "int", "min": 2, "max": 50,  "label": "Fast SMA"},
-    "slowPeriod": {"type": "int", "min": 5, "max": 200, "label": "Slow SMA"},
-}
-
-@dataclass
-class Signal:
-    side: str          # "buy" или "sell"
-    i: int             # индекс бара сигнала
-    votes: dict
-    total: int
-
-def generate_signals(candles, params):
-    # candles: [{time, open, high, low, close, volume}, ...]
-    # вернуть (list[Signal], diag_dict)
-    return [], {}
-```
-
-- Сигнал засчитывается только если `signals[-1].i == len(candles) - 1` (на последнем закрытом баре).
-- Если `PARAM_SCHEMA` отсутствует — бот сам угадает типы (int/float/bool), но без min/max.
-- После загрузки через Mini App параметры твоей стратегии **сохраняются отдельно** от других, видны в секции «🧠 Параметры стратегии: \<твоё имя\>».
+---
 
 ## Конфигурация
 
@@ -207,7 +205,7 @@ filter:
   min_payout: 92             # минимум payout для входа
   payout_floor: 85           # ниже → смена пары в цикле
   max_losses_in_row: 3       # >3 минусов подряд → бан
-  history_candles: 1060      # размер буфера для HTF
+  history_candles: 1060
   ban_hours: 12
   day_off_hours: 6
   tf: 60                     # M1
@@ -215,108 +213,173 @@ filter:
 trading:
   base_amount: 1
   expiry_seconds: 120
-  one_trade_at_a_time: true
   max_pair_switch_per_cycle: 1
 
 martingale:
   coefficient: 2.1
   max_steps: 10
-  stop_sum: 1000             # пауза при $1000 потерь
+  stop_sum: 1000
 
 indicator:
   minConsensus: 4
-  requireAll5OnWeekend: false
   rsiPeriod: 14; rsiSmoothing: 5; qqeFactor: 4.238
   htfMultiplier: 5; htfMaPeriod: 20; htfMaType: EMA
   atrPeriod: 14; atrAvgWindow: 100; atrMinRatio: 0.7; atrMaxRatio: 2.0
   bbPeriod: 20; bbStdDev: 2.0; bbZoneDepth: 0.3
-  candleMaxAtrMult: 2.0; candleReqAlign: true
-  cooldownBars: 3
+  candleMaxAtrMult: 2.0; cooldownBars: 3
 ```
 
-Все параметры можно менять live из Mini App — сохраняются в config.yaml.
+Все параметры можно менять **live** из Mini App — сохраняются в journal.db, переживают рестарты.
+
+---
+
+## Telegram Mini App
+
+`https://<твой-домен>.up.railway.app/`
+
+Подключается через @BotFather → Bot Settings → Menu Button. Авторизация — Telegram WebApp `initData`.
+
+### Вкладки
+
+1. **Статус** — режим, баланс, пара, MG-шаг, потери сессии, кнопки Pause/Resume
+2. **Настройки**
+   - 🧠 Параметры активной стратегии (индивидуальные, хранятся в journal.db)
+   - 🔍 Фильтр пар / 💰 Торговля / 🎰 Мартингейл / ⏰ Расписание
+3. **Стратегии** — список встроенных + пользовательских, активация, загрузка кода
+
+---
+
+## Пользовательские стратегии
+
+Минимальный шаблон:
+
+```python
+from dataclasses import dataclass
+
+NAME = "My Strategy"
+DEFAULT_PARAMS = {"fastPeriod": 9, "slowPeriod": 21}
+
+PARAM_SCHEMA = {
+    "fastPeriod": {"type": "int", "min": 2, "max": 50, "label": "Fast SMA"},
+}
+
+@dataclass
+class Signal:
+    side: str   # "buy" | "sell"
+    i: int      # индекс бара сигнала
+    votes: dict
+    total: int
+
+def generate_signals(candles, params):
+    # candles: [{time, open, high, low, close, volume}, ...]
+    return [], {}
+```
+
+Сигнал засчитывается только если `signals[-1].i == len(candles) - 1`.
+
+Полная инструкция — [STRATEGY.md](STRATEGY.md).
+
+---
 
 ## Запуск
 
-### Локально (для разработки)
+### Локально
 
 ```bash
 git clone https://github.com/andreonberegnoy/PO-Sig-BOT-2026.git
 cd PO-Sig-BOT-2026
 pip3 install -r requirements.txt
 
-# Извлеки PO ssid (Demo) из браузера:
-# pocketoption.com → DevTools → Network → WS → найди /socket.io/?EIO=4
-# → Messages → первый исходящий 42["auth", {session: "...", uid: ...}]
-
 cp .env.example .env
-# Впиши PO_SSID, PO_UID, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID
+# Заполни PO_SSID, PO_UID, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID
 
 python3 main.py
 ```
 
-Mini App локально: `http://localhost:8080/`
+Mini App: `http://localhost:8080/`
 
 ### На Railway
 
 См. [DEPLOY.md](DEPLOY.md). Кратко:
-1. Push в GitHub
-2. Railway → New Project → Deploy from repo
-3. Settings → Volumes: mount на `/app/journal` (1 GB)
-4. Settings → Networking → Public Domain → target port 8080
-5. Variables: `PO_SSID`, `PO_UID`, `PO_WS_URL`, `PO_IS_DEMO`, `MODE`, `TELEGRAM_TOKEN`, `TELEGRAM_CHAT_ID`
-6. @BotFather → Menu Button → URL `https://<твой-домен>.up.railway.app/`
+1. Push в GitHub → Railway автодеплой
+2. Volume → mount `/data` (1 GB) для сохранения candles.db и state.db
+3. Networking → Public Domain → port 8080
+4. Variables: `PO_SSID`, `PO_UID`, `PO_IS_DEMO`, `PO_STORAGE_STATE_B64`, `TELEGRAM_TOKEN`, `TELEGRAM_CHAT_ID`
+5. @BotFather → Menu Button → твой URL
 
-## Telegram команды
+---
 
-- `/status` — пара, MG-шаг, баланс
-- `/balance` — баланс
-- `/pause` / `/resume` — пауза / возобновление
-- `/stop` — остановить
-- `/bans` — активные баны
-- `/chart SYMBOL` — график пары
-- `/test SYMBOL call|put [amount]` — тестовая сделка
-- `/settings` — список настроек (inline keyboards, fallback к Mini App)
+## REST API
 
-Автоуведомления:
-- 📡 сигнал + график
-- ✅ WIN / ❌ LOSS / ➖ DRAW
-- 🔄 смена пары
-- 🛑 stop_sum / max_steps → ждёт /resume
-- 📊 ежедневный отчёт в 7:00
+| Endpoint | Метод | Описание |
+|----------|-------|---------|
+| `/api/status` | GET | Состояние бота |
+| `/api/settings` | GET / PUT | Конфигурация |
+| `/api/strategies` | GET / POST | Список / загрузка стратегий |
+| `/api/strategies/{name}` | DELETE | Удалить стратегию |
+| `/api/strategies/{name}/activate` | POST | Активировать |
+| `/api/strategies/{name}/params` | GET / PUT | Параметры стратегии |
+| `/api/control/pause` | POST | Пауза |
+| `/api/control/resume` | POST | Возобновить |
+| `/api/pair_stats` | GET | Аналитика по парам |
+| `/strategy_template` | GET | Шаблон стратегии |
 
-## REST API (для Mini App и интеграций)
+Все эндпоинты требуют `X-Init-Data` header (Telegram WebApp).
 
-- `GET /api/status` — состояние бота
-- `GET /api/settings` — текущая cfg
-- `PUT /api/settings` — `{"key.path": value}` → обновить
-- `GET /api/strategies` — список стратегий (с `params`, `default_params`, `param_schema`)
-- `POST /api/strategies` — `{name, code}` загрузить новую
-- `DELETE /api/strategies/{name}` — удалить
-- `POST /api/strategies/{name}/activate` — активировать
-- `GET /api/strategies/{name}/params` — параметры стратегии
-- `PUT /api/strategies/{name}/params` — `{key: value}` обновить
-- `POST /api/control/pause` / `resume` — управление
-- `GET /strategy_template` — текст шаблона
+---
 
-Все эндпоинты требуют валидный `X-Init-Data` header (Telegram WebApp).
+## Что переживает рестарт (Railway Volume)
+
+Volume `/data`:
+- `state.db` — `runtime_state` (пара, MG-шаг, session_loss, direction, paused/waiting_resume)
+- `candles.db` — буферы свечей (не нужно ждать накопления заново)
+- Журнал сделок, баны пар
+- Настройки из Mini App (`settings_overrides`)
+- Параметры активной стратегии (`strategy_params:<name>`)
+- Загруженные пользовательские стратегии (`/data/user_strategies/*.py`)
+- Аналитика (`payout_log`, `pair_stats_log`)
+
+---
+
+## Расписание работы
+
+Опциональное торговое окно (Mini App → Настройки → Расписание):
+- По умолчанию **выключено** (24/7)
+- Поддерживает окно через полночь (`start=22`, `end=6`)
+- Активный МГ-цикл **всегда доводится до WIN**, даже вне окна
+- При закрытии цикла вне окна — авто-пауза до `start_hour`
+
+---
+
+## Аналитика по парам
+
+Два фоновых логгера (работают 24/7 независимо от паузы):
+- **`payout_log`**: каждые 5 мин — снимок payout каждого ассета (только при изменении)
+- **`pair_stats_log`**: каждый час — прогон стратегии на буфере каждой пары (WR, max streak, etc.)
+
+В Mini App → вкладка **Аналитика**: сортируемая таблица с цветовой кодировкой.
+
+---
 
 ## Известные ограничения
 
-1. **Сессия PO живёт ~24ч** — раз в день обновлять `PO_SSID` в Railway Variables (вытащить новый ssid из браузера).
-2. **Demo и Real — разные WS** (`demo-api-eu` vs `api-eu`). Котировки могут отличаться от того что видишь на сайте.
-3. **History limit ~1060 баров** через `loadHistoryPeriodFast`. Глубже — нужно ждать пока живой бот накопит SQLite.
-4. **На Railway free tier** Mini App может быть медленным; рекомендуется Hobby plan ($5/мес).
-5. **Strategy plugins не sandboxed** — пользовательский код выполняется в основном процессе. Не загружай чужой код без проверки.
+1. **Сессия PO** — обновляется автоматически каждые ~12ч. Cookies (storage_state) живут ~30 дней; при истечении придёт TG-уведомление с пошаговой инструкцией.
+2. **Demo и Real — разные WS** и разные котировки.
+3. **History limit ~1060 баров** через PO API.
+4. **Railway Hobby plan ($5/мес)** — Free tier недостаточно памяти для Playwright (~800 MB RAM при запуске).
+5. **Strategy plugins не sandboxed** — пользовательский код исполняется в основном процессе.
+
+---
 
 ## Testing checklist
 
 - [ ] `/test SYMBOL call` открывает сделку в демо
 - [ ] WIN → мартингейл сбрасывается
 - [ ] LOSS → ждёт новый сигнал на той же паре, $2.10
-- [ ] Payout < 85% → смена пары (одна за цикл)
+- [ ] Payout < 85% → смена пары (история + тики загружаются сразу)
 - [ ] Stop-sum → `/resume` восстанавливает
+- [ ] `/ping` → показывает реальный статус WS + кнопки работают
 - [ ] Mini App → Status загружает реальные данные
-- [ ] Mini App → Settings → редактирование сохраняется в config.yaml
+- [ ] Mini App → Settings → редактирование сохраняется
 - [ ] Mini App → Strategies → загрузка кастома + активация работает
-- [ ] После рестарта контейнера Railway candles.db не теряется
+- [ ] После рестарта Railway — candles.db и state.db не теряются

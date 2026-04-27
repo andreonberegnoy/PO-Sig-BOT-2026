@@ -20,4 +20,5 @@ state.json
 .claude/
 tests/__pycache__/
 STRATEGY.pdf
+DEPLOY_CHEATSHEET.pdf
 

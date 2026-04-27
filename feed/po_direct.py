@@ -169,16 +169,23 @@ class PoDirectFeed:
                 pass
         self._recv_task = asyncio.create_task(self._recv_loop(), name="po_direct_recv")
 
-        # wait for successauth. If a relogin callback is registered, allow
-        # generous timeout (Playwright cold-start + login takes 30-90s and we
-        # may not see _relogin_in_progress=True yet due to event-loop ordering).
-        timeout = 150 if self._relogin_callback else 30
+        # Wait for successauth — but only briefly. The recv_loop continues in
+        # background regardless, and auto_reconnect_loop / state_machine handle
+        # delayed auth. Blocking here long meant uvicorn / TG bot didn't start
+        # for up to 150s → cloudflared returned 502 to the user. Keep this short
+        # so callers (main.py) proceed quickly to start API + watchdogs.
+        timeout = 15
         try:
             await asyncio.wait_for(self._ready.wait(), timeout=timeout)
             logger.info("feed ready (assets=%d, balance_demo=%s, balance_real=%s)",
                         len(self.assets), self.balance_demo, self.balance_real)
         except asyncio.TimeoutError:
-            logger.warning("feed not fully ready after %ds — continuing anyway", timeout)
+            logger.warning(
+                "feed not authenticated after %ds — returning to caller; "
+                "recv_loop continues in background, auto_reconnect/relogin will "
+                "handle late auth. API + TG bot start now to avoid 502.",
+                timeout,
+            )
 
         # Start scheduled relogin loop (only on first connect, not reconnects)
         if (self._relogin_callback and self._scheduled_relogin_task is None

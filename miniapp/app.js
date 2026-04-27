@@ -493,6 +493,7 @@
     pairsEl.innerHTML = '';
     try {
       const r = await api(`/api/hourly_stats?range=${encodeURIComponent(hourlyState.range)}`);
+      _lastHourlyData = r;   // cache for CSV export / apply-filter actions
       const summary = r.summary_by_hour || [];
       const buckets = r.buckets || [];
 
@@ -566,6 +567,8 @@
       sumEl.innerHTML = `<tr><td>Ошибка: ${e.message || e}</td></tr>`;
       pairsEl.innerHTML = '';
     }
+    // Update active-filter status indicator (separate endpoint)
+    try { await refreshHourlyFilterStatus(); } catch (e) { /* non-fatal */ }
   }
 
   // Period buttons for hourly tab
@@ -576,6 +579,133 @@
       hourlyState.range = btn.dataset.range;
       loadHourly();
     });
+  });
+
+  // Cache last-loaded hourly data for CSV export and apply-filter actions
+  let _lastHourlyData = null;
+
+  async function refreshHourlyFilterStatus() {
+    try {
+      const r = await api("/api/hour_whitelist");
+      const status = document.getElementById("hourly-filter-status");
+      const clearBtn = document.getElementById("btn-hourly-clear");
+      if (r.count > 0) {
+        const pairCount = Object.keys(r.whitelist).length;
+        status.className = "action-msg ok";
+        status.textContent = `⭐ Активный фильтр: ${pairCount} пар × ${r.count} комбинаций пара/час. Бот торгует только в этих окнах.`;
+        if (clearBtn) clearBtn.style.display = "";
+      } else {
+        status.className = "action-msg";
+        status.textContent = "";
+        if (clearBtn) clearBtn.style.display = "none";
+      }
+    } catch (e) { /* ignore — endpoint may not exist on older server */ }
+  }
+
+  // Helper: trigger CSV download
+  function downloadCSV(filename, headers, rows) {
+    const escape = (v) => {
+      if (v == null) return "";
+      const s = String(v);
+      return s.includes(",") || s.includes('"') || s.includes("\n")
+        ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    const csv = [headers.join(",")]
+      .concat(rows.map(r => r.map(escape).join(",")))
+      .join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  // ─── Export CSV ───
+  const exportBtn = document.getElementById("btn-hourly-export");
+  if (exportBtn) exportBtn.addEventListener("click", () => {
+    if (!_lastHourlyData) {
+      alert("Загрузи данные сначала (клик на 24ч/7д/30д/всё)");
+      return;
+    }
+    const ts = new Date().toISOString().slice(0, 10);
+    const range = hourlyState.range;
+    // 1. Summary CSV
+    downloadCSV(
+      `hourly_summary_${range}_${ts}.csv`,
+      ["hour", "total", "wins", "losses", "draws", "wr", "profit"],
+      (_lastHourlyData.summary_by_hour || []).filter(s => s.total > 0).map(s =>
+        [s.hour, s.total, s.wins, s.losses, s.draws, s.wr, s.profit]
+      )
+    );
+    // 2. Pairs × hours CSV
+    downloadCSV(
+      `hourly_pairs_${range}_${ts}.csv`,
+      ["symbol", "hour", "total", "wins", "losses", "draws", "wr", "profit"],
+      (_lastHourlyData.buckets || []).map(p =>
+        [p.symbol, p.hour, p.total, p.wins, p.losses, p.draws, p.wr, p.profit]
+      )
+    );
+  });
+
+  // ─── Apply hour filter ───
+  const applyBtn = document.getElementById("btn-hourly-apply");
+  if (applyBtn) applyBtn.addEventListener("click", async () => {
+    const minWrStr = prompt("Минимальный WR % (по умолчанию 70):", "70");
+    if (minWrStr === null) return;
+    const minTradesStr = prompt("Минимум сделок в окне (по умолчанию 5):", "5");
+    if (minTradesStr === null) return;
+    const minWr = parseFloat(minWrStr) || 70;
+    const minTrades = parseInt(minTradesStr, 10) || 5;
+    const range = hourlyState.range;
+    if (!confirm(
+      `Применить фильтр?\n\n` +
+      `Будут торговаться ТОЛЬКО (пара × час) с WR ≥ ${minWr}% и сделок ≥ ${minTrades} ` +
+      `за период "${range}".\n\n` +
+      `Применяется сразу. Можешь снять кнопкой "🔓 Снять фильтр".`
+    )) return;
+    try {
+      const r = await api("/api/apply_hour_whitelist", {
+        method: "POST",
+        body: JSON.stringify({ min_wr: minWr, min_trades: minTrades, range }),
+      });
+      alert(`✅ Применено. ${r.count} комбинаций пара/час в фильтре. Бот сразу применяет фильтр.`);
+      refreshHourlyFilterStatus();
+    } catch (e) {
+      alert(`❌ Ошибка: ${e.message || e}`);
+    }
+  });
+
+  // ─── Clear hour filter ───
+  const clearBtn = document.getElementById("btn-hourly-clear");
+  if (clearBtn) clearBtn.addEventListener("click", async () => {
+    if (!confirm("Снять фильтр по часам? Бот вернётся к торговле по всем подходящим парам без ограничения по времени.")) return;
+    try {
+      await api("/api/clear_hour_whitelist", { method: "POST" });
+      refreshHourlyFilterStatus();
+    } catch (e) {
+      alert(`❌ Ошибка: ${e.message || e}`);
+    }
+  });
+
+  // ─── Reset stats baseline (small button, double-confirm) ───
+  const resetBtn = document.getElementById("btn-hourly-reset");
+  if (resetBtn) resetBtn.addEventListener("click", async () => {
+    if (!confirm(
+      "⤺ Сбросить статистику по часам?\n\n" +
+      "Подсчёт начнётся с НУЛЯ с этого момента.\n" +
+      "Старые сделки в БД сохраняются — это просто метка времени для аналитики.\n\n" +
+      "Используй когда меняешь стратегию и хочешь чистый старт."
+    )) return;
+    if (!confirm("Точно? Это последнее подтверждение.")) return;
+    try {
+      const r = await api("/api/reset_hourly_stats", { method: "POST" });
+      const date = new Date(r.baseline_ts * 1000).toLocaleString("ru-RU");
+      alert(`✅ Статистика сброшена. Подсчёт пойдёт с ${date}.`);
+      loadHourly();
+    } catch (e) {
+      alert(`❌ Ошибка: ${e.message || e}`);
+    }
   });
 
   // initial load

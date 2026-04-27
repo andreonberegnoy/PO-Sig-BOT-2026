@@ -302,6 +302,10 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
         since = 0 if time_range == "all" else now - ranges.get(time_range, 7*86400)
         if not journal:
             return {"error": "no journal"}
+        # Honour user-defined analytics baseline (soft-reset feature)
+        baseline = int((cfg.get("analytics") or {}).get("baseline_ts") or 0)
+        if baseline > since:
+            since = baseline
         # Local TZ for proper hour-of-day grouping (Kyiv UTC+2/3)
         tz_name = (cfg.get("telegram") or {}).get("daily_report_timezone") or "Europe/Kyiv"
         tz_offset_sec = 0
@@ -351,6 +355,118 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
             "buckets": rows,
             "summary_by_hour": summary_by_hour,
         }
+
+    # ─── hour-whitelist filter ───
+    @app.get("/api/hour_whitelist")
+    async def get_hour_whitelist(request: Request):
+        """Current active hour-whitelist (which (pair, hour) combos are
+        allowed by user-applied filter). Empty dict = filter disabled."""
+        _auth(request)
+        wl = (cfg.get("filter") or {}).get("hour_whitelist") or {}
+        # Count total cells
+        count = sum(len(hrs) for hrs in wl.values()) if isinstance(wl, dict) else 0
+        return {"whitelist": wl, "count": count}
+
+    @app.post("/api/apply_hour_whitelist")
+    async def apply_hour_whitelist(request: Request, payload: dict):
+        """Build a {symbol: [hour, hour, ...]} whitelist from current trade
+        history filtered by min_wr and min_trades, then activate it. After
+        this, the bot will only enter trades when (current_pair, current_hour)
+        is in the whitelist."""
+        _auth(request)
+        if not journal:
+            raise HTTPException(503, "no journal")
+        min_wr = float(payload.get("min_wr", 70))
+        min_trades = int(payload.get("min_trades", 5))
+        time_range = payload.get("range", "30d")
+        import time as _t, datetime as _dt
+        now = int(_t.time())
+        ranges = {"24h": 86400, "7d": 7*86400, "30d": 30*86400, "60d": 60*86400}
+        since = 0 if time_range == "all" else now - ranges.get(time_range, 30*86400)
+        # Same TZ logic as /api/hourly_stats
+        tz_name = (cfg.get("telegram") or {}).get("daily_report_timezone") or "Europe/Kyiv"
+        tz_offset_sec = 0
+        try:
+            import pytz
+            tz = pytz.timezone(tz_name)
+            offset = tz.utcoffset(_dt.datetime.now())
+            tz_offset_sec = int(offset.total_seconds()) if offset else 0
+        except Exception:
+            pass
+        mode = cfg.get("mode")
+        rows = journal.hourly_stats(since, mode=mode, tz_offset_sec=tz_offset_sec)
+        whitelist: dict[str, list[int]] = {}
+        for r in rows:
+            if r["total"] >= min_trades and r["wr"] >= min_wr:
+                whitelist.setdefault(r["symbol"], []).append(int(r["hour"]))
+        # Persist as a settings override (survives reboot via journal volume)
+        try:
+            overrides = journal.get("settings_overrides") or {}
+            overrides["filter.hour_whitelist"] = whitelist
+            journal.set("settings_overrides", overrides)
+        except Exception:
+            logger.exception("failed to persist hour_whitelist")
+        # Apply live to running cfg
+        cfg.setdefault("filter", {})["hour_whitelist"] = whitelist
+        count = sum(len(h) for h in whitelist.values())
+        if sm and sm.notify:
+            import asyncio as _aio
+            _aio.create_task(sm.notify(
+                f"⭐ Применён фильтр по часам: {count} комбинаций пара×час "
+                f"(WR≥{int(min_wr)}%, сделок≥{min_trades}, период {time_range}). "
+                f"Бот будет входить только в эти окна."
+            ))
+        return {"ok": True, "count": count, "whitelist": whitelist,
+                "criteria": {"min_wr": min_wr, "min_trades": min_trades, "range": time_range}}
+
+    @app.post("/api/reset_hourly_stats")
+    async def reset_hourly_stats(request: Request):
+        """Soft reset: don't delete trade rows, just save a baseline timestamp.
+        Future hourly_stats queries will only count trades after this point.
+        Used when user changes strategy and wants a clean slate for analytics
+        without losing real trade history."""
+        _auth(request)
+        if not journal:
+            raise HTTPException(503, "no journal")
+        import time as _t
+        baseline = int(_t.time())
+        try:
+            overrides = journal.get("settings_overrides") or {}
+            overrides["analytics.baseline_ts"] = baseline
+            journal.set("settings_overrides", overrides)
+        except Exception:
+            logger.exception("failed to persist analytics.baseline_ts")
+        cfg.setdefault("analytics", {})["baseline_ts"] = baseline
+        if sm and sm.notify:
+            import asyncio as _aio, datetime as _dt
+            ts_str = _dt.datetime.fromtimestamp(baseline).strftime("%Y-%m-%d %H:%M")
+            _aio.create_task(sm.notify(
+                f"🧹 Статистика по часам сброшена. Подсчёт начнётся с {ts_str}. "
+                f"Старые сделки в БД сохранены, но не будут учитываться в аналитике."
+            ))
+        return {"ok": True, "baseline_ts": baseline}
+
+    @app.post("/api/clear_hour_whitelist")
+    async def clear_hour_whitelist(request: Request):
+        """Disable the hour-whitelist filter — bot returns to trading any
+        eligible pair regardless of hour."""
+        _auth(request)
+        try:
+            if journal:
+                overrides = journal.get("settings_overrides") or {}
+                if "filter.hour_whitelist" in overrides:
+                    overrides.pop("filter.hour_whitelist", None)
+                    journal.set("settings_overrides", overrides)
+        except Exception:
+            logger.exception("failed to clear hour_whitelist override")
+        if "filter" in cfg:
+            cfg["filter"].pop("hour_whitelist", None)
+        if sm and sm.notify:
+            import asyncio as _aio
+            _aio.create_task(sm.notify(
+                "🔓 Фильтр по часам отключён — торговля по всем подходящим парам без ограничения по времени."
+            ))
+        return {"ok": True}
 
     # ─── control ───
     @app.post("/api/control/{action}")

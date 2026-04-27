@@ -127,6 +127,19 @@ ul.strategies li.strategy-active { background: rgba(109, 180, 255, 0.08); }
 .range-btn.active, .hour-range-btn.active {
   background: var(--button); color: var(--button-text); border-color: var(--button);
 }
+
+/* Tiny low-emphasis button for destructive actions you don't want to fat-finger */
+.btn-tiny {
+  background: transparent;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  color: rgba(239, 68, 68, 0.7);
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  cursor: pointer;
+  opacity: 0.6;
+}
+.btn-tiny:hover { opacity: 1; }
 table.analytics { width: 100%; border-collapse: collapse; font-size: 12px; }
 table.analytics th { text-align: left; padding: 8px 6px; color: var(--hint);
                      border-bottom: 1px solid rgba(255,255,255,0.1); cursor: pointer;

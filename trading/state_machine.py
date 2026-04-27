@@ -16,7 +16,10 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field, asdict
+from datetime import datetime
 from typing import Optional
+
+import pytz
 
 from strategy.consensus import generate_signals as _consensus_generate_signals, DEFAULT_PARAMS
 from strategy.filter_1000 import scan_all_pairs, pick_best, PairScore
@@ -492,6 +495,8 @@ class StateMachine:
         if not sc or not sc.allowed: return False
         payout = int(self.feed.assets.get(symbol, {}).get("payout", 0))
         if payout < self.cfg["filter"]["min_payout"]: return False
+        # User-applied hour-of-day whitelist (filter.hour_whitelist)
+        if not self._hour_allowed(symbol): return False
         return True
 
     def _pick_switch_pair(self, exclude: set[str]) -> Optional[PairScore]:
@@ -499,6 +504,31 @@ class StateMachine:
                 if sc.allowed and sym not in exclude and not self.journal.is_banned(sym)
                 and int(self.feed.assets.get(sym, {}).get("payout", 0)) >= self.cfg["filter"]["min_payout"]}
         return pick_best(pool, exclude)
+
+    def _hour_allowed(self, sym: str) -> bool:
+        """User-applied hour-whitelist gate. When `filter.hour_whitelist` is
+        non-empty, only trade (sym, current_hour_local) combos that are in
+        the whitelist. Empty whitelist = filter disabled = all hours allowed.
+
+        Built via Mini App "По часам" → "Применить как фильтр" button which
+        scans historical trades, picks pair×hour cells with high WR, and
+        saves the list. Bot then refuses to enter trades outside these
+        windows — implements time-of-day strategy refinement.
+        """
+        wl = (self.cfg.get("filter") or {}).get("hour_whitelist") or {}
+        if not wl:
+            return True   # filter inactive
+        hours = wl.get(sym)
+        if not hours:
+            return False  # pair not whitelisted
+        try:
+            tz_name = (self.cfg.get("telegram") or {}).get("daily_report_timezone") or "Europe/Kyiv"
+            tz = pytz.timezone(tz_name)
+            current_hour = datetime.now(tz).hour
+            return int(current_hour) in [int(h) for h in hours]
+        except Exception:
+            logger.exception("hour_allowed check failed for %s — defaulting to allow", sym)
+            return True
 
     # ---------- main loop ----------
     async def _resume_pending_trade(self):
@@ -966,6 +996,9 @@ class StateMachine:
             # Skip low payout
             payout = int(self.feed.assets.get(sym, {}).get("payout", 0))
             if payout < min_payout:
+                continue
+            # Skip if user's hour-whitelist excludes this pair at this hour
+            if not self._hour_allowed(sym):
                 continue
             buf = self._candles.get(sym)
             if not buf or len(buf) < 200:

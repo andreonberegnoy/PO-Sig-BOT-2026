@@ -97,6 +97,12 @@
         <button class="hour-range-btn" data-range="30d">30д</button>
         <button class="hour-range-btn" data-range="all">всё</button>
       </div>
+      <div class="actions" style="margin-top:8px; flex-wrap:wrap; gap:6px;">
+        <button id="btn-hourly-export" class="btn">📥 Экспорт CSV</button>
+        <button id="btn-hourly-apply" class="btn primary">⭐ Применить как фильтр</button>
+        <button id="btn-hourly-clear" class="btn" style="display:none;">🔓 Снять фильтр</button>
+      </div>
+      <div id="hourly-filter-status" class="action-msg" style="margin-top:6px; min-height:0;"></div>
       <h3 style="margin-top:14px; font-size:15px;">Сводка по часам (все пары)</h3>
       <div class="analytics-wrap">
         <table id="hourly-summary" class="analytics"></table>
@@ -108,6 +114,14 @@
       </p>
       <div class="analytics-wrap">
         <table id="hourly-pairs" class="analytics"></table>
+      </div>
+      <!-- Hidden reset button — small, low-emphasis, with double-confirm.
+           Use only when changing strategy and want a clean stats baseline. -->
+      <div style="margin-top:24px; text-align:right;">
+        <button id="btn-hourly-reset" class="btn-tiny"
+                title="Сбросить статистику для аналитики (старые сделки в БД остаются)">
+          ⤺ reset stats
+        </button>
       </div>
     </div>
   </section>

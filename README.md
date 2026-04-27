@@ -160,7 +160,23 @@ tools/
 
 **Триггеры перехода в SEARCH:**
 - Payout упал ниже `payout_floor` (85%) на текущей паре
-- Достигнут лимит `max_trades_on_pair` (если включено)
+- Достигнут лимит `max_trades_on_pair` (если `limit_trades_per_pair_enabled = true`)
+
+**Поведение `switched_pairs` (защита от циклирования на одной паре):**
+
+В пределах одного МГ-цикла пара, на которой произошёл триггер смены, добавляется
+в `switched_pairs` и **не используется повторно** до завершения цикла. Когда
+список очищается:
+
+| Событие | `switched_pairs` |
+|---|---|
+| WIN на любой паре в цикле | очищается → все пары снова доступны |
+| `/resume` после stop_sum / max_steps | очищается |
+| Кнопка "🔄 Сбросить цикл (FREE)" | очищается |
+| `martingale.enabled = false` + LOSS | очищается (МГ выкл — каждая сделка независима) |
+
+То есть **в пределах одного цикла** пары не повторяются (защита от слива на одной
+плохой паре), **между циклами** все пары снова в игре.
 
 ### Шаг 5. Мартингейл с гейтом
 
@@ -356,7 +372,8 @@ trading:
   expiry_seconds: 120
   one_trade_at_a_time: true
   min_trades_on_pair: 3
-  max_trades_on_pair: 0      # 0 = выкл. 1/2/3 = принудит. SEARCH после N сделок
+  limit_trades_per_pair_enabled: false  # ВКЛ/ВЫКЛ функции лимита (default OFF)
+  max_trades_on_pair: 1      # При limit_enabled=true: после N сделок — SEARCH-mode
   max_pair_switch_per_cycle: 1
 
 martingale:

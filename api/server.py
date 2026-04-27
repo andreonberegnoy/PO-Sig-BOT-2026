@@ -376,6 +376,106 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
             "summary_by_hour": summary_by_hour,
         }
 
+    # ─── expiry backtest ───
+    @app.get("/api/expiry_stats")
+    async def expiry_stats(request: Request):
+        """Backtest для ВСЕХ доступных OTC пар (не только торгуемых).
+        Прогоняет CONSENSUS-стратегию с разными expiryBars (2, 3, 4, 5) на
+        исторических свечах каждой пары. Показывает какая экспирация
+        чаще закрывается в плюс — для ручного подбора оптимума.
+
+        Использует _candles buffer для tracked пар, для остальных
+        дотягивает свечи через fetch_candles (REST). Медленнее на
+        первом запуске (~10-30с для 30+ пар), потом кешировано.
+        """
+        _auth(request)
+        if not sm or not feed:
+            return {"pairs": [], "expiries": [2, 3, 4, 5],
+                    "note": "Бот не запущен или нет связи с фидом."}
+
+        from strategy.consensus import analyze, DEFAULT_PARAMS
+        from feed.history import fetch_candles
+        base_params = {**DEFAULT_PARAMS, **(cfg.get("indicator") or {})}
+        f_cfg = cfg.get("filter", {}) or {}
+        if "stats_lookback_bars" in f_cfg:
+            base_params["statsLookbackBars"] = f_cfg["stats_lookback_bars"]
+        tf = int(f_cfg.get("tf", 60))
+        history_limit = int(f_cfg.get("history_candles", 1060))
+
+        EXPIRIES = [2, 3, 4, 5]
+        MIN_SIGNALS = 5
+
+        # Все OTC пары из ассетов фида (не только tracked)
+        all_otc = [
+            (s, info) for s, info in (feed.assets or {}).items()
+            if info.get("is_otc") and info.get("open", True)
+        ]
+        results = []
+        fetched = 0
+        skipped = 0
+
+        for sym, info in all_otc:
+            payout = int(info.get("payout", 0))
+            # Сначала пробуем cached buffer от state_machine (tracked пары)
+            candles = (sm._candles or {}).get(sym) if sm else None
+            if not candles or len(candles) < 100:
+                # Дотянуть исторически — может быть медленно для пар не в _tracked
+                try:
+                    candles = await fetch_candles(feed, sym, period=tf, limit=history_limit)
+                    fetched += 1
+                except Exception:
+                    skipped += 1
+                    continue
+            if not candles or len(candles) < 100:
+                skipped += 1
+                continue
+
+            per_expiry: dict = {}
+            for exp in EXPIRIES:
+                params = {**base_params, "expiryBars": exp}
+                try:
+                    a = analyze(candles, params)
+                except Exception:
+                    continue
+                completed = a.wins + a.losses
+                wr = (a.wins / completed * 100.0) if completed else 0.0
+                per_expiry[exp] = {
+                    "signals": a.completed,
+                    "wins": a.wins,
+                    "losses": a.losses,
+                    "wr": round(wr, 1),
+                    "wr1": round(a.wr1, 1),
+                    "max_streak": a.max_loss_streak_overall,
+                }
+            valid = [(exp, d) for exp, d in per_expiry.items()
+                     if d["signals"] >= MIN_SIGNALS]
+            if valid:
+                best_exp, best_data = max(valid, key=lambda x: x[1]["wr"])
+                best_wr = best_data["wr"]
+            else:
+                best_exp, best_wr = None, 0.0
+            results.append({
+                "symbol": sym,
+                "payout": payout,
+                "expiries": per_expiry,
+                "best_expiry": best_exp,
+                "best_wr": best_wr,
+                "candles_used": len(candles),
+            })
+
+        results.sort(key=lambda r: (-r["best_wr"], -r["payout"]))
+
+        return {
+            "pairs": results,
+            "expiries": EXPIRIES,
+            "min_signals_for_score": MIN_SIGNALS,
+            "note": (
+                f"Анализ {len(results)} OTC пар (всех доступных). "
+                f"Подтянуто свечей через REST: {fetched}, пропущено: {skipped}. "
+                f"Применена CONSENSUS-стратегия из config, меняется только expiryBars (2..5)."
+            ),
+        }
+
     # ─── hour-whitelist filter ───
     @app.get("/api/hour_whitelist")
     async def get_hour_whitelist(request: Request):

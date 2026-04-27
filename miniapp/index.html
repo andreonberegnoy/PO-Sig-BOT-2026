@@ -15,6 +15,7 @@
     <button class="tab" data-tab="strategies">Стратегии</button>
     <button class="tab" data-tab="analytics">Аналитика</button>
     <button class="tab" data-tab="hourly">По часам</button>
+    <button class="tab" data-tab="expiry">Экспирация</button>
   </div>
 </header>
 
@@ -122,6 +123,31 @@
                 title="Сбросить статистику для аналитики (старые сделки в БД остаются)">
           ⤺ reset stats
         </button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ─── EXPIRY ANALYSIS ─── -->
+  <section id="tab-expiry" class="tab-panel">
+    <div class="card">
+      <h2>⏱ Анализ экспирации</h2>
+      <p class="hint">
+        Бот прогоняет ТВОЮ стратегию (CONSENSUS из config) на накопленных свечах
+        с разными экспирациями: <b>2, 3, 4, 5 баров</b>. Показывает какая бы
+        отработала лучше для каждой пары. Используй для подбора оптимального
+        <code>trading.expiry_seconds</code>.
+      </p>
+      <p class="hint" style="font-size:11px;">
+        Расчёт идёт ~2-5 сек (по нажатию). Используются ≥1000 свечей в памяти бота.
+        ⭐ — лучшая экспирация для пары (≥5 сигналов в окне).
+      </p>
+      <div class="actions" style="margin-top:8px;">
+        <button id="btn-expiry-load" class="btn primary">🔄 Запустить анализ</button>
+        <button id="btn-expiry-export" class="btn" style="display:none;">📥 Экспорт CSV</button>
+      </div>
+      <div id="expiry-info" class="action-msg" style="margin-top:6px; min-height:0;"></div>
+      <div class="analytics-wrap" style="margin-top:14px;">
+        <table id="expiry-table" class="analytics"></table>
       </div>
     </div>
   </section>

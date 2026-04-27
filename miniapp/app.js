@@ -33,6 +33,7 @@
       if (t.dataset.tab === "strategies") loadStrategies();
       if (t.dataset.tab === "status") loadStatus();
       if (t.dataset.tab === "hourly") loadHourly();
+      // expiry tab — explicit click of "Запустить анализ", не auto-load
     });
   });
 
@@ -756,6 +757,115 @@
     } catch (e) {
       alert(`❌ Ошибка: ${e.message || e}`);
     }
+  });
+
+  // ─── EXPIRY analysis ───
+  let _lastExpiryData = null;
+
+  async function loadExpiry() {
+    const tbl = document.getElementById("expiry-table");
+    const info = document.getElementById("expiry-info");
+    const exportBtn = document.getElementById("btn-expiry-export");
+    const loadBtn = document.getElementById("btn-expiry-load");
+    if (!tbl) return;
+
+    info.className = "action-msg info";
+    info.textContent = "⏳ Анализирую все пары...";
+    tbl.innerHTML = "";
+    if (loadBtn) loadBtn.disabled = true;
+
+    try {
+      const r = await api("/api/expiry_stats");
+      _lastExpiryData = r;
+      const pairs = r.pairs || [];
+      const expiries = r.expiries || [2, 3, 4, 5];
+
+      if (pairs.length === 0) {
+        info.className = "action-msg warn";
+        info.textContent = r.note || "Нет данных. Бот ещё не загрузил свечи.";
+        return;
+      }
+
+      info.className = "action-msg ok";
+      info.textContent = `✅ ${r.note}`;
+      if (exportBtn) exportBtn.style.display = "";
+
+      // Build header: pair | payout | for each expiry: WR (sigs) | best
+      let header = `<thead><tr>
+        <th>Пара</th>
+        <th>Payout</th>`;
+      for (const exp of expiries) {
+        header += `<th>exp=${exp}<br/><span class="hint" style="font-size:10px;">WR / сигналов</span></th>`;
+      }
+      header += `<th>⭐ Лучшая</th></tr></thead>`;
+
+      const body = pairs.map(p => {
+        let row = `<tr>
+          <td><b>${p.symbol}</b></td>
+          <td>${p.payout}%</td>`;
+        for (const exp of expiries) {
+          const d = p.expiries[exp];
+          if (!d || d.signals === 0) {
+            row += `<td class="hint">—</td>`;
+          } else {
+            const isBest = (exp === p.best_expiry);
+            const wrCls = d.wr >= 70 ? 'cell-good' : d.wr >= 55 ? '' : 'cell-bad';
+            const star = isBest ? ' ⭐' : '';
+            const dim = (d.signals < (r.min_signals_for_score || 5)) ? 'opacity:0.5;' : '';
+            row += `<td class="${wrCls}" style="${dim}">${d.wr.toFixed(1)}%${star}<br/>
+                    <span class="hint" style="font-size:10px;">✓${d.wins} ✗${d.losses}</span></td>`;
+          }
+        }
+        if (p.best_expiry !== null) {
+          const bestCls = p.best_wr >= 70 ? 'cell-good' : p.best_wr >= 55 ? '' : '';
+          row += `<td class="${bestCls}"><b>exp=${p.best_expiry}</b><br/>${p.best_wr.toFixed(1)}%</td>`;
+        } else {
+          row += `<td class="hint">мало<br/>сигналов</td>`;
+        }
+        row += "</tr>";
+        return row;
+      }).join("");
+
+      tbl.innerHTML = header + `<tbody>${body}</tbody>`;
+    } catch (e) {
+      info.className = "action-msg err";
+      info.textContent = `❌ Ошибка: ${e.message || e}`;
+    } finally {
+      if (loadBtn) loadBtn.disabled = false;
+    }
+  }
+
+  // Кнопки
+  const expLoadBtn = document.getElementById("btn-expiry-load");
+  if (expLoadBtn) expLoadBtn.addEventListener("click", loadExpiry);
+
+  const expExportBtn = document.getElementById("btn-expiry-export");
+  if (expExportBtn) expExportBtn.addEventListener("click", () => {
+    if (!_lastExpiryData) {
+      alert("Запусти анализ сначала");
+      return;
+    }
+    const expiries = _lastExpiryData.expiries;
+    const headers = ["symbol", "payout"];
+    for (const e of expiries) {
+      headers.push(`exp${e}_signals`, `exp${e}_wins`, `exp${e}_losses`,
+                   `exp${e}_wr`, `exp${e}_wr1`);
+    }
+    headers.push("best_expiry", "best_wr");
+
+    const rows = (_lastExpiryData.pairs || []).map(p => {
+      const r = [p.symbol, p.payout];
+      for (const e of expiries) {
+        const d = p.expiries[e] || {};
+        r.push(d.signals ?? "", d.wins ?? "", d.losses ?? "",
+               d.wr ?? "", d.wr1 ?? "");
+      }
+      r.push(p.best_expiry ?? "", p.best_wr ?? "");
+      return r;
+    });
+
+    const ts = new Date().toISOString().slice(0, 10);
+    downloadCSV(`expiry_analysis_${ts}.csv`, headers, rows);
   });
 
   // initial load

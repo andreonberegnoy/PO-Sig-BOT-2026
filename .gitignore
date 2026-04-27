@@ -19,4 +19,5 @@ state.json
 /chrome-data/
 .claude/
 tests/__pycache__/
+STRATEGY.pdf
 

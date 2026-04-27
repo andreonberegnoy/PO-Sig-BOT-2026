@@ -83,9 +83,11 @@ CATEGORIES: dict[str, list[Setting]] = {
     "💰 Торговля": [
         Setting("trading.base_amount", "Базовая ставка ($)", "float", 0.5, 100.0, 0.5),
         Setting("trading.expiry_seconds", "Экспирация сделки (сек)", "int", 30, 600, 30),
+        Setting("trading.max_trades_on_pair", "Макс. сделок на паре (0=выкл)", "int", 0, 10, 1),
         Setting("trading.max_pair_switch_per_cycle", "Смен пары за цикл", "int", 0, 5, 1),
     ],
     "🎰 Мартингейл": [
+        Setting("martingale.enabled", "Включить мартингейл", "bool"),
         Setting("martingale.coefficient", "Множитель", "float", 1.5, 5.0, 0.1),
         Setting("martingale.max_steps", "Макс. шагов", "int", 1, 20, 1),
         Setting("martingale.stop_sum", "Стоп-сумма ($)", "float", 10.0, 10000.0, 50.0),

@@ -255,6 +255,11 @@ class StateMachine:
 
     def _amount_for_step(self, step: int) -> float:
         base = float(self.cfg["trading"]["base_amount"])
+        # Martingale toggle: when disabled, every trade uses base_amount
+        # regardless of step. Lets user run "flat" strategy without doubling
+        # after losses.
+        if not self.cfg["martingale"].get("enabled", True):
+            return base
         coef = float(self.cfg["martingale"]["coefficient"])
         return round(base * (coef ** step), 2)
 
@@ -807,6 +812,40 @@ class StateMachine:
     # ---------- in-cycle step (after a loss) ----------
     async def _in_cycle_step(self):
         sym = self.state.current_pair
+
+        # ── Hard cap: max trades per pair within this cycle ──
+        # User-configured via trading.max_trades_on_pair (0 = no cap, current
+        # legacy behavior). E.g. set to 2 → after 2 trades on the same pair
+        # bot force-switches to next best pair regardless of MG step.
+        max_trades = int(self.cfg["trading"].get("max_trades_on_pair", 0) or 0)
+        if max_trades > 0 and self.state.trades_on_pair >= max_trades:
+            exclude = {sym, *self.state.switched_pairs}
+            pick = self._pick_switch_pair(exclude)
+            if pick:
+                self.state.switched_pairs.append(sym)
+                self.state.cycle_switches += 1
+                self.state.current_pair = pick.symbol
+                self.state.trades_on_pair = 0
+                self._persist()
+                await self._notify(
+                    f"🔀 Лимит {max_trades} сделок на паре достигнут — смена: "
+                    f"{sym} → {pick.symbol} (payout {pick.payout}%). "
+                    f"МГ-шаг {self.state.mg_step} сохранён."
+                )
+                sym = pick.symbol
+                if sym not in self._tracked:
+                    try:
+                        await self._load_history(sym)
+                        self._tracked.add(sym)
+                    except Exception:
+                        logger.exception("max-trades switch: _load_history %s failed", sym)
+                    if hasattr(self.feed, "subscribe"):
+                        try: await self.feed.subscribe(sym, int(self.cfg["filter"]["tf"]))
+                        except Exception: logger.exception("max-trades switch: subscribe %s failed", sym)
+                self._last_closed_bar_time.pop(sym, None)
+            else:
+                logger.info("max-trades switch: no eligible pair, staying on %s", sym)
+
         # Check payout drop → possibly switch
         payout = int(self.feed.assets.get(sym, {}).get("payout", 0))
         floor = self.cfg["filter"]["payout_floor"]
@@ -1060,13 +1099,24 @@ class StateMachine:
                 )
         elif closed.result == "LOSS":
             self.state.session_loss += opened.amount
-            self.state.mg_step += 1
-            self._persist()
-            await self._notify(
-                f"❌ LOSS {opened.asset}  -${opened.amount:.2f}  "
-                f"(шаг → MG{self.state.mg_step}, потери ${self.state.session_loss:.2f})"
-            )
-            # Loop will immediately trigger _in_cycle_step on next iteration
+            mg_enabled = bool(self.cfg["martingale"].get("enabled", True))
+            if mg_enabled:
+                self.state.mg_step += 1
+                self._persist()
+                await self._notify(
+                    f"❌ LOSS {opened.asset}  -${opened.amount:.2f}  "
+                    f"(шаг → MG{self.state.mg_step}, потери ${self.state.session_loss:.2f})"
+                )
+            else:
+                # No-MG mode: don't double down. Reset cycle and look for next
+                # signal on best available pair.
+                self._reset_cycle()
+                self._persist()
+                await self._notify(
+                    f"❌ LOSS {opened.asset}  -${opened.amount:.2f}  "
+                    f"(МГ выкл — ищу новый сигнал, потери ${self.state.session_loss:.2f})"
+                )
+            # Loop will immediately trigger next iteration
             self._tick_event.set()
         else:  # DRAW
             self._persist()

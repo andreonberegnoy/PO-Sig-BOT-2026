@@ -633,15 +633,25 @@ class TelegramBot:
                 if not tracked:
                     text = "🔍 <b>Tracked</b>\n\nНет торгуемых пар. Возможно фильтры слишком жёсткие."
                 else:
-                    lines = [f"🔍 <b>Tracked пары ({len(tracked)})</b>\n"]
-                    for sym in tracked[:30]:
+                    lines = [
+                        f"🔍 <b>Tracked пары ({len(tracked)})</b>",
+                        "Формат: <code>пара (payout%) | 1000: ✓N ✗M | 200: ✓N ✗M</code>\n",
+                    ]
+                    for sym in tracked[:25]:
                         info = self.feed.assets.get(sym, {}) if self.feed else {}
                         payout = info.get("payout", "?")
                         score = sm._pair_scores.get(sym)
-                        prio = score.priority if score else "?"
-                        lines.append(f"<code>{sym}</code> — payout {payout}%, prio {prio}")
-                    if len(tracked) > 30:
-                        lines.append(f"... и ещё {len(tracked) - 30}")
+                        if score:
+                            long_str = f"✓{score.wins} ✗{score.losses}"
+                            recent_str = f"✓{score.wins_recent} ✗{score.losses_recent}"
+                            lines.append(
+                                f"<code>{sym}</code> ({payout}%) | "
+                                f"1000: {long_str} | 200: {recent_str}"
+                            )
+                        else:
+                            lines.append(f"<code>{sym}</code> ({payout}%) — нет анализа")
+                    if len(tracked) > 25:
+                        lines.append(f"\n... и ещё {len(tracked) - 25}")
                     text = "\n".join(lines)
                 return await cb.message.edit_text(text, parse_mode="HTML",
                                                    reply_markup=_build_control_keyboard())

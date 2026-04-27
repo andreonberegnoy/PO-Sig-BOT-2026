@@ -35,8 +35,8 @@ DEFAULT_PARAMS = {
     "bbPeriod": 20, "bbStdDev": 2.0, "bbZoneDepth": 0.3,
     "candleMaxAtrMult": 2.0, "candleReqAlign": True,
     "cooldownBars": 3,
-    "drawdownEnabled": True, "drawdownWindow": 30, "drawdownStopWR": 40,
     "statsLookbackBars": 1000,
+    "recentLookbackBars": 200,
 }
 
 # UI schema for Mini App "Параметры стратегии" tab
@@ -261,9 +261,11 @@ class Analysis:
     # Recent-window stats (last N bars, configured by recentLookbackBars).
     # Used for the second-tier filter: a pair must be good both long-term
     # (wr1 over full lookback) AND in recent form (wr1_recent over short window).
-    wins1_recent: int = 0
-    completed_recent: int = 0
-    wr1_recent: float = 0.0
+    wins1_recent: int = 0           # first-trade wins in recent window
+    wins_recent: int = 0            # total wins (including MG-recovered) in recent window
+    losses_recent: int = 0          # total losses in recent window
+    completed_recent: int = 0       # total completed signals in recent window
+    wr1_recent: float = 0.0         # % first-trade wins in recent window
     diag: dict = field(default_factory=dict)
 
 
@@ -312,12 +314,16 @@ def analyze(candles: list[dict], params: dict) -> Analysis:
             if current_streak > a.max_loss_streak_overall:
                 a.max_loss_streak_overall = current_streak
         # ALSO count this signal toward recent-window stats if it falls
-        # within the smaller lookback. We track only wins1_recent / completed_recent
-        # since wr1_recent is what the new filter uses.
+        # within the smaller lookback (200 bars). Track plus/minus separately
+        # so we can show user "X plus, Y minus за последние 200 свечей".
         if ev.i >= from_bar_recent:
             a.completed_recent += 1
             if r.first_win:
                 a.wins1_recent += 1
+            if r.total_win:
+                a.wins_recent += 1
+            else:
+                a.losses_recent += 1
 
     if a.completed:
         a.wr = a.wins / (a.wins + a.losses) * 100 if (a.wins + a.losses) else 0

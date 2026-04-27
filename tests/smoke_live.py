@@ -21,7 +21,7 @@ async def main():
     top_pairs = [(s, feed.assets[s]) for s in wanted if s in feed.assets]
     print(f"\nPairs to verify: {[(s, a['payout']) for s, a in top_pairs]}")
 
-    params = {**DEFAULT_PARAMS, "statsLookbackBars": 1000, "drawdownWindow": 30}
+    params = {**DEFAULT_PARAMS, "statsLookbackBars": 1000, "recentLookbackBars": 200}
     fetch_limit = 1060
     for sym, info in top_pairs:
         print(f"\n--- {sym} (payout {info['payout']}%) ---")

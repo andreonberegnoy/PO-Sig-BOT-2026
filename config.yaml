@@ -101,11 +101,8 @@ indicator:
 
   cooldownBars: 3
 
-  drawdownEnabled: true
-  drawdownWindow: 30
-  drawdownStopWR: 40
-
-  statsLookbackBars: 1000
+  statsLookbackBars: 1000     # окно «полной» статистики (свечей)
+  recentLookbackBars: 200     # окно «свежей» статистики (свечей)
 
 # ---- Telegram ----
 # Реальные значения инжектятся через env-переменные TELEGRAM_TOKEN / TELEGRAM_CHAT_ID

@@ -105,16 +105,21 @@ def render_chart(
 
     # Title + stats plaque (po-signals.com HUD style, ASCII-safe for matplotlib)
     wr_color = "#86feac" if analysis.wr >= 60 else ("#fdf647" if analysis.wr >= 53 else "#ffffff")
+    long_window = int(merged_params.get("statsLookbackBars", 1000))
+    recent_window = int(merged_params.get("recentLookbackBars", 200))
+    completed_recent_full = analysis.wins_recent + analysis.losses_recent
+    wr_recent = (analysis.wins_recent / completed_recent_full * 100) if completed_recent_full else 0
     lines = [
         f"◉ CONSENSUS 4/5    Экспир: {merged_params['expiryBars']} бара",
-        f"◆ Общая: {analysis.wr:.0f}%    ✓ {analysis.wins} : ✗ {analysis.losses}",
-        f"◆ 1-я сделка: {analysis.wr1:.0f}%",
+        f"◆ За {long_window} свечей: {analysis.completed} сигналов  ✓{analysis.wins} ✗{analysis.losses}  WR {analysis.wr:.0f}%",
+        f"◆ За {recent_window} свечей: {analysis.completed_recent} сигналов  ✓{analysis.wins_recent} ✗{analysis.losses_recent}  WR {wr_recent:.0f}%",
+        f"◆ 1-я сделка: long {analysis.wr1:.0f}%   recent {analysis.wr1_recent:.0f}%",
         f"◆ Макс. минусов до ✓: {analysis.max_loss_streak_before_win}    всего: {analysis.max_loss_streak_overall}",
     ]
     if analysis.recent_results:
         last = analysis.recent_results[-25:]
         lines.append("")
-        lines.append(f"Последние {len(last)}: " + "".join("✓" if x else "✗" for x in last))
+        lines.append(f"Последние {len(last)} сделок: " + "".join("✓" if x else "✗" for x in last))
 
     txt = "\n".join(lines)
     ax.text(0.99, 0.97, txt, transform=ax.transAxes, ha="right", va="top",

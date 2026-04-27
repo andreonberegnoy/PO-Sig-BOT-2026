@@ -85,10 +85,17 @@ class PairScore:
     ban: bool                         # → длительный бан (ban_hours, дефолт 12ч)
     max_loss_streak: int
     max_loss_streak_before_win: int
+    # Long window (statsLookbackBars, дефолт 1000 свечей)
     wins: int
     losses: int
     completed: int
     wr: float
+    # Recent window (recentLookbackBars, дефолт 200 свечей) — мини-копия
+    wins_recent: int = 0
+    losses_recent: int = 0
+    completed_recent: int = 0
+    wr_recent: float = 0.0            # общий WR в recent окне
+    wr1_recent: float = 0.0           # WR первой сделки в recent окне
     reason: str = ""
     # Short pause (pause_hours, дефолт 1ч): для пар которые провалили recent
     # WR1 фильтр. После истечения автоматически переоцениваются на следующем
@@ -106,6 +113,9 @@ def classify(
     min_wr1_recent: float = 0.0,
 ) -> PairScore:
     a = analyze(candles, params)
+    # Compute recent-window WR (общий, не только первая сделка)
+    completed_recent_full = a.wins_recent + a.losses_recent
+    wr_recent = (a.wins_recent / completed_recent_full * 100.0) if completed_recent_full else 0.0
     score = PairScore(
         symbol=symbol,
         payout=payout,
@@ -113,6 +123,10 @@ def classify(
         max_loss_streak=a.max_loss_streak_overall,
         max_loss_streak_before_win=a.max_loss_streak_before_win,
         wins=a.wins, losses=a.losses, completed=a.completed, wr=a.wr,
+        wins_recent=a.wins_recent, losses_recent=a.losses_recent,
+        completed_recent=a.completed_recent,
+        wr_recent=round(wr_recent, 1),
+        wr1_recent=round(a.wr1_recent, 1),
     )
     # Not enough signals → skip but don't ban
     if a.completed < 5:

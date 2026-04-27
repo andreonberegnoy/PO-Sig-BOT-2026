@@ -855,10 +855,19 @@ class StateMachine:
                 try:
                     from tg.chart import render_chart
                     params = {**self.cfg["indicator"]}
-                    png = render_chart(self._candles[sym], params, sym)
+                    candles = self._candles.get(sym) or []
+                    png = render_chart(candles, params, sym)
                     await self.send_chart(png, caption=f"📊 {sym} — сигнал {action.upper()}")
-                except Exception:
-                    logger.exception("send_chart failed")
+                except Exception as e:
+                    logger.exception("send_chart failed for %s", sym)
+                    # Best-effort: tell user via TG so they know charts are
+                    # broken (silent failures are the worst).
+                    try:
+                        await self._notify(
+                            f"⚠️ Не удалось построить график для {sym}: {type(e).__name__}: {e}"
+                        )
+                    except Exception:
+                        pass
         asyncio.create_task(_notify_bg(), name=f"notify_{sym}")
 
         await self._open_and_track(sym, action, amt)

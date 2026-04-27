@@ -6,6 +6,7 @@ Usage:
 
 import io
 import logging
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -20,6 +21,14 @@ from strategy.consensus import generate_signals, analyze, DEFAULT_PARAMS
 logger = logging.getLogger(__name__)
 
 
+def _safe_filename(s: str) -> str:
+    """Strip characters that are problematic in filenames or shell paths.
+    PO uses '#' for stock prefixes (#AAPL_otc) and '-' for some pairs
+    (ADA-USD_otc) — neither is forbidden by Linux but '#' can confuse
+    URL-handling libraries and TeX-aware label parsers later in the chain."""
+    return re.sub(r"[^A-Za-z0-9_-]", "_", s)
+
+
 def render_chart(
     candles: list[dict],
     params: dict,
@@ -31,8 +40,10 @@ def render_chart(
     """Render PNG chart and return its path. Uses same buffer + same indicator
     as bot. Time axis is rendered in `tz_name` (default Europe/Kyiv) so the
     chart visually matches PocketOption / PoSignals which show local time."""
+    if not candles or len(candles) < 5:
+        raise ValueError(f"render_chart: not enough candles for {symbol} ({len(candles) if candles else 0})")
     if out_path is None:
-        out_path = f"/tmp/chart_{symbol}_{int(datetime.now().timestamp())}.png"
+        out_path = f"/tmp/chart_{_safe_filename(symbol)}_{int(datetime.now().timestamp())}.png"
 
     merged_params = {**DEFAULT_PARAMS, **(params or {})}
     sigs, _ = generate_signals(candles, merged_params)
@@ -108,9 +119,14 @@ def render_chart(
     txt = "\n".join(lines)
     ax.text(0.99, 0.97, txt, transform=ax.transAxes, ha="right", va="top",
             color="#e2e8f0", fontsize=10, family="monospace",
+            parse_math=False,
             bbox=dict(boxstyle="round,pad=0.6", facecolor="#111827", edgecolor="#334155", alpha=0.95))
 
-    ax.set_title(f"{symbol}  (last {len(show)} bars)", color="#e2e8f0", fontsize=11, loc="left")
+    # parse_math=False keeps '$' '#' '_' as literal chars in matplotlib labels.
+    # Without this, e.g. "#AAPL_otc" or "BTC$..." may be parsed as mathtext
+    # and either render weirdly or raise "missing $".
+    ax.set_title(f"{symbol}  (last {len(show)} bars)", color="#e2e8f0",
+                 fontsize=11, loc="left", parse_math=False)
     # Time labels at evenly-spaced indices (every ~10 bars)
     step = max(1, len(show) // 8)
     tick_idx = list(range(0, len(show), step))

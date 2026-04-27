@@ -46,8 +46,11 @@ tg/
 ├── settings_ui.py             категоризированный список настроек для inline-меню
 └── chart.py                   рендер свечного графика (с safe_filename + parse_math=False)
 tools/
-├── make_strategy_pdf.py       генератор PDF-презентации стратегии
-└── ...                        (probe, smoke-test и др.)
+├── make_strategy_pdf.py            генератор PDF-презентации стратегии (STRATEGY.pdf)
+├── make_deploy_pdf.py              генератор PDF-шпаргалки по деплою (DEPLOY_CHEATSHEET.pdf)
+├── po_control.py                   локальный HTTP-сервер с HTML панелью управления
+├── install_control_service.sh      установка po_control.py как launchd-сервиса на Mac
+└── ...                             (probe, smoke-test, make_storage_state и др.)
 ```
 
 ---
@@ -192,13 +195,15 @@ Stop-sum ($1000) или max_steps (10) → waiting_resume → /resume
 | Команда | Описание |
 |---------|---------|
 | `/status` | Состояние + **inline-кнопки управления циклом** |
+| `/control` | 🎛 главное меню (диагностика, сегодня, баны, hourly, tracked, relogin, reset) |
+| `/panel` | 🌐 кнопка открыть HTML панель управления (deploy, restart, logs, backup) |
 | `/ping` | 🩺 Полная диагностика WS/задач + кнопки реконнекта |
 | `/balance` | Текущий баланс |
 | `/pause` | Поставить на паузу |
 | `/resume` | Возобновить / сбросить stop-sum |
 | `/stop` | Остановить бота |
 | `/bans` | Активные баны/паузы пар |
-| `/chart SYMBOL` | Свечной график пары |
+| `/chart SYMBOL` | Свечной график пары (показывает счётчики за 1000 и 200 свечей) |
 | `/test SYMBOL call\|put [amount]` | Тестовая сделка |
 | `/settings` | Категоризированное меню всех настроек |
 | `/help` | Список команд |
@@ -219,6 +224,79 @@ Stop-sum ($1000) или max_steps (10) → waiting_resume → /resume
 - 🔄 **Реконнект WS** — принудительный close → авто-реконнект
 - 🔑 **Relogin (новый SSID)** — Playwright прямо сейчас
 - 🔃 **Обновить статус**
+
+### `/control` — главное меню управления
+
+10 inline-кнопок с описаниями (что делает каждая показано в шапке):
+
+| Кнопка | Описание |
+|---|---|
+| 📊 Диагностика | статус WS, задач, балансы, фрейм-фрешность |
+| 💰 Сегодня | сделки за 24ч, WR, профит |
+| 🚫 Баны/паузы | пары временно отстранённые с timeleft |
+| 📈 Hourly | сводка по часам за 7 дней (WR, profit) |
+| 🔍 Tracked | торгуемые пары с counts ✓/✗ за 1000 и 200 свечей |
+| 🔑 Force Relogin | обновить SSID через Playwright (~60с) |
+| 🔄 Reset cycle | сбросить МГ-цикл в FREE |
+| 🌐 Mini App URL | инструкция (URL не доступен из контейнера) |
+| 📋 Deploy инструкция | copy-paste команды для VPS |
+
+### `/panel` — HTML панель управления
+
+Возвращает inline-кнопку **🌐 Открыть панель** с URL из env `CONTROL_PANEL_URL`.
+Панель крутится локально на Mac (или через cloudflared tunnel для phone-доступа).
+
+---
+
+## Локальная HTML панель управления (на Mac)
+
+[tools/po_control.py](tools/po_control.py) — небольшой Python-сервер на Mac с
+красивой HTML-страницей. **10 кнопок с tooltip-описаниями** для всех частых
+операций:
+
+- 🚀 **Deploy** — git pull + docker rebuild (с автоматическим разруливанием конфликтов config.yaml)
+- 🔄 **Restart container**
+- 📜 **Last 50 logs** (с фильтром шума)
+- 🩺 **Status check** — ps, /health, git, disk, ram
+- 🌐 **Mini App URL** — текущий tunnel URL
+- 🔁 **Restart Mini App tunnel** ⚠️ (URL изменится)
+- 💾 **Backup data/**
+- 🔥 **Force rebuild --no-cache** ⚠️
+- 👁 **Live logs (10 sec)**
+- 📖 **Last 5 commits on VPS**
+
+### Запуск
+
+```bash
+# Один раз — установить как launchd-сервис (авто-старт при логине):
+./tools/install_control_service.sh install
+
+# Открыть в браузере:
+http://localhost:5555/
+
+# Управление сервисом:
+./tools/install_control_service.sh status / logs / stop / start / restart
+```
+
+### Доступ с телефона
+
+Панель крутится на localhost — для phone-доступа нужен tunnel:
+
+```bash
+# На Mac:
+./tools/install_control_service.sh tunnel
+# → выдаст https://something.trycloudflare.com URL
+
+# На VPS (.env):
+CONTROL_PANEL_URL=https://something.trycloudflare.com
+
+# Перезапустить бота:
+docker compose up -d --build
+
+# Теперь /panel в Telegram → клик "🌐 Открыть панель" → откроется в браузере телефона
+```
+
+В HTML страница есть **кнопка 📋 Копировать** — копирует весь вывод терминала в буфер.
 
 ---
 
@@ -296,7 +374,12 @@ indicator:
   atrPeriod: 14; atrAvgWindow: 100; atrMinRatio: 0.7; atrMaxRatio: 2.0
   bbPeriod: 20; bbStdDev: 2.0; bbZoneDepth: 0.3
   candleMaxAtrMult: 2.0; cooldownBars: 3
-  recentLookbackBars: 200
+  statsLookbackBars: 1000      # окно "полной" статистики (свечей)
+  recentLookbackBars: 200      # окно "свежей" статистики (свечей)
+
+# Optional (не в config.yaml — задаётся через env):
+# CONTROL_PANEL_URL=https://...trycloudflare.com  # для /panel command
+# PO_PREFERRED_WS_URL=wss://api-eu.po.market/...  # пин региона PO
   statsLookbackBars: 1000
 
 schedule:
@@ -406,15 +489,19 @@ Mini App: `http://localhost:8080/`
 
 ---
 
-## PDF-документация стратегии
+## PDF-документация
 
-Запусти:
+Два готовых PDF-файла для удобства:
 
 ```bash
-python3 tools/make_strategy_pdf.py
+# Стратегия (11 страниц): как бот выбирает пары, фильтры, МГ
+python3 tools/make_strategy_pdf.py    → STRATEGY.pdf
+
+# Шпаргалка по деплою (11 страниц): SSH, git pull, troubleshooting
+python3 tools/make_deploy_pdf.py      → DEPLOY_CHEATSHEET.pdf
 ```
 
-→ создаст `STRATEGY.pdf` (11 страниц): обзор стратегии простым языком + таблицы + шпаргалка по всем настройкам. Удобно распечатать или открыть на iPad.
+Удобно распечатать, открыть на iPad или сохранить в Saved Messages в TG. Файлы добавлены в `.gitignore` — генерируются из скриптов, всегда актуальны.
 
 ---
 
@@ -448,6 +535,12 @@ python3 tools/make_strategy_pdf.py
 - [ ] Mini App → Strategies → загрузка кастома + активация работает
 - [ ] После рестарта контейнера — candles.db и state.db не теряются
 - [ ] Графики приходят в TG для всех типов пар (forex, crypto, stocks с `#`, indices)
+- [ ] График показывает счётчики ✓/✗ для обоих окон (1000 и 200 свечей)
+- [ ] `/control` → 🔍 Tracked показывает counts для каждой пары
+- [ ] `/panel` → клик на кнопку открывает HTML панель в браузере
+- [ ] HTML панель: при наведении на кнопку видно описание
+- [ ] HTML панель: 🚀 Deploy авто-разруливает конфликт config.yaml
+- [ ] HTML панель: 📋 Копировать копирует output в буфер
 - [ ] Алерт "WebSocket замолчал" приходит при выдернутой сети
 - [ ] Алерт "WebSocket восстановлен" приходит после реконнекта
 - [ ] Health watchdog молчит при здоровом боте, шлёт алерт при поломках

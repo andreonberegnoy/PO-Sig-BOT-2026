@@ -42,10 +42,17 @@ ACTIONS = [
         "color": "primary",
         "confirm": False,
         "tooltip": "Подтянуть последние коммиты с GitHub и пересобрать контейнер бота. "
-                   "Занимает ~30-60 сек. Используй когда я (Claude) запушил новый код.",
+                   "Занимает ~30-60 сек. Авто-разруливает конфликт config.yaml "
+                   "(сбрасывает локальные правки + восстанавливает mode=real).",
         "command": (
-            "cd /opt/po-bot && git pull && cd deploy && "
-            "docker compose down && docker compose up -d --build && "
+            "cd /opt/po-bot && "
+            # Discard local config.yaml changes (we always re-apply mode=real below)
+            "git checkout -- config.yaml 2>/dev/null; "
+            "git pull && "
+            # Re-apply mode=real after fresh pull
+            "sed -i 's/^mode: paper/mode: real/' config.yaml && "
+            "cd deploy && docker compose down && "
+            "docker compose up -d --build && "
             "docker compose logs --tail=20 po-bot"
         ),
     },

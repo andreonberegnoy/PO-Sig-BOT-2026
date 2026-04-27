@@ -379,56 +379,39 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
     # ─── expiry backtest ───
     @app.get("/api/expiry_stats")
     async def expiry_stats(request: Request):
-        """Backtest для ВСЕХ доступных OTC пар (не только торгуемых).
-        Прогоняет CONSENSUS-стратегию с разными expiryBars (2, 3, 4, 5) на
-        исторических свечах каждой пары. Показывает какая экспирация
-        чаще закрывается в плюс — для ручного подбора оптимума.
+        """Backtest для всех TRACKED пар. Прогоняет CONSENSUS-стратегию
+        с разными expiryBars (2, 3, 4, 5) на накопленных свечах каждой
+        tracked пары. Показывает какая экспирация чаще закрывается в плюс.
 
-        Использует _candles buffer для tracked пар, для остальных
-        дотягивает свечи через fetch_candles (REST). Медленнее на
-        первом запуске (~10-30с для 30+ пар), потом кешировано.
+        Использует только cached _candles buffer (быстро, без REST). Анализ
+        проходит за 1-3 секунды.
         """
         _auth(request)
-        if not sm or not feed:
+        if not sm or not getattr(sm, "_candles", None):
             return {"pairs": [], "expiries": [2, 3, 4, 5],
-                    "note": "Бот не запущен или нет связи с фидом."}
+                    "note": "Нет tracked пар. Подожди ~5 минут после старта бота."}
 
         from strategy.consensus import analyze, DEFAULT_PARAMS
-        from feed.history import fetch_candles
         base_params = {**DEFAULT_PARAMS, **(cfg.get("indicator") or {})}
         f_cfg = cfg.get("filter", {}) or {}
         if "stats_lookback_bars" in f_cfg:
             base_params["statsLookbackBars"] = f_cfg["stats_lookback_bars"]
-        tf = int(f_cfg.get("tf", 60))
-        history_limit = int(f_cfg.get("history_candles", 1060))
 
         EXPIRIES = [2, 3, 4, 5]
         MIN_SIGNALS = 5
 
-        # Все OTC пары из ассетов фида (не только tracked)
-        all_otc = [
-            (s, info) for s, info in (feed.assets or {}).items()
-            if info.get("is_otc") and info.get("open", True)
-        ]
+        # Только tracked пары (которые прошли фильтр и торгуются)
+        tracked = list(getattr(sm, "_tracked", set()) or [])
         results = []
-        fetched = 0
         skipped = 0
 
-        for sym, info in all_otc:
-            payout = int(info.get("payout", 0))
-            # Сначала пробуем cached buffer от state_machine (tracked пары)
-            candles = (sm._candles or {}).get(sym) if sm else None
-            if not candles or len(candles) < 100:
-                # Дотянуть исторически — может быть медленно для пар не в _tracked
-                try:
-                    candles = await fetch_candles(feed, sym, period=tf, limit=history_limit)
-                    fetched += 1
-                except Exception:
-                    skipped += 1
-                    continue
+        for sym in tracked:
+            candles = (sm._candles or {}).get(sym)
             if not candles or len(candles) < 100:
                 skipped += 1
                 continue
+            info = (sm.feed.assets if sm.feed else {}).get(sym, {})
+            payout = int(info.get("payout", 0))
 
             per_expiry: dict = {}
             for exp in EXPIRIES:
@@ -470,8 +453,7 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
             "expiries": EXPIRIES,
             "min_signals_for_score": MIN_SIGNALS,
             "note": (
-                f"Анализ {len(results)} OTC пар (всех доступных). "
-                f"Подтянуто свечей через REST: {fetched}, пропущено: {skipped}. "
+                f"Анализ {len(results)} tracked пар. Пропущено (мало свечей): {skipped}. "
                 f"Применена CONSENSUS-стратегия из config, меняется только expiryBars (2..5)."
             ),
         }

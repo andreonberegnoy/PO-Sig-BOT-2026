@@ -4,6 +4,8 @@ __pycache__/
 .venv/
 .env
 .env.local
+deploy/.env
+deploy/data/
 bot.log
 journal.db
 journal/candles.db

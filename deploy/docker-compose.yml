@@ -1,0 +1,29 @@
+services:
+  po-bot:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: po-sig-bot:latest
+    container_name: po-bot
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      # Persistent data: journal SQLite, candle cache, runtime state.
+      # Survives container restarts. Backup ./data to keep history.
+      - ./data:/data
+    ports:
+      # Mini App API. Bind to 0.0.0.0 — put Caddy/Nginx in front for HTTPS,
+      # or use Cloudflare Tunnel. Without HTTPS, Telegram WebApp won't load.
+      - "8080:8080"
+    # Generous health check — bot can be busy doing initial scan for ~30s.
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request,sys; urllib.request.urlopen('http://localhost:8080/health',timeout=5).read(); sys.exit(0)"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"

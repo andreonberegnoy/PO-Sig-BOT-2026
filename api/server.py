@@ -318,10 +318,15 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
             pass
         mode = cfg.get("mode")
         rows = journal.hourly_stats(since, mode=mode, tz_offset_sec=tz_offset_sec)
-        # Build summary per hour (sum across all pairs)
+        # Build summary per hour (sum across all pairs).
+        # For avg_win_payout we accumulate weighted (sum_payouts / total_wins)
+        # rather than averaging averages — that would skew toward sparse pairs.
         from collections import defaultdict
         summary_acc: dict = defaultdict(lambda: {
             "total": 0, "wins": 0, "losses": 0, "draws": 0, "profit": 0.0,
+            "sum_win_payout": 0.0,   # accumulator: sum of (avg * wins) per pair
+            "min_win_payout": None,
+            "max_win_payout": None,
         })
         for r in rows:
             h = r["hour"]
@@ -331,14 +336,26 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
             s["losses"] += r["losses"]
             s["draws"] += r["draws"]
             s["profit"] += r["profit"]
+            if r.get("avg_win_payout") is not None and r["wins"] > 0:
+                s["sum_win_payout"] += r["avg_win_payout"] * r["wins"]
+            if r.get("min_win_payout") is not None:
+                s["min_win_payout"] = (r["min_win_payout"] if s["min_win_payout"] is None
+                                       else min(s["min_win_payout"], r["min_win_payout"]))
+            if r.get("max_win_payout") is not None:
+                s["max_win_payout"] = (r["max_win_payout"] if s["max_win_payout"] is None
+                                       else max(s["max_win_payout"], r["max_win_payout"]))
         summary_by_hour = []
         # Reach the builtin range via __builtins__ since the arg name shadows it
         builtin_range = __builtins__["range"] if isinstance(__builtins__, dict) else __builtins__.range
         for h in builtin_range(24):  # ensure all 24 buckets even if zero trades
             s = summary_acc.get(h) or {"total": 0, "wins": 0, "losses": 0,
-                                        "draws": 0, "profit": 0.0}
+                                        "draws": 0, "profit": 0.0,
+                                        "sum_win_payout": 0.0,
+                                        "min_win_payout": None,
+                                        "max_win_payout": None}
             completed = s["wins"] + s["losses"]
             wr = (s["wins"] / completed * 100.0) if completed else 0.0
+            avg_win_p = (s["sum_win_payout"] / s["wins"]) if s["wins"] > 0 else None
             summary_by_hour.append({
                 "hour": h,
                 "total": s["total"],
@@ -347,6 +364,9 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
                 "draws": s["draws"],
                 "wr": round(wr, 1),
                 "profit": round(s["profit"], 2),
+                "avg_win_payout": round(avg_win_p, 1) if avg_win_p is not None else None,
+                "min_win_payout": s["min_win_payout"],
+                "max_win_payout": s["max_win_payout"],
             })
         return {
             "range": time_range,

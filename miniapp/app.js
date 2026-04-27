@@ -527,22 +527,30 @@
       const sumHeaders = `
         <thead><tr>
           <th>Час</th><th>Сделок</th><th>WIN</th><th>LOSS</th>
-          <th>WR</th><th>Profit</th>
+          <th>WR</th><th>Avg payout WIN</th><th>Profit</th>
         </tr></thead>`;
       const sumBody = summary.map(s => {
         if (s.total === 0) return '';   // skip empty hours
         const wrCls = s.wr >= 70 ? 'cell-good' : s.wr >= 55 ? '' : 'cell-bad';
         const profCls = s.profit >= 0 ? 'cell-good' : 'cell-bad';
+        const payCls = s.avg_win_payout == null ? '' :
+          s.avg_win_payout >= 90 ? 'cell-good' :
+          s.avg_win_payout >= 80 ? '' : 'cell-bad';
+        const payTxt = s.avg_win_payout == null ? '—' :
+          `${s.avg_win_payout.toFixed(1)}%` +
+          (s.min_win_payout != null && s.min_win_payout !== s.max_win_payout
+            ? ` <span class="hint" style="font-size:10px;">(${s.min_win_payout}-${s.max_win_payout})</span>` : '');
         return `<tr>
           <td><b>${String(s.hour).padStart(2,'0')}:00</b></td>
           <td>${s.total}</td>
           <td class="cell-good">${s.wins}</td>
           <td class="cell-bad">${s.losses}</td>
           <td class="${wrCls}">${s.wr.toFixed(1)}%</td>
+          <td class="${payCls}">${payTxt}</td>
           <td class="${profCls}">$${s.profit.toFixed(2)}</td>
         </tr>`;
       }).join('');
-      sumEl.innerHTML = sumHeaders + `<tbody>${sumBody || '<tr><td colspan="6">Нет сделок за выбранный период</td></tr>'}</tbody>`;
+      sumEl.innerHTML = sumHeaders + `<tbody>${sumBody || '<tr><td colspan="7">Нет сделок за выбранный период</td></tr>'}</tbody>`;
 
       // ─── Pairs × hours table ──────────────────────────────────────────
       // Sort by current sortKey
@@ -562,12 +570,20 @@
           <th data-sort="wins">WIN${arrow('wins')}</th>
           <th data-sort="losses">LOSS${arrow('losses')}</th>
           <th data-sort="wr">WR${arrow('wr')}</th>
+          <th data-sort="avg_win_payout">Avg payout WIN${arrow('avg_win_payout')}</th>
           <th data-sort="profit">Profit${arrow('profit')}</th>
         </tr></thead>`;
       const pairsBody = sortedBuckets.map(p => {
         const star = (p.wr >= 70 && p.total >= 5) ? ' ⭐' : '';
         const wrCls = p.wr >= 70 ? 'cell-good' : p.wr >= 55 ? '' : 'cell-bad';
         const profCls = p.profit >= 0 ? 'cell-good' : 'cell-bad';
+        const payCls = p.avg_win_payout == null ? '' :
+          p.avg_win_payout >= 90 ? 'cell-good' :
+          p.avg_win_payout >= 80 ? '' : 'cell-bad';
+        const payTxt = p.avg_win_payout == null ? '—' :
+          `${p.avg_win_payout.toFixed(1)}%` +
+          (p.min_win_payout != null && p.min_win_payout !== p.max_win_payout
+            ? ` <span class="hint" style="font-size:10px;">(${p.min_win_payout}-${p.max_win_payout})</span>` : '');
         return `<tr>
           <td>${p.symbol}${star}</td>
           <td>${String(p.hour).padStart(2,'0')}:00</td>
@@ -575,10 +591,11 @@
           <td class="cell-good">${p.wins}</td>
           <td class="cell-bad">${p.losses}</td>
           <td class="${wrCls}">${p.wr.toFixed(1)}%</td>
+          <td class="${payCls}">${payTxt}</td>
           <td class="${profCls}">$${p.profit.toFixed(2)}</td>
         </tr>`;
       }).join('');
-      pairsEl.innerHTML = pairsHeaders + `<tbody>${pairsBody || '<tr><td colspan="7">Нет данных</td></tr>'}</tbody>`;
+      pairsEl.innerHTML = pairsHeaders + `<tbody>${pairsBody || '<tr><td colspan="8">Нет данных</td></tr>'}</tbody>`;
 
       // Hook column-header sort
       pairsEl.querySelectorAll('th[data-sort]').forEach(th => {
@@ -659,17 +676,23 @@
     // 1. Summary CSV
     downloadCSV(
       `hourly_summary_${range}_${ts}.csv`,
-      ["hour", "total", "wins", "losses", "draws", "wr", "profit"],
+      ["hour", "total", "wins", "losses", "draws", "wr",
+       "avg_win_payout", "min_win_payout", "max_win_payout", "profit"],
       (_lastHourlyData.summary_by_hour || []).filter(s => s.total > 0).map(s =>
-        [s.hour, s.total, s.wins, s.losses, s.draws, s.wr, s.profit]
+        [s.hour, s.total, s.wins, s.losses, s.draws, s.wr,
+         s.avg_win_payout ?? "", s.min_win_payout ?? "", s.max_win_payout ?? "",
+         s.profit]
       )
     );
     // 2. Pairs × hours CSV
     downloadCSV(
       `hourly_pairs_${range}_${ts}.csv`,
-      ["symbol", "hour", "total", "wins", "losses", "draws", "wr", "profit"],
+      ["symbol", "hour", "total", "wins", "losses", "draws", "wr",
+       "avg_win_payout", "min_win_payout", "max_win_payout", "profit"],
       (_lastHourlyData.buckets || []).map(p =>
-        [p.symbol, p.hour, p.total, p.wins, p.losses, p.draws, p.wr, p.profit]
+        [p.symbol, p.hour, p.total, p.wins, p.losses, p.draws, p.wr,
+         p.avg_win_payout ?? "", p.min_win_payout ?? "", p.max_win_payout ?? "",
+         p.profit]
       )
     );
   });

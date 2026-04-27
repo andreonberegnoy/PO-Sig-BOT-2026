@@ -148,7 +148,13 @@ class Journal:
                 SUM(CASE WHEN result='WIN'  THEN 1 ELSE 0 END) AS wins,
                 SUM(CASE WHEN result='LOSS' THEN 1 ELSE 0 END) AS losses,
                 SUM(CASE WHEN result='DRAW' THEN 1 ELSE 0 END) AS draws,
-                COALESCE(SUM(profit), 0) AS profit
+                COALESCE(SUM(profit), 0) AS profit,
+                -- Payout statistics on WIN trades only — shows WHAT payout
+                -- the bot was winning at in each hour. Low avg_win_payout
+                -- means wins came mostly on low-payout pairs (worse).
+                AVG(CASE WHEN result='WIN' THEN payout ELSE NULL END) AS avg_win_payout,
+                MIN(CASE WHEN result='WIN' THEN payout ELSE NULL END) AS min_win_payout,
+                MAX(CASE WHEN result='WIN' THEN payout ELSE NULL END) AS max_win_payout
             FROM trades
             WHERE {where_sql}
             GROUP BY symbol, hour
@@ -163,6 +169,9 @@ class Journal:
             losses = int(r["losses"] or 0)
             completed = wins + losses
             wr = (wins / completed * 100.0) if completed else 0.0
+            avg_win_p = r["avg_win_payout"]
+            min_win_p = r["min_win_payout"]
+            max_win_p = r["max_win_payout"]
             out.append({
                 "symbol": r["symbol"],
                 "hour": int(r["hour"]),
@@ -172,6 +181,10 @@ class Journal:
                 "draws": int(r["draws"] or 0),
                 "wr": round(wr, 1),
                 "profit": round(float(r["profit"] or 0), 2),
+                # Payout stats on WIN-only — None if no wins yet
+                "avg_win_payout": round(float(avg_win_p), 1) if avg_win_p is not None else None,
+                "min_win_payout": int(min_win_p) if min_win_p is not None else None,
+                "max_win_payout": int(max_win_p) if max_win_p is not None else None,
             })
         return out
 

@@ -334,7 +334,44 @@ class PoDirectFeed:
                 pass
             # _recv_loop will exit; start a new one via connect()
             await asyncio.sleep(1.0)
-            await self.connect()
+            try:
+                await self.connect()
+            except Exception as e:
+                # Don't let connect failure escape the relogin task — that left it
+                # as "Task exception was never retrieved" and the bot stopped
+                # trying. Surface a clear TG alert and let auto_reconnect_loop
+                # take over (it will keep retrying with backoff).
+                msg = str(e)
+                is_403 = "InvalidStatus" in type(e).__name__ or "403" in msg or "Forbidden" in msg
+                if is_403:
+                    logger.error(
+                        "relogin: WS handshake to %s rejected with HTTP 403 — "
+                        "Cloudflare datacenter-IP block. auto_reconnect will "
+                        "retry; consider WARP tunnel or different VPS region.",
+                        self.ws_url,
+                    )
+                    self._alert(
+                        "ws_handshake_403",
+                        f"❌ Cloudflare заблокировал handshake к <code>{self.ws_url}</code> "
+                        f"(HTTP 403). Bot будет повторять auto-reconnect. "
+                        f"Если 403 продолжается — нужен WARP-туннель или смена региона VPS.",
+                        cooldown_sec=1800,
+                    )
+                else:
+                    logger.exception("relogin: WS connect failed: %s", e)
+                    self._alert(
+                        "ws_connect_failed",
+                        f"⚠️ После relogin не удалось подключиться к <code>{self.ws_url}</code>: "
+                        f"<code>{type(e).__name__}: {msg[:200]}</code>. auto_reconnect возьмёт.",
+                        cooldown_sec=1800,
+                    )
+                # Spawn auto_reconnect explicitly since recv_loop didn't get to start.
+                tasks = [t for t in asyncio.all_tasks()
+                         if t.get_name() == "po_auto_reconnect" and not t.done()]
+                if not tasks:
+                    asyncio.create_task(self._auto_reconnect_loop(),
+                                        name="po_auto_reconnect")
+                return
             # Re-subscribe to all previously tracked pairs
             old_subs = list(self._subscribed)
             self._subscribed.clear()

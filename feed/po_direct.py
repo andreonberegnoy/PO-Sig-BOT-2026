@@ -109,6 +109,10 @@ class PoDirectFeed:
         self._ready = asyncio.Event()
         self._recv_task: Optional[asyncio.Task] = None
         self._running = False
+        # Hard guard: only one _auto_reconnect_loop instance can run at a time.
+        # Stops 30 parallel reconnect-spawns during burst-subscribe (was causing
+        # ConcurrencyError when multiple _recv_loop tried to read the same WS).
+        self._auto_reconnect_in_progress: bool = False
         # Watchdog: timestamp of last frame received from server (any frame).
         # Heartbeat loop checks this every 30s; if >90s silent → force reconnect.
         self._last_frame_ts: float = time.time()
@@ -152,6 +156,17 @@ class PoDirectFeed:
             open_timeout=45,
         )
         self._running = True
+        # Cancel any previous recv task before creating a new one. Without this,
+        # a parallel reconnect (or the auto_reconnect_loop racing with itself)
+        # could leave multiple _recv_loop coroutines reading from the same WS,
+        # which raises websockets.ConcurrencyError ("cannot call recv while
+        # another coroutine is already running recv").
+        if self._recv_task is not None and not self._recv_task.done():
+            self._recv_task.cancel()
+            try:
+                await self._recv_task
+            except (asyncio.CancelledError, Exception):
+                pass
         self._recv_task = asyncio.create_task(self._recv_loop(), name="po_direct_recv")
 
         # wait for successauth. If a relogin callback is registered, allow
@@ -438,6 +453,11 @@ class PoDirectFeed:
     async def _auto_reconnect_loop(self, max_fast_attempts: int = 10):
         """Reconnect with exponential backoff — NEVER gives up.
 
+        Hard guard against double-spawn: even if multiple subscribe() calls
+        race to spawn this loop, only the first one runs; the rest exit
+        immediately. This prevents 30 parallel connect() calls during the
+        initial scan burst.
+
         Phase 1 (fast): attempts 1-10, backoff 2^n up to 60s each.
           - HTTP 401/403 → fast-path to relogin immediately.
           - All other errors → keep retrying.
@@ -447,6 +467,20 @@ class PoDirectFeed:
           This ensures the bot recovers even if the network is down for
           minutes or the relogin takes time.
         """
+        # Hard re-entry guard. The task-name check at spawn site has a TOCTOU
+        # race window — between checking and creating, another caller can
+        # spawn another loop. This flag closes the window: only the first
+        # invocation enters the loop, others exit immediately.
+        if self._auto_reconnect_in_progress:
+            logger.debug("_auto_reconnect_loop: another instance already running, exiting")
+            return
+        self._auto_reconnect_in_progress = True
+        try:
+            await self._auto_reconnect_loop_inner(max_fast_attempts)
+        finally:
+            self._auto_reconnect_in_progress = False
+
+    async def _auto_reconnect_loop_inner(self, max_fast_attempts: int = 10):
         import random
         attempt = 0
         relogin_round = 0   # how many phase-2 rounds since last relogin
@@ -901,8 +935,12 @@ class PoDirectFeed:
                 getattr(self._ws, "state").name in ("CLOSED", "CLOSING"):
             logger.warning("subscribe %s: WS not open (%s) — triggering reconnect",
                            symbol, getattr(getattr(self._ws, "state", None), "name", "None"))
+            # Critical: check if _auto_reconnect_loop itself is already running
+            # (not _recv_loop). On a burst-subscribe (30 pairs in parallel) the
+            # previous wrong check would let each subscribe spawn its OWN
+            # reconnect loop → 30 parallel connects → ConcurrencyError on _ws.
             if self._running and not any(
-                t.get_name() == "po_direct_recv" and not t.done()
+                t.get_name() == "po_auto_reconnect" and not t.done()
                 for t in asyncio.all_tasks()
             ):
                 asyncio.create_task(self._auto_reconnect_loop(), name="po_auto_reconnect")

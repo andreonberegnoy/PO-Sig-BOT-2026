@@ -139,7 +139,8 @@
     "💰 Торговля": [
       { k: "trading.base_amount", t: "float", min: 0.5, max: 100, step: 0.5, label: "Базовая ставка ($)" },
       { k: "trading.expiry_seconds", t: "int", min: 30, max: 600, label: "Экспирация (сек)" },
-      { k: "trading.max_trades_on_pair", t: "int", min: 0, max: 10, label: "Макс. сделок на паре (0=выкл)" },
+      { k: "trading.limit_trades_per_pair_enabled", t: "bool", label: "Лимит сделок на паре (вкл/выкл)" },
+      { k: "trading.max_trades_on_pair", t: "int", min: 1, max: 10, label: "Макс. сделок на паре" },
       { k: "trading.max_pair_switch_per_cycle", t: "int", min: 0, max: 5, label: "Смен пары за цикл" },
     ],
     "🎰 Мартингейл": [

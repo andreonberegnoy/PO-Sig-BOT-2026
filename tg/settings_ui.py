@@ -87,7 +87,8 @@ CATEGORIES: dict[str, list[Setting]] = {
     "💰 Торговля": [
         Setting("trading.base_amount", "Базовая ставка ($)", "float", 0.5, 100.0, 0.5),
         Setting("trading.expiry_seconds", "Экспирация сделки (сек)", "int", 30, 600, 30),
-        Setting("trading.max_trades_on_pair", "Макс. сделок на паре (0=выкл)", "int", 0, 10, 1),
+        Setting("trading.limit_trades_per_pair_enabled", "Лимит сделок на паре (вкл/выкл)", "bool"),
+        Setting("trading.max_trades_on_pair", "Макс. сделок на паре", "int", 1, 10, 1),
         Setting("trading.max_pair_switch_per_cycle", "Смен пары за цикл", "int", 0, 5, 1),
     ],
     "🎰 Мартингейл": [

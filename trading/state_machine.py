@@ -877,11 +877,13 @@ class StateMachine:
         sym = self.state.current_pair
 
         # ── Hard cap: max trades per pair within this cycle ──
-        # User-configured via trading.max_trades_on_pair (0 = no cap, current
-        # legacy behavior). E.g. set to 2 → after 2 trades on the same pair
-        # bot force-switches to "search any" mode.
+        # User-configured via two settings:
+        #   trading.limit_trades_per_pair_enabled (bool toggle, default false)
+        #   trading.max_trades_on_pair (int count, used when toggle is true)
+        # Setting count to 0 also disables it (legacy compat).
+        limit_enabled = bool(self.cfg["trading"].get("limit_trades_per_pair_enabled", False))
         max_trades = int(self.cfg["trading"].get("max_trades_on_pair", 0) or 0)
-        if max_trades > 0 and self.state.trades_on_pair >= max_trades:
+        if limit_enabled and max_trades > 0 and self.state.trades_on_pair >= max_trades:
             self.state.switched_pairs.append(sym)
             self.state.cycle_switches += 1
             self.state.current_pair = None   # enter SEARCHING mode

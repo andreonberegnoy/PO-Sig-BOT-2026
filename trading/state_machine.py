@@ -454,15 +454,25 @@ class StateMachine:
     async def _rescan_pairs(self):
         scores = await scan_all_pairs(self.feed, self.cfg)
         self._pair_scores = scores
-        # Apply bans silently (only log locally, no Telegram spam; summary in daily report)
+        # Apply bans + pauses silently. Pause uses same bans table but with
+        # shorter expiry (filter.pause_hours) — reused journal.is_banned() check
+        # naturally hides paused pairs from trading until they expire. After
+        # expiry the pair is auto-rechecked on next _rescan_pairs (hourly).
         new_bans = 0
+        new_pauses = 0
+        ban_hours = int(self.cfg["filter"].get("ban_hours", 12))
+        pause_hours = int(self.cfg["filter"].get("pause_hours", 1))
         for sym, s in scores.items():
             if s.ban and not self.journal.is_banned(sym):
-                self.journal.ban(sym, self.cfg["filter"]["ban_hours"], s.reason)
-                logger.info("BAN %s — %s", sym, s.reason)
+                self.journal.ban(sym, ban_hours, s.reason)
+                logger.info("BAN %s (%dh) — %s", sym, ban_hours, s.reason)
                 new_bans += 1
-        if new_bans:
-            logger.info("applied %d new bans this scan", new_bans)
+            elif s.pause and not self.journal.is_banned(sym):
+                self.journal.ban(sym, pause_hours, s.reason)
+                logger.info("PAUSE %s (%dh) — %s", sym, pause_hours, s.reason)
+                new_pauses += 1
+        if new_bans or new_pauses:
+            logger.info("applied %d bans + %d pauses this scan", new_bans, new_pauses)
 
         # Build tracked set = currently allowed + not banned + payout>=min_payout
         min_payout = self.cfg["filter"]["min_payout"]

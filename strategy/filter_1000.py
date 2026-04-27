@@ -3,12 +3,17 @@
 Rules from spec:
   ≤ max_losses_in_row (обычно 3) минусов подряд → пара ДОПУСТИМА
   2 или 1 минус подряд до плюса → пара в ПРИОРИТЕТЕ (меньше догонов = лучше)
-  > 4 минусов подряд → пара в БАН на ban_hours
+  > max_losses_in_row → пара в БАН на ban_hours (длительный бан, дефолт 12ч)
   WR1 long (% первой плюсовой сделки за 1000 свечей) < min_wr1 → SKIP
-  WR1 recent (% за последние 200 свечей) < min_wr1_recent → SKIP
-    (требует ≥3 сделок в окне, иначе нет данных)
+  WR1 recent (% за последние 200 свечей) < min_wr1_recent → ПАУЗА на
+    pause_hours (короткая пауза, дефолт 1ч). После истечения пара авто-
+    переоценивается на следующем _rescan_pairs.
+    (требует ≥3 сделок в окне, иначе нет данных — просто SKIP)
 
-Двойной фильтр: пара должна быть стабильной долгосрочно И в текущей форме.
+Три уровня "не торговать":
+  • SKIP    — мало сигналов или другая причина, повтор каждый scan
+  • PAUSE   — короткий перерыв (1ч), пара пере-классифицируется автоматом
+  • BAN     — длительный бан (12ч), пара плохая системно
 
 Returns classified dict: {symbol: PairScore}
 """
@@ -30,7 +35,7 @@ class PairScore:
     payout: int
     allowed: bool                     # допустима для торговли
     priority: int                     # чем меньше — тем лучше (0 = идеал)
-    ban: bool                         # → в бан-лист
+    ban: bool                         # → длительный бан (ban_hours, дефолт 12ч)
     max_loss_streak: int
     max_loss_streak_before_win: int
     wins: int
@@ -38,6 +43,10 @@ class PairScore:
     completed: int
     wr: float
     reason: str = ""
+    # Short pause (pause_hours, дефолт 1ч): для пар которые провалили recent
+    # WR1 фильтр. После истечения автоматически переоцениваются на следующем
+    # _rescan_pairs (раз в час). Если снова не пройдут — снова на паузу.
+    pause: bool = False
 
 
 def classify(
@@ -81,12 +90,13 @@ def classify(
     # Recent-form filter — even if long-term WR1 is good, pair must also be
     # performing well in the last N bars (recentLookbackBars, default 200).
     # Catches pairs that historically passed but recently degraded.
-    # Requires at least 3 signals in the recent window to evaluate (otherwise
-    # not enough data to judge — let the long-term filter decide).
+    # Failing this filter → PAUSE (short ban, default 1h) instead of full ban.
+    # After pause expires the pair is auto-rechecked on next _rescan_pairs.
     if min_wr1_recent > 0 and a.completed_recent >= 3 and a.wr1_recent < min_wr1_recent:
+        score.pause = True
         score.reason = (
-            f"WR1 recent {a.wr1_recent:.0f}% < {min_wr1_recent:.0f}% — "
-            f"плохая форма последних {a.completed_recent} сделок"
+            f"WR1 recent {a.wr1_recent:.0f}% < {min_wr1_recent:.0f}% → пауза "
+            f"(плохая форма последних {a.completed_recent} сделок, переоценка через час)"
         )
         return score
 

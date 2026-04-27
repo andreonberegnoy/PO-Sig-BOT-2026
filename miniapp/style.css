@@ -119,10 +119,14 @@ ul.strategies li.strategy-active { background: rgba(109, 180, 255, 0.08); }
 .hint { color: var(--hint); font-size: 13px; margin: 0 0 12px 0; line-height: 1.4; }
 .range-selector { display: flex; gap: 6px; align-items: center; margin-bottom: 12px;
                   color: var(--hint); font-size: 13px; flex-wrap: wrap; }
-.range-btn { background: transparent; border: 1px solid rgba(255,255,255,0.15);
-             color: var(--fg); padding: 6px 12px; border-radius: 6px;
-             cursor: pointer; font-size: 13px; }
-.range-btn.active { background: var(--button); color: var(--button-text); border-color: var(--button); }
+.range-btn, .hour-range-btn {
+  background: transparent; border: 1px solid rgba(255,255,255,0.15);
+  color: var(--fg); padding: 6px 12px; border-radius: 6px;
+  cursor: pointer; font-size: 13px;
+}
+.range-btn.active, .hour-range-btn.active {
+  background: var(--button); color: var(--button-text); border-color: var(--button);
+}
 table.analytics { width: 100%; border-collapse: collapse; font-size: 12px; }
 table.analytics th { text-align: left; padding: 8px 6px; color: var(--hint);
                      border-bottom: 1px solid rgba(255,255,255,0.1); cursor: pointer;

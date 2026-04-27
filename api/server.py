@@ -289,6 +289,69 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
             "pairs": result,
         }
 
+    # ─── hourly stats ───
+    @app.get("/api/hourly_stats")
+    async def hourly_stats(request: Request, range: str = "7d"):
+        """Trades grouped by symbol × hour-of-day (local TZ). Used by Mini App
+        'По часам' tab to find best hours for each pair."""
+        _auth(request)
+        import time as _t, datetime as _dt
+        now = int(_t.time())
+        time_range = range  # alias, range is the builtin shadowed by arg name
+        ranges = {"24h": 86400, "7d": 7*86400, "30d": 30*86400, "60d": 60*86400}
+        since = 0 if time_range == "all" else now - ranges.get(time_range, 7*86400)
+        if not journal:
+            return {"error": "no journal"}
+        # Local TZ for proper hour-of-day grouping (Kyiv UTC+2/3)
+        tz_name = (cfg.get("telegram") or {}).get("daily_report_timezone") or "Europe/Kyiv"
+        tz_offset_sec = 0
+        try:
+            import pytz
+            tz = pytz.timezone(tz_name)
+            offset = tz.utcoffset(_dt.datetime.now())
+            tz_offset_sec = int(offset.total_seconds()) if offset else 0
+        except Exception:
+            pass
+        mode = cfg.get("mode")
+        rows = journal.hourly_stats(since, mode=mode, tz_offset_sec=tz_offset_sec)
+        # Build summary per hour (sum across all pairs)
+        from collections import defaultdict
+        summary_acc: dict = defaultdict(lambda: {
+            "total": 0, "wins": 0, "losses": 0, "draws": 0, "profit": 0.0,
+        })
+        for r in rows:
+            h = r["hour"]
+            s = summary_acc[h]
+            s["total"] += r["total"]
+            s["wins"] += r["wins"]
+            s["losses"] += r["losses"]
+            s["draws"] += r["draws"]
+            s["profit"] += r["profit"]
+        summary_by_hour = []
+        # Reach the builtin range via __builtins__ since the arg name shadows it
+        builtin_range = __builtins__["range"] if isinstance(__builtins__, dict) else __builtins__.range
+        for h in builtin_range(24):  # ensure all 24 buckets even if zero trades
+            s = summary_acc.get(h) or {"total": 0, "wins": 0, "losses": 0,
+                                        "draws": 0, "profit": 0.0}
+            completed = s["wins"] + s["losses"]
+            wr = (s["wins"] / completed * 100.0) if completed else 0.0
+            summary_by_hour.append({
+                "hour": h,
+                "total": s["total"],
+                "wins": s["wins"],
+                "losses": s["losses"],
+                "draws": s["draws"],
+                "wr": round(wr, 1),
+                "profit": round(s["profit"], 2),
+            })
+        return {
+            "range": time_range,
+            "tz": tz_name,
+            "tz_offset_sec": tz_offset_sec,
+            "buckets": rows,
+            "summary_by_hour": summary_by_hour,
+        }
+
     # ─── control ───
     @app.post("/api/control/{action}")
     async def control(request: Request, action: str):

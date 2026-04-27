@@ -14,6 +14,7 @@
     <button class="tab" data-tab="settings">Настройки</button>
     <button class="tab" data-tab="strategies">Стратегии</button>
     <button class="tab" data-tab="analytics">Аналитика</button>
+    <button class="tab" data-tab="hourly">По часам</button>
   </div>
 </header>
 
@@ -76,6 +77,38 @@
         <input type="checkbox" id="analytics-workhours" />
       </label>
       <div id="analytics-table">Загрузка…</div>
+    </div>
+  </section>
+
+  <!-- ─── HOURLY ─── -->
+  <section id="tab-hourly" class="tab-panel">
+    <div class="card">
+      <h2>🕐 По часам</h2>
+      <p class="hint">
+        Все РЕАЛЬНЫЕ сделки за период, сгруппированные по часу открытия (локальное
+        время). Помогает найти "лучшие часы" для каждой пары — например EURUSD_otc
+        может давать 78% WR в 09:00-10:00 и 45% после 22:00. Сначала собирается
+        статистика, потом её можно использовать для уточнения стратегии.
+      </p>
+      <div class="range-selector">
+        Период:
+        <button class="hour-range-btn" data-range="24h">24ч</button>
+        <button class="hour-range-btn active" data-range="7d">7д</button>
+        <button class="hour-range-btn" data-range="30d">30д</button>
+        <button class="hour-range-btn" data-range="all">всё</button>
+      </div>
+      <h3 style="margin-top:14px; font-size:15px;">Сводка по часам (все пары)</h3>
+      <div class="analytics-wrap">
+        <table id="hourly-summary" class="analytics"></table>
+      </div>
+      <h3 style="margin-top:18px; font-size:15px;">По парам и часам (топ по сделкам)</h3>
+      <p class="hint" style="margin-bottom:6px;">
+        Кликни на колонку для сортировки. Жёлтым ⭐ — пары/часы с WR ≥ 70% и ≥ 5 сделок
+        (статистически значимо).
+      </p>
+      <div class="analytics-wrap">
+        <table id="hourly-pairs" class="analytics"></table>
+      </div>
     </div>
   </section>
 

@@ -114,6 +114,67 @@ class Journal:
             "SELECT * FROM trades WHERE close_ts >= ? ORDER BY close_ts", (ts,))
         return cur.fetchall()
 
+    def hourly_stats(self, since_ts: int, mode: Optional[str] = None,
+                     tz_offset_sec: int = 0) -> list[dict]:
+        """Aggregate trades by (symbol, local-hour-of-day) since `since_ts`.
+
+        Hour-of-day is computed in the user's local timezone via tz_offset_sec
+        (positive for east-of-UTC). E.g., Kyiv UTC+2 = 7200.
+
+        Returns list of dicts:
+          {symbol, hour (0-23), total, wins, losses, draws, wr, profit}
+
+        Used by Mini App "По часам" tab to find which pairs perform best at
+        which hours of the day. Aggregated across multiple days/weeks gives a
+        statistical picture: e.g., "EURUSD_otc on Mondays at 09:00 has 78% WR
+        over the last month" — basis for time-of-day strategy refinement.
+        """
+        self.conn.row_factory = sqlite3.Row
+        where_clauses = ["open_ts >= ?"]
+        params: list = [since_ts]
+        if mode:
+            where_clauses.append("mode = ?")
+            params.append(mode)
+        where_sql = " AND ".join(where_clauses)
+        # SQLite trick for hour-of-day in local TZ: shift by offset, then mod 24
+        # ((open_ts + tz_offset) / 3600) gives hours-since-epoch in local time
+        # % 24 gives hour-of-day (0-23)
+        cur = self.conn.execute(
+            f"""
+            SELECT
+                symbol,
+                CAST(((open_ts + ?) / 3600) AS INTEGER) % 24 AS hour,
+                COUNT(*) AS total,
+                SUM(CASE WHEN result='WIN'  THEN 1 ELSE 0 END) AS wins,
+                SUM(CASE WHEN result='LOSS' THEN 1 ELSE 0 END) AS losses,
+                SUM(CASE WHEN result='DRAW' THEN 1 ELSE 0 END) AS draws,
+                COALESCE(SUM(profit), 0) AS profit
+            FROM trades
+            WHERE {where_sql}
+            GROUP BY symbol, hour
+            HAVING total > 0
+            ORDER BY symbol, hour
+            """,
+            [int(tz_offset_sec)] + params,
+        )
+        out: list[dict] = []
+        for r in cur.fetchall():
+            wins = int(r["wins"] or 0)
+            losses = int(r["losses"] or 0)
+            completed = wins + losses
+            wr = (wins / completed * 100.0) if completed else 0.0
+            out.append({
+                "symbol": r["symbol"],
+                "hour": int(r["hour"]),
+                "total": int(r["total"]),
+                "wins": wins,
+                "losses": losses,
+                "draws": int(r["draws"] or 0),
+                "wr": round(wr, 1),
+                "profit": round(float(r["profit"] or 0), 2),
+            })
+        return out
+
     # ---------- bans ----------
 
     def ban(self, symbol: str, hours: int, reason: str = ""):

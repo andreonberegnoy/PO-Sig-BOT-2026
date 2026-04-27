@@ -32,6 +32,7 @@
       if (t.dataset.tab === "settings") loadSettings();
       if (t.dataset.tab === "strategies") loadStrategies();
       if (t.dataset.tab === "status") loadStatus();
+      if (t.dataset.tab === "hourly") loadHourly();
     });
   });
 
@@ -480,6 +481,102 @@
     });
   }
   document.querySelector('.tab[data-tab="analytics"]').addEventListener("click", loadAnalytics);
+
+  // ─── HOURLY analytics ───
+  const hourlyState = { range: "7d", sortKey: "total", sortAsc: false };
+
+  async function loadHourly() {
+    const sumEl = document.getElementById("hourly-summary");
+    const pairsEl = document.getElementById("hourly-pairs");
+    if (!sumEl || !pairsEl) return;
+    sumEl.innerHTML = '<tr><td>Загрузка…</td></tr>';
+    pairsEl.innerHTML = '';
+    try {
+      const r = await api(`/api/hourly_stats?range=${encodeURIComponent(hourlyState.range)}`);
+      const summary = r.summary_by_hour || [];
+      const buckets = r.buckets || [];
+
+      // ─── Summary table (24 rows, one per hour) ─────────────────────────
+      const sumHeaders = `
+        <thead><tr>
+          <th>Час</th><th>Сделок</th><th>WIN</th><th>LOSS</th>
+          <th>WR</th><th>Profit</th>
+        </tr></thead>`;
+      const sumBody = summary.map(s => {
+        if (s.total === 0) return '';   // skip empty hours
+        const wrCls = s.wr >= 70 ? 'cell-good' : s.wr >= 55 ? '' : 'cell-bad';
+        const profCls = s.profit >= 0 ? 'cell-good' : 'cell-bad';
+        return `<tr>
+          <td><b>${String(s.hour).padStart(2,'0')}:00</b></td>
+          <td>${s.total}</td>
+          <td class="cell-good">${s.wins}</td>
+          <td class="cell-bad">${s.losses}</td>
+          <td class="${wrCls}">${s.wr.toFixed(1)}%</td>
+          <td class="${profCls}">$${s.profit.toFixed(2)}</td>
+        </tr>`;
+      }).join('');
+      sumEl.innerHTML = sumHeaders + `<tbody>${sumBody || '<tr><td colspan="6">Нет сделок за выбранный период</td></tr>'}</tbody>`;
+
+      // ─── Pairs × hours table ──────────────────────────────────────────
+      // Sort by current sortKey
+      const sortedBuckets = [...buckets].sort((a, b) => {
+        const k = hourlyState.sortKey;
+        const av = a[k], bv = b[k];
+        if (typeof av === 'string') return hourlyState.sortAsc ? av.localeCompare(bv) : bv.localeCompare(av);
+        return hourlyState.sortAsc ? av - bv : bv - av;
+      });
+      const arrow = (key) => key === hourlyState.sortKey
+        ? (hourlyState.sortAsc ? ' ▲' : ' ▼') : '';
+      const pairsHeaders = `
+        <thead><tr>
+          <th data-sort="symbol">Пара${arrow('symbol')}</th>
+          <th data-sort="hour">Час${arrow('hour')}</th>
+          <th data-sort="total">Сделок${arrow('total')}</th>
+          <th data-sort="wins">WIN${arrow('wins')}</th>
+          <th data-sort="losses">LOSS${arrow('losses')}</th>
+          <th data-sort="wr">WR${arrow('wr')}</th>
+          <th data-sort="profit">Profit${arrow('profit')}</th>
+        </tr></thead>`;
+      const pairsBody = sortedBuckets.map(p => {
+        const star = (p.wr >= 70 && p.total >= 5) ? ' ⭐' : '';
+        const wrCls = p.wr >= 70 ? 'cell-good' : p.wr >= 55 ? '' : 'cell-bad';
+        const profCls = p.profit >= 0 ? 'cell-good' : 'cell-bad';
+        return `<tr>
+          <td>${p.symbol}${star}</td>
+          <td>${String(p.hour).padStart(2,'0')}:00</td>
+          <td>${p.total}</td>
+          <td class="cell-good">${p.wins}</td>
+          <td class="cell-bad">${p.losses}</td>
+          <td class="${wrCls}">${p.wr.toFixed(1)}%</td>
+          <td class="${profCls}">$${p.profit.toFixed(2)}</td>
+        </tr>`;
+      }).join('');
+      pairsEl.innerHTML = pairsHeaders + `<tbody>${pairsBody || '<tr><td colspan="7">Нет данных</td></tr>'}</tbody>`;
+
+      // Hook column-header sort
+      pairsEl.querySelectorAll('th[data-sort]').forEach(th => {
+        th.addEventListener('click', () => {
+          const key = th.dataset.sort;
+          if (hourlyState.sortKey === key) hourlyState.sortAsc = !hourlyState.sortAsc;
+          else { hourlyState.sortKey = key; hourlyState.sortAsc = false; }
+          loadHourly();
+        });
+      });
+    } catch (e) {
+      sumEl.innerHTML = `<tr><td>Ошибка: ${e.message || e}</td></tr>`;
+      pairsEl.innerHTML = '';
+    }
+  }
+
+  // Period buttons for hourly tab
+  document.querySelectorAll(".hour-range-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      document.querySelectorAll(".hour-range-btn").forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+      hourlyState.range = btn.dataset.range;
+      loadHourly();
+    });
+  });
 
   // initial load
   loadStatus();

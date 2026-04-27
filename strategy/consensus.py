@@ -258,6 +258,12 @@ class Analysis:
     max_loss_streak_before_win: int = 0   # longest losing streak that ended with a win
     max_loss_streak_overall: int = 0      # longest losing streak, period
     recent_results: list[int] = field(default_factory=list)   # 1=win 0=loss
+    # Recent-window stats (last N bars, configured by recentLookbackBars).
+    # Used for the second-tier filter: a pair must be good both long-term
+    # (wr1 over full lookback) AND in recent form (wr1_recent over short window).
+    wins1_recent: int = 0
+    completed_recent: int = 0
+    wr1_recent: float = 0.0
     diag: dict = field(default_factory=dict)
 
 
@@ -274,6 +280,10 @@ def analyze(candles: list[dict], params: dict) -> Analysis:
 
     lookback = max(1, int(p["statsLookbackBars"]))
     from_bar = max(0, (n - 1) - lookback)
+    # Recent-window: smaller, tighter slice for "current form" check.
+    # Defaults to 200 bars but configurable via recentLookbackBars.
+    recent_lookback = max(1, int(p.get("recentLookbackBars", 200)))
+    from_bar_recent = max(0, (n - 1) - recent_lookback)
 
     opens = [c["open"] for c in candles]
     closes = [c["close"] for c in candles]
@@ -301,8 +311,17 @@ def analyze(candles: list[dict], params: dict) -> Analysis:
             current_streak += 1
             if current_streak > a.max_loss_streak_overall:
                 a.max_loss_streak_overall = current_streak
+        # ALSO count this signal toward recent-window stats if it falls
+        # within the smaller lookback. We track only wins1_recent / completed_recent
+        # since wr1_recent is what the new filter uses.
+        if ev.i >= from_bar_recent:
+            a.completed_recent += 1
+            if r.first_win:
+                a.wins1_recent += 1
 
     if a.completed:
         a.wr = a.wins / (a.wins + a.losses) * 100 if (a.wins + a.losses) else 0
         a.wr1 = a.wins1 / a.completed * 100
+    if a.completed_recent:
+        a.wr1_recent = a.wins1_recent / a.completed_recent * 100
     return a

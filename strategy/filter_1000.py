@@ -4,7 +4,11 @@ Rules from spec:
   ≤ max_losses_in_row (обычно 3) минусов подряд → пара ДОПУСТИМА
   2 или 1 минус подряд до плюса → пара в ПРИОРИТЕТЕ (меньше догонов = лучше)
   > 4 минусов подряд → пара в БАН на ban_hours
-  WR1 (% первой плюсовой сделки) < min_wr1 → пара пропускается (skip, не бан)
+  WR1 long (% первой плюсовой сделки за 1000 свечей) < min_wr1 → SKIP
+  WR1 recent (% за последние 200 свечей) < min_wr1_recent → SKIP
+    (требует ≥3 сделок в окне, иначе нет данных)
+
+Двойной фильтр: пара должна быть стабильной долгосрочно И в текущей форме.
 
 Returns classified dict: {symbol: PairScore}
 """
@@ -43,6 +47,7 @@ def classify(
     params: dict,
     max_losses_in_row: int,
     min_wr1: float = 0.0,
+    min_wr1_recent: float = 0.0,
 ) -> PairScore:
     a = analyze(candles, params)
     score = PairScore(
@@ -73,6 +78,18 @@ def classify(
         )
         return score
 
+    # Recent-form filter — even if long-term WR1 is good, pair must also be
+    # performing well in the last N bars (recentLookbackBars, default 200).
+    # Catches pairs that historically passed but recently degraded.
+    # Requires at least 3 signals in the recent window to evaluate (otherwise
+    # not enough data to judge — let the long-term filter decide).
+    if min_wr1_recent > 0 and a.completed_recent >= 3 and a.wr1_recent < min_wr1_recent:
+        score.reason = (
+            f"WR1 recent {a.wr1_recent:.0f}% < {min_wr1_recent:.0f}% — "
+            f"плохая форма последних {a.completed_recent} сделок"
+        )
+        return score
+
     # Allowed. Priority: fewer consecutive losses before a win = better
     score.allowed = True
     # priority 0 = never had more than 1 loss before win; higher = worse
@@ -98,6 +115,10 @@ async def scan_all_pairs(
     min_payout = f_cfg["min_payout"]
     max_losses = f_cfg["max_losses_in_row"]
     min_wr1 = float(f_cfg.get("min_wr1", 0) or 0)
+    min_wr1_recent = float(f_cfg.get("min_wr1_recent", 0) or 0)
+    # honour recent_lookback_bars from filter config so consensus uses same window
+    if "recent_lookback_bars" in f_cfg:
+        ind_cfg["recentLookbackBars"] = f_cfg["recent_lookback_bars"]
     limit = f_cfg["history_candles"]
     tf = f_cfg["tf"]
 
@@ -124,7 +145,7 @@ async def scan_all_pairs(
             if len(candles) < 200:
                 logger.info("skip %s — only %d candles", sym, len(candles))
                 return
-            score = classify(sym, payout, candles, ind_cfg, max_losses, min_wr1)
+            score = classify(sym, payout, candles, ind_cfg, max_losses, min_wr1, min_wr1_recent)
             scores[sym] = score
 
     await asyncio.gather(*[work(s) for s in candidates])

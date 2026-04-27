@@ -41,6 +41,8 @@ ACTIONS = [
         "icon": "🚀",
         "color": "primary",
         "confirm": False,
+        "tooltip": "Подтянуть последние коммиты с GitHub и пересобрать контейнер бота. "
+                   "Занимает ~30-60 сек. Используй когда я (Claude) запушил новый код.",
         "command": (
             "cd /opt/po-bot && git pull && cd deploy && "
             "docker compose down && docker compose up -d --build && "
@@ -53,6 +55,8 @@ ACTIONS = [
         "icon": "🔄",
         "color": "primary",
         "confirm": False,
+        "tooltip": "Перезапустить контейнер бота БЕЗ обновления кода. ~10 сек. "
+                   "Используй когда бот завис или повёл себя странно.",
         "command": (
             "cd /opt/po-bot/deploy && docker compose restart po-bot && "
             "sleep 3 && docker compose logs --tail=15 po-bot"
@@ -64,6 +68,8 @@ ACTIONS = [
         "icon": "📜",
         "color": "ghost",
         "confirm": False,
+        "tooltip": "Показать последние 50 строк логов бота. Шум от Mini App API "
+                   "автоматически отфильтрован.",
         "command": (
             "cd /opt/po-bot/deploy && docker compose logs --tail=50 po-bot "
             "| grep -v 'GET /api/status' | grep -v 'GET /health'"
@@ -75,6 +81,8 @@ ACTIONS = [
         "icon": "🩺",
         "color": "ghost",
         "confirm": False,
+        "tooltip": "Полная диагностика: статус контейнера, /health endpoint, последний коммит, "
+                   "место на диске, использование RAM.",
         "command": (
             "cd /opt/po-bot/deploy && "
             "echo '=== docker compose ps ===' && docker compose ps && "
@@ -92,6 +100,8 @@ ACTIONS = [
         "icon": "🌐",
         "color": "ghost",
         "confirm": False,
+        "tooltip": "Показать текущий URL Cloudflare Tunnel который ведёт на Mini App. "
+                   "Этот URL вставлять в BotFather → Menu Button.",
         "command": (
             "echo '=== Current tunnel URL ===' && "
             "grep 'trycloudflare.com' /var/log/cloudflared.log | tail -1 && "
@@ -105,6 +115,8 @@ ACTIONS = [
         "icon": "🔁",
         "color": "warning",
         "confirm": True,
+        "tooltip": "ВНИМАНИЕ: URL изменится! Перезапустить cloudflared. "
+                   "После — нужно обновить Menu Button в BotFather с новым URL и ?v=N+1.",
         "command": (
             "pkill cloudflared 2>/dev/null; sleep 2; "
             "nohup cloudflared tunnel --url http://127.0.0.1:8080 "
@@ -121,6 +133,8 @@ ACTIONS = [
         "icon": "💾",
         "color": "ghost",
         "confirm": False,
+        "tooltip": "Создать tar-архив папки data/ (журнал сделок, кеш свечей, настройки) "
+                   "в /root/po-bot-backup-YYYY-MM-DD.tar.gz",
         "command": (
             "cd /opt/po-bot/deploy && "
             "tar -czf /root/po-bot-backup-$(date +%F).tar.gz data/ && "
@@ -133,6 +147,8 @@ ACTIONS = [
         "icon": "🔥",
         "color": "warning",
         "confirm": True,
+        "tooltip": "ВНИМАНИЕ: 5+ минут! Полная пересборка Docker-образа без использования кеша. "
+                   "Используй когда обычный deploy не подхватывает новый код.",
         "command": (
             "cd /opt/po-bot/deploy && docker compose down && "
             "docker compose build --no-cache po-bot && "
@@ -146,6 +162,8 @@ ACTIONS = [
         "icon": "👁",
         "color": "ghost",
         "confirm": False,
+        "tooltip": "Стрим логов бота в реальном времени на 10 секунд. Удобно посмотреть "
+                   "что происходит прямо сейчас.",
         "command": (
             "cd /opt/po-bot/deploy && "
             "timeout 10 docker compose logs -f --tail=5 po-bot 2>&1 || "
@@ -158,6 +176,8 @@ ACTIONS = [
         "icon": "📖",
         "color": "ghost",
         "confirm": False,
+        "tooltip": "Последние 5 коммитов в локальном git на VPS. Сравни с GitHub "
+                   "чтобы увидеть отстаёт ли VPS от удалённого.",
         "command": "cd /opt/po-bot && git log -5 --oneline",
     },
 ]
@@ -168,10 +188,23 @@ def render_html() -> str:
     button_rows = []
     for a in ACTIONS:
         confirm_attr = ' data-confirm="1"' if a["confirm"] else ""
+        # Tooltip: shown on hover (browser native title) AND below button
+        # via custom data attribute for mobile-friendly display
+        tooltip = a.get("tooltip", "")
+        # HTML-escape quotes in tooltip for safe attribute embedding
+        tooltip_attr = (tooltip
+                        .replace("&", "&amp;")
+                        .replace('"', "&quot;")
+                        .replace("<", "&lt;")
+                        .replace(">", "&gt;"))
         button_rows.append(
-            f'<button class="btn {a["color"]}" data-action="{a["id"]}"{confirm_attr}>'
+            f'<button class="btn {a["color"]}" data-action="{a["id"]}"{confirm_attr} '
+            f'title="{tooltip_attr}" data-tooltip="{tooltip_attr}">'
             f'<span class="icon">{a["icon"]}</span>'
+            f'<span class="text">'
             f'<span class="label">{a["label"]}</span>'
+            f'<span class="desc">{tooltip_attr}</span>'
+            f'</span>'
             f'</button>'
         )
     buttons_html = "\n".join(button_rows)
@@ -213,19 +246,28 @@ def render_html() -> str:
     gap: 10px; margin-bottom: 20px;
   }}
   .btn {{
-    display: flex; align-items: center; gap: 10px;
+    display: flex; align-items: flex-start; gap: 10px;
     padding: 14px 16px; border-radius: 10px;
     border: 1px solid var(--border);
     background: var(--card); color: var(--fg);
     cursor: pointer; font-family: inherit; font-size: 14px;
     text-align: left; transition: all .15s;
+    min-height: 80px;
   }}
   .btn:hover {{ border-color: var(--primary); background: var(--primary-bg); }}
   .btn:disabled {{ opacity: .4; cursor: not-allowed; }}
-  .btn .icon {{ font-size: 22px; }}
+  .btn .icon {{ font-size: 22px; flex-shrink: 0; line-height: 1.2; }}
+  .btn .text {{ display: flex; flex-direction: column; gap: 4px; min-width: 0; }}
+  .btn .label {{ font-weight: 600; font-size: 14px; }}
+  .btn .desc {{
+    font-size: 11px; color: var(--hint); line-height: 1.4;
+    font-weight: 400;
+  }}
+  .btn:hover .desc {{ color: var(--fg); }}
   .btn.primary {{ border-color: var(--primary); background: var(--primary-bg); }}
   .btn.warning {{ border-color: var(--warn); }}
   .btn.warning:hover {{ background: var(--warn-bg); }}
+  .btn.warning .desc {{ color: var(--warn); opacity: .8; }}
   .output {{
     background: #000; color: #d4d4d4;
     border: 1px solid var(--border); border-radius: 8px;

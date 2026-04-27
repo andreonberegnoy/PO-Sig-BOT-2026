@@ -25,6 +25,44 @@ LOG_DIR="$HOME/Library/Logs/po-sig-bot-control"
 cmd="${1:-install}"
 
 case "$cmd" in
+    tunnel)
+        # Start cloudflared tunnel for the control panel (port 5555).
+        # Gives a public HTTPS URL → can be opened from phone via Telegram button.
+        echo "→ Starting cloudflared tunnel for control panel..."
+        if ! command -v cloudflared >/dev/null 2>&1; then
+            echo "❌ cloudflared not installed on Mac. Install:"
+            echo "    brew install cloudflared"
+            exit 1
+        fi
+        # Kill old panel tunnel
+        pkill -f "cloudflared tunnel.*5555" 2>/dev/null || true
+        sleep 1
+        # Start fresh
+        mkdir -p "$LOG_DIR"
+        nohup cloudflared tunnel --url http://localhost:5555 \
+            > "$LOG_DIR/tunnel.log" 2>&1 &
+        sleep 6
+        URL=$(grep "trycloudflare.com" "$LOG_DIR/tunnel.log" | head -1 | grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com')
+        if [ -z "$URL" ]; then
+            echo "❌ Failed to get tunnel URL. See $LOG_DIR/tunnel.log"
+            exit 1
+        fi
+        echo "$URL" > "$LOG_DIR/panel-url.txt"
+        echo ""
+        echo "✅ Tunnel started!"
+        echo ""
+        echo "   Public URL: $URL"
+        echo ""
+        echo "   Saved to:   $LOG_DIR/panel-url.txt"
+        echo ""
+        echo "Next: copy this URL → BotFather → ваш бот → Bot Settings →"
+        echo "      Menu Button → можно сделать второй кастомной командой"
+        echo "      или просто использовать /panel в боте."
+        echo ""
+        echo "Чтобы остановить tunnel:"
+        echo "    pkill -f 'cloudflared tunnel.*5555'"
+        ;;
+
     install)
         echo "→ Installing po_control launchd service..."
 
@@ -153,7 +191,7 @@ EOF
         ;;
 
     *)
-        echo "Usage: $0 [install|status|logs|stop|start|restart|uninstall]"
+        echo "Usage: $0 [install|status|logs|stop|start|restart|uninstall|tunnel]"
         echo ""
         echo "  install   — register service + start (default if no arg)"
         echo "  status    — show running state + recent logs"
@@ -162,6 +200,7 @@ EOF
         echo "  start     — start (after stop)"
         echo "  restart   — stop + start"
         echo "  uninstall — remove service completely"
+        echo "  tunnel    — start cloudflared tunnel for phone access"
         exit 1
         ;;
 esac

@@ -77,7 +77,8 @@ class TelegramBot:
             await m.answer(
                 "Команды:\n"
                 "/status — состояние + кнопки управления циклом\n"
-                "/control — 🎛 главное меню управления (10 действий)\n"
+                "/control — 🎛 главное меню (статус, баны, hourly, relogin)\n"
+                "/panel — 🌐 открыть HTML панель управления (deploy, restart, logs)\n"
                 "/balance — баланс\n"
                 "/ping — диагностика бота 🩺\n"
                 "/pause — пауза\n"
@@ -479,6 +480,44 @@ class TelegramBot:
             if m.chat.id != self.chat_id: return
             await m.answer(_build_control_text(), parse_mode="HTML",
                            reply_markup=_build_control_keyboard())
+
+        # ── /panel — кнопка открыть HTML панель управления ────────────────
+        # Панель крутится на Mac (или туннелится через cloudflared для phone-доступа).
+        # URL берётся из env CONTROL_PANEL_URL или fallback на localhost:5555.
+        @dp.message(Command("panel"))
+        async def _panel(m: Message):
+            if m.chat.id != self.chat_id: return
+            import os
+            panel_url = os.environ.get("CONTROL_PANEL_URL", "http://localhost:5555/")
+
+            # Telegram inline-button "url" работает только для http(s).
+            # localhost-URL открывается только когда пользователь рядом с Mac.
+            # Для phone-доступа нужен tunnel: запусти на Mac
+            #   ./tools/install_control_service.sh tunnel
+            text = (
+                "🎛 <b>Панель управления (HTML)</b>\n\n"
+                "Все кнопки управления ботом в одном месте:\n"
+                "🚀 Deploy / 🔄 Restart / 📜 Logs / 💾 Backup / 🔥 Force rebuild и др.\n\n"
+                "При наведении на кнопку — описание что она делает.\n\n"
+                f"URL: <code>{panel_url}</code>"
+            )
+            buttons = [
+                [InlineKeyboardButton(text="🌐 Открыть панель", url=panel_url)],
+            ]
+            # Если URL = localhost, добавляем подсказку как сделать публичный
+            if "localhost" in panel_url or "127.0.0.1" in panel_url:
+                text += (
+                    "\n\n⚠️ Это <b>localhost</b> — работает только когда ты рядом с Mac.\n"
+                    "Для доступа с телефона:\n"
+                    "1. На Mac: <code>./tools/install_control_service.sh tunnel</code>\n"
+                    "2. Скопируй полученный URL\n"
+                    "3. На VPS: добавь в .env строку <code>CONTROL_PANEL_URL=&lt;URL&gt;</code>\n"
+                    "4. Перезапусти бота"
+                )
+            await m.answer(
+                text, parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+            )
 
         @dp.callback_query(F.data.startswith("ctrl:"))
         async def _control_callback(cb: CallbackQuery):

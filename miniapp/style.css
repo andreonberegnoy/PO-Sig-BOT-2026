@@ -140,6 +140,23 @@ ul.strategies li.strategy-active { background: rgba(109, 180, 255, 0.08); }
   opacity: 0.6;
 }
 .btn-tiny:hover { opacity: 1; }
+
+/* Multi-select checkbox group (used for asset_categories) */
+.multi-row {
+  display: flex; flex-wrap: wrap; gap: 6px 12px; justify-content: flex-end;
+}
+.multi-opt {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 13px; color: var(--fg); cursor: pointer;
+  padding: 3px 8px;
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 6px;
+}
+.multi-opt input { margin: 0; }
+.multi-opt:has(input:checked) {
+  background: rgba(109, 180, 255, 0.15);
+  border-color: var(--button);
+}
 table.analytics { width: 100%; border-collapse: collapse; font-size: 12px; }
 table.analytics th { text-align: left; padding: 8px 6px; color: var(--hint);
                      border-bottom: 1px solid rgba(255,255,255,0.1); cursor: pointer;

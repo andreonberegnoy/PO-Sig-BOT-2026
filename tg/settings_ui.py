@@ -69,6 +69,9 @@ CATEGORIES: dict[str, list[Setting]] = {
         Setting("indicator.candleMaxAtrMult", "Max body / ATR", "float", 0.5, 10.0, 0.1),
         Setting("indicator.candleReqAlign", "Свеча в направлении сигнала", "bool"),
     ],
+    # Note: filter.asset_categories (категорії активів — forex/crypto/stocks/etc)
+    # доступне тільки через Mini App (multi-checkbox UI). У TG-боті немає
+    # зручного способу показати multi-select через inline-кнопки.
     "🔍 Фильтр пар": [
         Setting("filter.min_payout", "Минимум payout (%)", "int", 50, 95, 1),
         Setting("filter.payout_floor", "Порог смены пары (%)", "int", 50, 90, 1),

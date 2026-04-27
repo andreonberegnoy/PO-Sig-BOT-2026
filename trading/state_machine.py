@@ -22,7 +22,7 @@ from typing import Optional
 import pytz
 
 from strategy.consensus import generate_signals as _consensus_generate_signals, DEFAULT_PARAMS
-from strategy.filter_1000 import scan_all_pairs, pick_best, PairScore
+from strategy.filter_1000 import scan_all_pairs, pick_best, PairScore, categorize_symbol
 from feed.history import fetch_candles
 from trading.ws_client import TradeClient, ClosedTrade, OpenedTrade
 # Legacy Chrome-based helpers; only used when feed has _page (po-signals path)
@@ -505,6 +505,11 @@ class StateMachine:
         if not sc or not sc.allowed: return False
         payout = int(self.feed.assets.get(symbol, {}).get("payout", 0))
         if payout < self.cfg["filter"]["min_payout"]: return False
+        # Asset-category whitelist (e.g. only forex+crypto, no stocks/indices)
+        allowed_cats = set((self.cfg.get("filter") or {}).get("asset_categories") or [])
+        if allowed_cats:
+            if categorize_symbol(symbol, self.feed.assets.get(symbol)) not in allowed_cats:
+                return False
         # User-applied hour-of-day whitelist (filter.hour_whitelist)
         if not self._hour_allowed(symbol): return False
         return True

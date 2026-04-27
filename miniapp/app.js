@@ -122,6 +122,9 @@
   // per-strategy and rendered dynamically below.
   const GLOBAL_SCHEMA = {
     "🔍 Фильтр пар": [
+      { k: "filter.asset_categories", t: "multi",
+        options: ["forex", "crypto", "stocks", "indices", "commodities", "other"],
+        label: "Категории активов (пусто = все)" },
       { k: "filter.min_payout", t: "int", min: 50, max: 95, label: "Минимум payout (%)" },
       { k: "filter.payout_floor", t: "int", min: 50, max: 90, label: "Порог смены пары (%)" },
       { k: "filter.max_losses_in_row", t: "int", min: 1, max: 10, label: "Макс. минусов до бана" },
@@ -224,6 +227,13 @@
             input = `<select data-k="${it.k}" data-t="choice">` +
               it.options.map((o) => `<option value="${o}" ${o === v ? "selected" : ""}>${o}</option>`).join("") +
               `</select>`;
+          } else if (it.t === "multi") {
+            // Multi-select via checkboxes. Value is an array.
+            const arr = Array.isArray(v) ? v : [];
+            const opts = it.options.map((o) =>
+              `<label class="multi-opt"><input type="checkbox" data-multi="${it.k}" data-opt="${o}" ${arr.includes(o) ? "checked" : ""}/> ${o}</label>`
+            ).join("");
+            input = `<div class="multi-row">${opts}</div>`;
           } else {
             const step = it.step || (it.t === "int" ? 1 : 0.1);
             input = `<input type="number" data-k="${it.k}" data-t="${it.t}"
@@ -252,6 +262,21 @@
           else value = el.value;
           try {
             await api("/api/settings", { method: "PUT", body: JSON.stringify({ [key]: value }) });
+            flash(el, true);
+          } catch (e) { flash(el, false); console.error(e); }
+        });
+      });
+      // Multi-select handlers (asset_categories etc.)
+      cont.querySelectorAll("[data-multi]").forEach((el) => {
+        el.addEventListener("change", async () => {
+          const key = el.dataset.multi;
+          // Collect all checked options for this key
+          const opts = [];
+          cont.querySelectorAll(`[data-multi="${key}"]:checked`).forEach((c) =>
+            opts.push(c.dataset.opt)
+          );
+          try {
+            await api("/api/settings", { method: "PUT", body: JSON.stringify({ [key]: opts }) });
             flash(el, true);
           } catch (e) { flash(el, false); console.error(e); }
         });

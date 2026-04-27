@@ -29,6 +29,53 @@ from feed.history import fetch_candles
 logger = logging.getLogger(__name__)
 
 
+# ─── Asset category detection ────────────────────────────────────────────
+# PO doesn't expose a clean type field, so we classify by symbol patterns.
+# Used by filter.asset_categories to let user choose which classes to trade.
+_CRYPTO_TOKENS = frozenset({
+    "BTC", "ETH", "LTC", "XRP", "ADA", "DOT", "LINK", "BCH", "SOL",
+    "DOGE", "BNB", "TRX", "AVAX", "MATIC", "MNR", "TON", "ATOM",
+})
+_INDICES = frozenset({"VIX", "SPX", "NDX", "DJI", "DAX", "FTSE", "NIKKEI"})
+_METALS = frozenset({"XAU", "XAG", "XPT", "XPD"})
+# Stocks/ETFs that PO lists WITHOUT the # prefix (most have #, but some don't)
+_STOCK_TICKERS = frozenset({
+    "AMZN", "AAPL", "TSLA", "MSFT", "GOOGL", "META", "NFLX", "NVDA",
+    "BITB", "MARA", "PLTR", "VISA", "FB", "MCD", "AXP", "JPM", "BA",
+    "JNJ", "KO", "PFE", "WMT", "INTC", "CSCO", "ORCL", "IBM",
+})
+
+
+def categorize_symbol(sym: str, asset_info: Optional[dict] = None) -> str:
+    """High-level asset class for a PO symbol. Returns one of:
+    forex, crypto, stocks, indices, commodities, other.
+
+    Used by `filter.asset_categories` whitelist so user can trade only e.g.
+    forex+crypto and skip stocks/indices.
+    """
+    s = sym.replace("_otc", "").replace("-", "").upper()
+    if s.startswith("#") or s.startswith("$"):
+        return "stocks"
+    if s in _STOCK_TICKERS:
+        return "stocks"
+    # Commodities (XAUUSD = gold, XAGUSD = silver)
+    if s[:3] in _METALS:
+        return "commodities"
+    if s in _INDICES:
+        return "indices"
+    # Crypto: known crypto base ticker (BTC, ETH, etc.)
+    if s[:3] in _CRYPTO_TOKENS:
+        return "crypto"
+    # 6-letter all-alpha = forex (EURUSD, GBPJPY, etc.)
+    if len(s) == 6 and s.isalpha():
+        return "forex"
+    return "other"
+
+
+# Canonical list of categories — used as available options in UI
+ASSET_CATEGORIES = ["forex", "crypto", "stocks", "indices", "commodities", "other"]
+
+
 @dataclass
 class PairScore:
     symbol: str
@@ -126,6 +173,8 @@ async def scan_all_pairs(
     max_losses = f_cfg["max_losses_in_row"]
     min_wr1 = float(f_cfg.get("min_wr1", 0) or 0)
     min_wr1_recent = float(f_cfg.get("min_wr1_recent", 0) or 0)
+    # Asset category whitelist: empty = all allowed; ["forex","crypto"] = only those
+    allowed_cats = set(f_cfg.get("asset_categories") or [])
     # honour recent_lookback_bars from filter config so consensus uses same window
     if "recent_lookback_bars" in f_cfg:
         ind_cfg["recentLookbackBars"] = f_cfg["recent_lookback_bars"]
@@ -135,9 +184,12 @@ async def scan_all_pairs(
     # Pick candidates from assets
     candidates = symbols or [
         s for s, info in feed.assets.items()
-        if info["payout"] >= min_payout and info["is_otc"]  # OTC only for weekend-stable trading
+        if info["payout"] >= min_payout and info["is_otc"]   # OTC only for weekend-stable trading
+        and (not allowed_cats or categorize_symbol(s, info) in allowed_cats)
     ]
-    logger.info("scanning %d candidate pairs (min_payout=%d%%)", len(candidates), min_payout)
+    cat_msg = f", categories={sorted(allowed_cats)}" if allowed_cats else ""
+    logger.info("scanning %d candidate pairs (min_payout=%d%%%s)",
+                len(candidates), min_payout, cat_msg)
 
     scores: dict[str, PairScore] = {}
     # Run fetches concurrently but bounded

@@ -17,6 +17,7 @@ TELEGRAM_TOKEN. Allowed user must match TELEGRAM_CHAT_ID.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from pathlib import Path
@@ -379,41 +380,85 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
     # ─── expiry backtest ───
     @app.get("/api/expiry_stats")
     async def expiry_stats(request: Request):
-        """Backtest для всех TRACKED пар. Прогоняет CONSENSUS-стратегию
-        с разными expiryBars (2, 3, 4, 5) на накопленных свечах каждой
-        tracked пары. Показывает какая экспирация чаще закрывается в плюс.
+        """Backtest CONSENSUS на разных expiryBars (1..5).
 
-        Использует только cached _candles buffer (быстро, без REST). Анализ
-        проходит за 1-3 секунды.
+        scope=tracked (default) — только пары из sm._tracked (быстро, ~1-3с,
+                                  только cached _candles).
+        scope=all                — все OTC пары с payout > 0. Если кэш пустой,
+                                  fetch_candles по REST с конкурентностью 5
+                                  (10-60с).
         """
         _auth(request)
-        if not sm or not getattr(sm, "_candles", None):
-            return {"pairs": [], "expiries": [2, 3, 4, 5],
-                    "note": "Нет tracked пар. Подожди ~5 минут после старта бота."}
+        if not sm or sm.feed is None:
+            return {"pairs": [], "expiries": [1, 2, 3, 4, 5],
+                    "note": "Бот ещё не подключён к PO."}
+
+        scope = (request.query_params.get("scope") or "tracked").lower()
+        if scope not in ("tracked", "all"):
+            scope = "tracked"
 
         from strategy.consensus import analyze, DEFAULT_PARAMS
+        from feed.history import fetch_candles
         base_params = {**DEFAULT_PARAMS, **(cfg.get("indicator") or {})}
         f_cfg = cfg.get("filter", {}) or {}
         if "stats_lookback_bars" in f_cfg:
             base_params["statsLookbackBars"] = f_cfg["stats_lookback_bars"]
+        if "recent_lookback_bars" in f_cfg:
+            base_params["recentLookbackBars"] = f_cfg["recent_lookback_bars"]
+        history_limit = int(f_cfg.get("history_candles") or 1060)
+        tf = int(f_cfg.get("tf") or 60)
+        min_payout = int(f_cfg.get("min_payout", 0) or 0)
 
-        EXPIRIES = [2, 3, 4, 5]
+        EXPIRIES = [1, 2, 3, 4, 5]
         MIN_SIGNALS = 5
 
-        # Только tracked пары (которые прошли фильтр и торгуются)
-        tracked = list(getattr(sm, "_tracked", set()) or [])
+        # ── Pick symbols depending on scope ──
+        if scope == "tracked":
+            symbols = list(getattr(sm, "_tracked", set()) or [])
+        else:
+            assets = (sm.feed.assets or {}) if sm.feed else {}
+            symbols = [
+                s for s, info in assets.items()
+                if info.get("is_otc") and info.get("payout", 0) >= min_payout
+            ]
+
+        cache = sm._candles or {}
+        sem = asyncio.Semaphore(5)
+        rest_fetched = 0
+
+        async def get_candles(sym: str) -> list[dict]:
+            nonlocal rest_fetched
+            buf = cache.get(sym)
+            if buf and len(buf) >= 200:
+                return buf
+            if scope != "all":
+                return buf or []
+            async with sem:
+                try:
+                    candles = await fetch_candles(sm.feed, sym, period=tf, limit=history_limit)
+                except Exception:
+                    return []
+                rest_fetched += 1
+                return candles or []
+
+        # Fetch all candles concurrently (only "all" scope actually hits REST)
+        candle_lists = await asyncio.gather(
+            *[get_candles(s) for s in symbols],
+            return_exceptions=False,
+        )
+
         results = []
         skipped = 0
 
-        for sym in tracked:
-            candles = (sm._candles or {}).get(sym)
-            if not candles or len(candles) < 100:
+        for sym, candles in zip(symbols, candle_lists):
+            if not candles or len(candles) < 200:
                 skipped += 1
                 continue
             info = (sm.feed.assets if sm.feed else {}).get(sym, {})
             payout = int(info.get("payout", 0))
 
             per_expiry: dict = {}
+            base_completed_1000 = 0
             for exp in EXPIRIES:
                 params = {**base_params, "expiryBars": exp}
                 try:
@@ -422,6 +467,8 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
                     continue
                 completed = a.wins + a.losses
                 wr = (a.wins / completed * 100.0) if completed else 0.0
+                if exp == 2:
+                    base_completed_1000 = a.completed
                 per_expiry[exp] = {
                     "signals": a.completed,
                     "wins": a.wins,
@@ -444,18 +491,57 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
                 "best_expiry": best_exp,
                 "best_wr": best_wr,
                 "candles_used": len(candles),
+                "completed_1000": base_completed_1000,
             })
 
         results.sort(key=lambda r: (-r["best_wr"], -r["payout"]))
+
+        # ── Aggregate per-expiry across all pairs (overall best) ──
+        agg: dict = {}
+        for exp in EXPIRIES:
+            wr_weighted_num = 0.0
+            wr_weighted_den = 0
+            total_signals = total_wins = total_losses = 0
+            pairs_with_data = 0
+            for r in results:
+                d = r["expiries"].get(exp)
+                if not d or d["signals"] < MIN_SIGNALS:
+                    continue
+                completed = d["wins"] + d["losses"]
+                wr_weighted_num += d["wr"] * completed
+                wr_weighted_den += completed
+                total_signals += d["signals"]
+                total_wins += d["wins"]
+                total_losses += d["losses"]
+                pairs_with_data += 1
+            avg_wr = (wr_weighted_num / wr_weighted_den) if wr_weighted_den else 0.0
+            agg[exp] = {
+                "avg_wr": round(avg_wr, 1),
+                "total_signals": total_signals,
+                "total_wins": total_wins,
+                "total_losses": total_losses,
+                "pairs_with_data": pairs_with_data,
+            }
+        valid_agg = [(e, d) for e, d in agg.items() if d["pairs_with_data"] >= 3]
+        overall_best = max(valid_agg, key=lambda x: x[1]["avg_wr"])[0] if valid_agg else None
+
+        scope_label = "tracked" if scope == "tracked" else "ВСЕ OTC"
+        note = (
+            f"Анализ {len(results)} пар ({scope_label}). "
+            f"Пропущено (мало свечей): {skipped}. "
+            f"Применена CONSENSUS-стратегия из config, меняется только expiryBars (1..5)."
+        )
+        if rest_fetched:
+            note += f" Загружено по REST: {rest_fetched}."
 
         return {
             "pairs": results,
             "expiries": EXPIRIES,
             "min_signals_for_score": MIN_SIGNALS,
-            "note": (
-                f"Анализ {len(results)} tracked пар. Пропущено (мало свечей): {skipped}. "
-                f"Применена CONSENSUS-стратегия из config, меняется только expiryBars (2..5)."
-            ),
+            "scope": scope,
+            "overall": agg,
+            "overall_best": overall_best,
+            "note": note,
         }
 
     # ─── hour-whitelist filter ───

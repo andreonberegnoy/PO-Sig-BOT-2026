@@ -761,6 +761,16 @@
 
   // ─── EXPIRY analysis ───
   let _lastExpiryData = null;
+  let _expiryScope = "tracked";
+
+  // Scope selector buttons
+  document.querySelectorAll(".exp-scope-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      document.querySelectorAll(".exp-scope-btn").forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+      _expiryScope = btn.dataset.scope || "tracked";
+    });
+  });
 
   async function loadExpiry() {
     const tbl = document.getElementById("expiry-table");
@@ -770,15 +780,19 @@
     if (!tbl) return;
 
     info.className = "action-msg info";
-    info.textContent = "⏳ Анализирую все пары...";
+    info.textContent = _expiryScope === "all"
+      ? "⏳ Анализирую ВСЕ OTC пары (это может занять 10-60 сек)..."
+      : "⏳ Анализирую tracked пары...";
     tbl.innerHTML = "";
     if (loadBtn) loadBtn.disabled = true;
 
     try {
-      const r = await api("/api/expiry_stats");
+      const r = await api(`/api/expiry_stats?scope=${encodeURIComponent(_expiryScope)}`);
       _lastExpiryData = r;
       const pairs = r.pairs || [];
-      const expiries = r.expiries || [2, 3, 4, 5];
+      const expiries = r.expiries || [1, 2, 3, 4, 5];
+      const overall = r.overall || {};
+      const overallBest = r.overall_best;
 
       if (pairs.length === 0) {
         info.className = "action-msg warn";
@@ -790,19 +804,46 @@
       info.textContent = `✅ ${r.note}`;
       if (exportBtn) exportBtn.style.display = "";
 
-      // Build header: pair | payout | for each expiry: WR (sigs) | best
+      // Header: Pair | Payout | Свечей/Сигналов | for each expiry: WR (sigs) | best
       let header = `<thead><tr>
         <th>Пара</th>
-        <th>Payout</th>`;
+        <th>Payout</th>
+        <th>Свечей / Сигналов<br/><span class="hint" style="font-size:10px;">в окне 1000</span></th>`;
       for (const exp of expiries) {
-        header += `<th>exp=${exp}<br/><span class="hint" style="font-size:10px;">WR / сигналов</span></th>`;
+        header += `<th>exp=${exp}<br/><span class="hint" style="font-size:10px;">WR / W·L</span></th>`;
       }
       header += `<th>⭐ Лучшая</th></tr></thead>`;
+
+      // Summary row — average WR per expiry across all pairs
+      let summaryRow = `<tr style="background:rgba(255,200,0,0.07); font-weight:600;">
+        <td colspan="2">📊 Среднее по всем парам</td>
+        <td class="hint">—</td>`;
+      for (const exp of expiries) {
+        const a = overall[exp];
+        if (!a || a.pairs_with_data === 0) {
+          summaryRow += `<td class="hint">—</td>`;
+        } else {
+          const cls = a.avg_wr >= 70 ? 'cell-good' : a.avg_wr >= 55 ? '' : 'cell-bad';
+          const star = (exp === overallBest) ? ' ⭐' : '';
+          summaryRow += `<td class="${cls}">${a.avg_wr.toFixed(1)}%${star}<br/>
+            <span class="hint" style="font-size:10px;">${a.pairs_with_data} пар · ${a.total_signals} сигн.</span></td>`;
+        }
+      }
+      if (overallBest !== null && overallBest !== undefined) {
+        const bestAvg = overall[overallBest]?.avg_wr ?? 0;
+        const cls = bestAvg >= 70 ? 'cell-good' : bestAvg >= 55 ? '' : '';
+        summaryRow += `<td class="${cls}"><b>exp=${overallBest}</b><br/>${bestAvg.toFixed(1)}%</td>`;
+      } else {
+        summaryRow += `<td class="hint">мало<br/>данных</td>`;
+      }
+      summaryRow += `</tr>`;
 
       const body = pairs.map(p => {
         let row = `<tr>
           <td><b>${p.symbol}</b></td>
-          <td>${p.payout}%</td>`;
+          <td>${p.payout}%</td>
+          <td>${p.candles_used}<br/>
+              <span class="hint" style="font-size:10px;">${p.completed_1000} сделок</span></td>`;
         for (const exp of expiries) {
           const d = p.expiries[exp];
           if (!d || d.signals === 0) {
@@ -826,7 +867,7 @@
         return row;
       }).join("");
 
-      tbl.innerHTML = header + `<tbody>${body}</tbody>`;
+      tbl.innerHTML = header + `<tbody>${summaryRow}${body}</tbody>`;
     } catch (e) {
       info.className = "action-msg err";
       info.textContent = `❌ Ошибка: ${e.message || e}`;
@@ -846,7 +887,7 @@
       return;
     }
     const expiries = _lastExpiryData.expiries;
-    const headers = ["symbol", "payout"];
+    const headers = ["symbol", "payout", "candles_used", "completed_1000"];
     for (const e of expiries) {
       headers.push(`exp${e}_signals`, `exp${e}_wins`, `exp${e}_losses`,
                    `exp${e}_wr`, `exp${e}_wr1`);
@@ -854,7 +895,7 @@
     headers.push("best_expiry", "best_wr");
 
     const rows = (_lastExpiryData.pairs || []).map(p => {
-      const r = [p.symbol, p.payout];
+      const r = [p.symbol, p.payout, p.candles_used, p.completed_1000];
       for (const e of expiries) {
         const d = p.expiries[e] || {};
         r.push(d.signals ?? "", d.wins ?? "", d.losses ?? "",
@@ -864,8 +905,19 @@
       return r;
     });
 
+    // Append summary row
+    const overall = _lastExpiryData.overall || {};
+    const sumRow = ["__OVERALL__", "", "", ""];
+    for (const e of expiries) {
+      const a = overall[e] || {};
+      sumRow.push(a.total_signals ?? "", a.total_wins ?? "", a.total_losses ?? "",
+                  a.avg_wr ?? "", "");
+    }
+    sumRow.push(_lastExpiryData.overall_best ?? "", "");
+    rows.push(sumRow);
+
     const ts = new Date().toISOString().slice(0, 10);
-    downloadCSV(`expiry_analysis_${ts}.csv`, headers, rows);
+    downloadCSV(`expiry_analysis_${_lastExpiryData.scope || "tracked"}_${ts}.csv`, headers, rows);
   });
 
   // initial load

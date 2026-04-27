@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <title>PO-Sig Bot</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
-<link rel="stylesheet" href="/miniapp/style.css?v=20260428" />
+<link rel="stylesheet" href="/miniapp/style.css?v=20260429" />
 </head>
 <body>
 <header>
@@ -133,14 +133,21 @@
       <h2>⏱ Анализ экспирации</h2>
       <p class="hint">
         Бот прогоняет ТВОЮ стратегию (CONSENSUS из config) на накопленных свечах
-        с разными экспирациями: <b>2, 3, 4, 5 баров</b>. Показывает какая бы
-        отработала лучше для каждой пары. Используй для подбора оптимального
-        <code>trading.expiry_seconds</code>.
+        с разными экспирациями: <b>1, 2, 3, 4, 5 баров</b> (1 бар = 1 минута).
+        Показывает какая бы отработала лучше для каждой пары. Используй для подбора
+        оптимального <code>trading.expiry_seconds</code>.
       </p>
       <p class="hint" style="font-size:11px;">
-        Расчёт идёт ~2-5 сек (по нажатию). Используются ≥1000 свечей в памяти бота.
-        ⭐ — лучшая экспирация для пары (≥5 сигналов в окне).
+        ⭐ — лучшая экспирация для пары (≥5 сигналов в окне). В строке
+        «Среднее по всем парам» — средний WR на каждой экспирации.
+        В колонке «Свечей / Сигналов» — сколько свечей просмотрел и сколько
+        виртуальных сделок CONSENSUS совершил на 1000-свечном окне.
       </p>
+      <div class="range-selector" style="margin-top:6px;">
+        Охват:
+        <button class="range-btn exp-scope-btn active" data-scope="tracked">Только tracked</button>
+        <button class="range-btn exp-scope-btn" data-scope="all">Все OTC пары (медленнее)</button>
+      </div>
       <div class="actions" style="margin-top:8px;">
         <button id="btn-expiry-load" class="btn primary">🔄 Запустить анализ</button>
         <button id="btn-expiry-export" class="btn" style="display:none;">📥 Экспорт CSV</button>
@@ -191,6 +198,6 @@
 
 <!-- Cache-bust: bump v=YYYYMMDD when app.js changes. Telegram кеширует
      sub-resources отдельно от index.html, поэтому нужен отдельный bump. -->
-<script src="/miniapp/app.js?v=20260428"></script>
+<script src="/miniapp/app.js?v=20260429"></script>
 </body>
 </html>

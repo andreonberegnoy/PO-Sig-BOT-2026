@@ -95,6 +95,7 @@ class StateMachine:
         self._running = False
         self._tick_event = asyncio.Event()
         self._force_rescan = False   # set True to trigger _rescan_pairs next tick
+        self._was_feed_ready = False  # edge-detect for WS-ready transition
 
         # Strategy registry — replaceable at runtime via Mini App
         self.registry = None   # set externally by main.py if available
@@ -452,7 +453,28 @@ class StateMachine:
 
     # ---------- scan & subscribe ----------
     async def _rescan_pairs(self):
+        # Guard: if WS feed isn't ready (mid-reconnect / mid-relogin), skip the
+        # scan instead of wasting it on 0-candle results. Without this, the
+        # hourly tick can fire during a relogin window and produce
+        # "0 allowed, 0 banned, 0 total" because every fetch_candles returns
+        # empty — leaving tracked={} for the next 5 minutes.
+        feed_ready = getattr(self.feed, "_ready", None)
+        if feed_ready is not None and not feed_ready.is_set():
+            logger.info("rescan: skipped — feed not ready, will retry in 60s")
+            self._force_rescan = True
+            await asyncio.sleep(60)
+            return
+
         scores = await scan_all_pairs(self.feed, self.cfg)
+
+        # Detect total scan failure (WS dropped mid-iteration → all 0 candles).
+        # Don't overwrite previous _pair_scores; retry sooner than 5 min default.
+        if not scores:
+            logger.warning("rescan: 0 pairs returned (WS hiccup?), retry in 60s")
+            self._force_rescan = True
+            await asyncio.sleep(60)
+            return
+
         self._pair_scores = scores
         # Apply bans + pauses silently. Pause uses same bans table but with
         # shorter expiry (filter.pause_hours) — reused journal.is_banned() check
@@ -715,6 +737,17 @@ class StateMachine:
             # ── Main loop body wrapped in broad try/except so a single bad tick
             # or unexpected exception never kills the entire trading loop.
             try:
+                # Edge-detect: feed just became ready (e.g. after relogin) →
+                # force an immediate rescan instead of waiting up to 5 min.
+                # Without this, a mid-cycle relogin leaves tracked={} until the
+                # next periodic tick fires — with no trading in between.
+                feed_ready_obj = getattr(self.feed, "_ready", None)
+                feed_ready_now = feed_ready_obj.is_set() if feed_ready_obj is not None else True
+                if feed_ready_now and not self._was_feed_ready:
+                    logger.info("feed became ready — forcing immediate rescan")
+                    self._force_rescan = True
+                self._was_feed_ready = feed_ready_now
+
                 # Periodic rescan (every 5 min) OR forced (e.g., assets arrived late)
                 if self._force_rescan or now - last_scan > 300:
                     self._force_rescan = False

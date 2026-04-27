@@ -35,9 +35,9 @@ api/
 ├── server.py                  FastAPI: REST endpoints + Mini App static + hourly_stats + control
 └── auth.py                    верификация Telegram WebApp initData
 miniapp/
-├── index.html                 5 вкладок: Status / Settings / Strategies / Аналитика / По часам
+├── index.html                 6 вкладок: Status / Settings / Strategies / Аналитика / По часам / Экспирация
 ├── style.css                  dark theme + multi-checkbox UI
-└── app.js                     vanilla JS, без сборки. Sort, CSV-экспорт, multi-select
+└── app.js                     vanilla JS, без сборки. Sort, CSV-экспорт, multi-select, экспирация-бэктест
 journal/
 ├── db.py                      SQLite: trades, bans, sessions, kv_store, hourly_stats query
 └── candles_db.py              SQLite: candles persist между рестартами
@@ -326,7 +326,7 @@ docker compose up -d --build
 2. **Настройки** — все параметры стратегии с слайдерами и multi-checkbox.
 3. **Стратегии** — встроенные + пользовательские, активация, загрузка кода.
 4. **Аналитика** — таблица пар с цветовой кодировкой по WR/payout.
-5. **По часам** ← новое — анализ сделок по часам дня:
+5. **По часам** — анализ сделок по часам дня:
    - Сводка по часам (все пары)
    - Детальная таблица пара × час с сортировкой
    - Колонка `Avg payout WIN` — средний % выплаты на WIN-сделках
@@ -335,6 +335,13 @@ docker compose up -d --build
    - **⭐ Применить как фильтр** — создать hour_whitelist
    - **🔓 Снять фильтр** — отключить hour_whitelist
    - **⤺ reset stats** (маленькая) — soft-reset baseline для нового цикла измерения
+6. **Экспирация** ← новое — бэктест экспираций на накопленных свечах:
+   - По нажатию **🔄 Запустить анализ** прогоняет CONSENSUS на ≥1000 свечах
+     каждой `_tracked` пары с экспирациями **2 / 3 / 4 / 5 баров**
+   - Для каждой пары/экспирации показывает: signals, WR, profit
+   - ⭐ — лучшая экспирация для пары (≥5 сигналов в окне)
+   - **📥 Экспорт CSV** результатов
+   - Используй для подбора оптимального `trading.expiry_seconds`
 
 ### Категории активов (multi-checkbox)
 
@@ -397,7 +404,6 @@ indicator:
 # Optional (не в config.yaml — задаётся через env):
 # CONTROL_PANEL_URL=https://...trycloudflare.com  # для /panel command
 # PO_PREFERRED_WS_URL=wss://api-eu.po.market/...  # пин региона PO
-  statsLookbackBars: 1000
 
 schedule:
   enabled: false
@@ -483,6 +489,7 @@ Mini App: `http://localhost:8080/`
 | `/api/apply_hour_whitelist` | POST | Применить фильтр (min_wr, min_trades, range) |
 | `/api/clear_hour_whitelist` | POST | Снять фильтр |
 | `/api/reset_hourly_stats` | POST | Soft-reset baseline (старые сделки скрыть) |
+| `/api/expiry_stats` | GET | Бэктест экспираций (2/3/4/5 баров) по `_tracked` парам |
 | `/api/debug/journal` | GET | Диагностика SQLite |
 | `/health` | GET | Healthcheck для Docker / monitoring |
 | `/strategy_template` | GET | Шаблон стратегии |
@@ -549,6 +556,9 @@ python3 tools/make_deploy_pdf.py      → DEPLOY_CHEATSHEET.pdf
 - [ ] Mini App → Settings → редактирование сохраняется (включая multi-checkbox категорий)
 - [ ] Mini App → По часам → загрузка таблиц, переключение периода, CSV экспорт
 - [ ] Mini App → По часам → ⭐ Применить фильтр → бот шлёт TG-уведомление
+- [ ] Mini App → Экспирация → 🔄 Запустить анализ → таблица 2/3/4/5 баров появляется
+- [ ] Mini App → Экспирация → ⭐ помечает лучшую экспирацию (≥5 сигналов)
+- [ ] Mini App → Экспирация → 📥 Экспорт CSV скачивает файл
 - [ ] Mini App → Strategies → загрузка кастома + активация работает
 - [ ] После рестарта контейнера — candles.db и state.db не теряются
 - [ ] Графики приходят в TG для всех типов пар (forex, crypto, stocks с `#`, indices)

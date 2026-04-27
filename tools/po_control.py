@@ -259,7 +259,10 @@ def render_html() -> str:
 {buttons_html}
 </div>
 
-<button class="clear-btn" id="clear-btn">Очистить вывод</button>
+<div style="display:flex; gap:8px; margin-bottom:8px;">
+  <button class="clear-btn" id="clear-btn">Очистить вывод</button>
+  <button class="clear-btn" id="copy-btn">📋 Копировать</button>
+</div>
 
 <div class="output" id="output"><span class="meta">Нажми кнопку чтобы выполнить команду на VPS.</span></div>
 
@@ -277,6 +280,31 @@ function append(text, cls = "") {{
 
 clearBtn.addEventListener("click", () => {{
   out.innerHTML = '<span class="meta">Очищено.</span>';
+}});
+
+const copyBtn = document.getElementById("copy-btn");
+copyBtn.addEventListener("click", async () => {{
+  const text = out.innerText;
+  try {{
+    await navigator.clipboard.writeText(text);
+    const orig = copyBtn.textContent;
+    copyBtn.textContent = "✅ Скопировано";
+    copyBtn.style.color = "var(--ok)";
+    setTimeout(() => {{
+      copyBtn.textContent = orig;
+      copyBtn.style.color = "";
+    }}, 1500);
+  }} catch (e) {{
+    // Fallback for older browsers (no Clipboard API)
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand("copy");
+    document.body.removeChild(ta);
+    copyBtn.textContent = "✅ Скопировано";
+    setTimeout(() => copyBtn.textContent = "📋 Копировать", 1500);
+  }}
 }});
 
 document.querySelectorAll(".btn[data-action]").forEach(btn => {{

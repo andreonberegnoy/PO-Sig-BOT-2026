@@ -77,6 +77,7 @@ class TelegramBot:
             await m.answer(
                 "Команды:\n"
                 "/status — состояние + кнопки управления циклом\n"
+                "/control — 🎛 главное меню управления (10 действий)\n"
                 "/balance — баланс\n"
                 "/ping — диагностика бота 🩺\n"
                 "/pause — пауза\n"
@@ -429,6 +430,252 @@ class TelegramBot:
                                            parse_mode="HTML", reply_markup=_build_ping_keyboard())
                 asyncio.create_task(feed._do_relogin(reason="manual_tg"),
                                     name="ping_relogin")
+
+        # ── /control — главное меню управления ────────────────────────────
+        # Все безопасные операции в одном месте, у каждой кнопки описание.
+        # Ниже — handler'ы для callback'ов с префиксом "ctrl:".
+
+        def _build_control_text() -> str:
+            return (
+                "🎛 <b>Панель управления</b>\n\n"
+                "Выбери действие. Описание каждой кнопки:\n\n"
+                "📊 <b>Диагностика</b> — статус WS, задач, балансы, фрейм-фрешность\n"
+                "💰 <b>Сегодня</b> — сделки за 24ч, WR, профит\n"
+                "🚫 <b>Баны/паузы</b> — пары временно отстранённые\n"
+                "📈 <b>Hourly</b> — сводка по часам за 7 дней\n"
+                "🔍 <b>Tracked</b> — текущие торгуемые пары\n"
+                "🔑 <b>Force Relogin</b> — обновить SSID через Playwright (~60с)\n"
+                "🔄 <b>Reset cycle</b> — сбросить МГ-цикл в FREE\n"
+                "🌐 <b>Mini App URL</b> — текущий tunnel URL\n"
+                "📋 <b>Deploy инструкция</b> — copy-paste команды для VPS"
+            )
+
+        def _build_control_keyboard() -> InlineKeyboardMarkup:
+            return InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="📊 Диагностика", callback_data="ctrl:diag"),
+                    InlineKeyboardButton(text="💰 Сегодня", callback_data="ctrl:today"),
+                ],
+                [
+                    InlineKeyboardButton(text="🚫 Баны/паузы", callback_data="ctrl:bans"),
+                    InlineKeyboardButton(text="📈 Hourly", callback_data="ctrl:hourly"),
+                ],
+                [
+                    InlineKeyboardButton(text="🔍 Tracked", callback_data="ctrl:tracked"),
+                    InlineKeyboardButton(text="🌐 Mini App URL", callback_data="ctrl:miniapp"),
+                ],
+                [
+                    InlineKeyboardButton(text="🔑 Force Relogin", callback_data="ctrl:relogin"),
+                    InlineKeyboardButton(text="🔄 Reset cycle", callback_data="ctrl:reset"),
+                ],
+                [
+                    InlineKeyboardButton(text="📋 Deploy инструкция", callback_data="ctrl:deploy_help"),
+                    InlineKeyboardButton(text="🔙 Меню", callback_data="ctrl:menu"),
+                ],
+            ])
+
+        @dp.message(Command("control"))
+        async def _control(m: Message):
+            if m.chat.id != self.chat_id: return
+            await m.answer(_build_control_text(), parse_mode="HTML",
+                           reply_markup=_build_control_keyboard())
+
+        @dp.callback_query(F.data.startswith("ctrl:"))
+        async def _control_callback(cb: CallbackQuery):
+            if cb.message.chat.id != self.chat_id:
+                return await cb.answer("Нет доступа", show_alert=True)
+            action = cb.data.split(":", 1)[1]
+
+            if action == "menu":
+                await cb.answer("Главное меню")
+                return await cb.message.edit_text(
+                    _build_control_text(), parse_mode="HTML",
+                    reply_markup=_build_control_keyboard(),
+                )
+
+            if action == "diag":
+                await cb.answer("Диагностика…")
+                return await cb.message.edit_text(
+                    _build_ping_text(), parse_mode="HTML",
+                    reply_markup=_build_control_keyboard(),
+                )
+
+            if action == "today":
+                await cb.answer("Считаю…")
+                if not self.journal:
+                    return await cb.message.edit_text("Журнал не подключён.",
+                                                       reply_markup=_build_control_keyboard())
+                since = int(time.time()) - 86400
+                d = self.journal.daily_summary(since, self.cfg["mode"])
+                signals = int(d.get("wins", 0)) + int(d.get("losses", 0)) + int(d.get("draws", 0))
+                bal = self.feed.balance() if self.feed else "?"
+                text = (
+                    f"💰 <b>Сегодня (24ч)</b>\n\n"
+                    f"📊 Сигналов: {signals}\n"
+                    f"✅ WIN: {d.get('wins', 0)}    ❌ LOSS: {d.get('losses', 0)}    ⚪ DRAW: {d.get('draws', 0)}\n"
+                    f"🎯 WR: {d.get('win_rate', 0)}%\n"
+                    f"💵 Чистая прибыль: <b>${d.get('net_profit', 0):+.2f}</b>\n"
+                    f"🔄 Смен пар: {d.get('pair_switches', 0)}\n"
+                    f"📉 Макс. минусов подряд: {d.get('max_loss_streak', 0)}\n"
+                    f"🚫 Банов за сутки: {d.get('bans_24h', 0)}\n"
+                    f"💳 Баланс: ${bal}"
+                )
+                return await cb.message.edit_text(text, parse_mode="HTML",
+                                                   reply_markup=_build_control_keyboard())
+
+            if action == "bans":
+                await cb.answer("Список банов…")
+                if not self.journal:
+                    return await cb.message.edit_text("Журнал не подключён.",
+                                                       reply_markup=_build_control_keyboard())
+                bans = self.journal.active_bans()
+                if not bans:
+                    text = "🚫 <b>Баны/паузы</b>\n\nНет активных. Все пары допустимы."
+                else:
+                    now = int(time.time())
+                    lines = ["🚫 <b>Баны/паузы</b>\n"]
+                    for sym, exp in bans:
+                        mins_left = (exp - now) // 60
+                        time_str = f"{mins_left}м" if mins_left < 60 else f"{mins_left // 60}ч {mins_left % 60}м"
+                        # Кратко: <60 мин = пауза, >60 мин = бан
+                        kind = "⏸ пауза" if mins_left < 60 else "🚫 бан"
+                        lines.append(f"{kind} <code>{sym}</code> — ещё {time_str}")
+                    text = "\n".join(lines)
+                return await cb.message.edit_text(text, parse_mode="HTML",
+                                                   reply_markup=_build_control_keyboard())
+
+            if action == "hourly":
+                await cb.answer("Hourly stats…")
+                if not self.journal:
+                    return await cb.message.edit_text("Журнал не подключён.",
+                                                       reply_markup=_build_control_keyboard())
+                try:
+                    import datetime as _dt
+                    tz_name = self.cfg.get("telegram", {}).get("daily_report_timezone") or "Europe/Kyiv"
+                    tz = pytz.timezone(tz_name)
+                    tz_offset_sec = int(tz.utcoffset(_dt.datetime.now()).total_seconds())
+                    since = int(time.time()) - 7 * 86400
+                    rows = self.journal.hourly_stats(since, mode=self.cfg["mode"], tz_offset_sec=tz_offset_sec)
+                except Exception as e:
+                    return await cb.message.edit_text(f"Ошибка: {e}",
+                                                       reply_markup=_build_control_keyboard())
+                # Aggregate per hour across all pairs
+                by_hour: dict = {}
+                for r in rows:
+                    h = r["hour"]
+                    a = by_hour.setdefault(h, {"total": 0, "wins": 0, "losses": 0, "profit": 0.0})
+                    a["total"] += r["total"]; a["wins"] += r["wins"]
+                    a["losses"] += r["losses"]; a["profit"] += r["profit"]
+                if not by_hour:
+                    text = "📈 <b>Hourly (7д)</b>\n\nПока нет сделок за неделю."
+                else:
+                    lines = ["📈 <b>Hourly (7д, по часам)</b>\n"]
+                    for h in sorted(by_hour.keys()):
+                        a = by_hour[h]
+                        completed = a["wins"] + a["losses"]
+                        wr = (a["wins"] / completed * 100) if completed else 0
+                        emoji = "🟢" if wr >= 70 else "🟡" if wr >= 55 else "🔴"
+                        lines.append(
+                            f"{emoji} <code>{h:02d}:00</code> — {a['total']} сд, "
+                            f"WR {wr:.0f}%, ${a['profit']:+.2f}"
+                        )
+                    lines.append(f"\nДетали — Mini App → таб <b>По часам</b>")
+                    text = "\n".join(lines)
+                return await cb.message.edit_text(text, parse_mode="HTML",
+                                                   reply_markup=_build_control_keyboard())
+
+            if action == "tracked":
+                await cb.answer("Tracked пары…")
+                sm = self.sm
+                if not sm:
+                    return await cb.message.edit_text("State machine не запущен.",
+                                                       reply_markup=_build_control_keyboard())
+                tracked = sorted(getattr(sm, "_tracked", set()) or set())
+                if not tracked:
+                    text = "🔍 <b>Tracked</b>\n\nНет торгуемых пар. Возможно фильтры слишком жёсткие."
+                else:
+                    lines = [f"🔍 <b>Tracked пары ({len(tracked)})</b>\n"]
+                    for sym in tracked[:30]:
+                        info = self.feed.assets.get(sym, {}) if self.feed else {}
+                        payout = info.get("payout", "?")
+                        score = sm._pair_scores.get(sym)
+                        prio = score.priority if score else "?"
+                        lines.append(f"<code>{sym}</code> — payout {payout}%, prio {prio}")
+                    if len(tracked) > 30:
+                        lines.append(f"... и ещё {len(tracked) - 30}")
+                    text = "\n".join(lines)
+                return await cb.message.edit_text(text, parse_mode="HTML",
+                                                   reply_markup=_build_control_keyboard())
+
+            if action == "miniapp":
+                await cb.answer("URL…")
+                # Tunnel URL is on host filesystem, NOT inside container.
+                # Container can't read /var/log/cloudflared.log — we don't mount it.
+                # Show instructions for user.
+                text = (
+                    "🌐 <b>Mini App URL</b>\n\n"
+                    "Бот не может прочитать tunnel URL изнутри контейнера. "
+                    "Чтобы узнать текущий — выполни на VPS:\n\n"
+                    "<code>grep \"trycloudflare.com\" /var/log/cloudflared.log | tail -1</code>\n\n"
+                    "Или через Mac → запусти <code>tools/po_control.py</code> → "
+                    "кнопка <b>🌐 Mini App URL</b>."
+                )
+                return await cb.message.edit_text(text, parse_mode="HTML",
+                                                   reply_markup=_build_control_keyboard())
+
+            if action == "relogin":
+                feed = self.feed
+                if feed is None:
+                    return await cb.answer("Feed не подключён", show_alert=True)
+                if not getattr(feed, "_relogin_callback", None):
+                    return await cb.answer("Relogin callback не настроен", show_alert=True)
+                if getattr(feed, "_relogin_in_progress", False):
+                    return await cb.answer("Relogin уже выполняется…", show_alert=True)
+                await cb.answer("Запускаю relogin…")
+                await cb.message.edit_text(
+                    "🔑 <b>Принудительный relogin запущен</b>\n\n"
+                    "Playwright открывает Chromium и берёт свежий SSID. Займёт 30-60с.\n"
+                    "Через минуту нажми <b>📊 Диагностика</b> чтобы проверить.",
+                    parse_mode="HTML", reply_markup=_build_control_keyboard(),
+                )
+                asyncio.create_task(feed._do_relogin(reason="manual_control"),
+                                    name="control_relogin")
+                return
+
+            if action == "reset":
+                if not self.sm:
+                    return await cb.answer("SM не запущен", show_alert=True)
+                s = self.sm.state
+                old = f"{s.current_pair} MG{s.mg_step}" if s.current_pair else "FREE"
+                self.sm.force_reset_cycle()
+                await cb.answer(f"♻️ Цикл сброшен ({old} → FREE)")
+                text = (
+                    f"🔄 <b>Цикл сброшен</b>\n\n"
+                    f"Было: <code>{old}</code>\nСтало: <code>FREE</code>\n\n"
+                    f"Бот ищет новый сигнал на любой допустимой паре."
+                )
+                return await cb.message.edit_text(text, parse_mode="HTML",
+                                                   reply_markup=_build_control_keyboard())
+
+            if action == "deploy_help":
+                await cb.answer()
+                text = (
+                    "📋 <b>Deploy на VPS</b>\n\n"
+                    "Бот не может перезаливать сам себя из контейнера. "
+                    "Деплой делается с Mac через SSH:\n\n"
+                    "<b>Стандартный деплой:</b>\n"
+                    "<code>ssh root@178.105.36.60</code>\n"
+                    "<code>cd /opt/po-bot &amp;&amp; git pull</code>\n"
+                    "<code>cd deploy &amp;&amp; docker compose down</code>\n"
+                    "<code>docker compose up -d --build</code>\n\n"
+                    "<b>Или через панель на Mac:</b>\n"
+                    "<code>cd \"Cloude Projects/MY PO-SIG BOT\"</code>\n"
+                    "<code>python3 tools/po_control.py</code>\n\n"
+                    "→ откроется http://localhost:5555/ с кнопками\n"
+                    "→ жмёшь 🚀 Deploy → всё автоматом"
+                )
+                return await cb.message.edit_text(text, parse_mode="HTML",
+                                                   reply_markup=_build_control_keyboard())
 
     # ---------- polling ----------
 

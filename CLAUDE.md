@@ -14,7 +14,10 @@ runs 24/7 on Hetzner VPS in Docker.
 
 - **Active worktree**: this directory (`.claude/worktrees/youthful-wiles-992d65/`)
 - **Main repo**: parent of `.claude/` — same files, different branch maybe
-- **VPS**: `root@178.105.36.60` (Hetzner Falkenstein, Ubuntu 24.04)
+- **VPS**: `root@37.27.13.173` (Hetzner Helsinki, Ubuntu 24.04, CX33)
+  - Migrated from Nuremberg `178.105.36.60` (offline) on 2026-04-28
+  - **PO_PREFERRED_WS_URL=wss://api-eu.po.market/...** обязательно — без пина PO роутит на api-spb, который CF блокирует из Helsinki Hetzner-IP
+  - api-eu и api-msk из Helsinki проходят (HTTP 400 на тест), api-spb — HTTP 403
   - Bot runs at `/opt/po-bot/`
   - Docker compose at `/opt/po-bot/deploy/`
   - Container name: `po-bot`
@@ -24,7 +27,7 @@ runs 24/7 on Hetzner VPS in Docker.
 ## How to deploy (the proper way)
 
 ```bash
-ssh root@178.105.36.60 'cd /opt/po-bot && git checkout -- config.yaml && git pull && \
+ssh root@37.27.13.173 'cd /opt/po-bot && git checkout -- config.yaml && git pull && \
   sed -i "s/^mode: paper/mode: real/" config.yaml && \
   cd deploy && docker compose down && docker compose up -d --build'
 ```
@@ -35,7 +38,7 @@ Without checkout, git pull conflicts with local mode=real edit.
 
 ## How to debug when user reports problem
 
-1. SSH to VPS first: `ssh root@178.105.36.60`
+1. SSH to VPS first: `ssh root@37.27.13.173`
 2. Check container status: `cd /opt/po-bot/deploy && docker compose ps`
 3. Last logs: `docker compose logs --tail=80 po-bot | grep -v "GET /api"`
 4. Check git: `cd /opt/po-bot && git log -1 --oneline`
@@ -46,10 +49,18 @@ Without checkout, git pull conflicts with local mode=real edit.
 
 - **WS дроп каждые ~30 мин на api-msk/api-spb** — это PO server-side recycle, не баг.
   Auto-reconnect handles it. Не паникуй на каждый "WebSocket замолчал" алерт.
-- **Cloudflare 403 на api-eu для Hetzner Helsinki/Nuremberg** — CF блокирует
-  датацентр-IP для api-eu endpoint. Решение было — Falkenstein region (текущий).
-- **PO_PREFERRED_WS_URL=api-eu НЕ работает для этого аккаунта** — PO migrate
-  account routing на api-spb, не пытаться форсить api-eu.
+- **Cloudflare 403 на api-spb из Hetzner Helsinki/Nuremberg/Falkenstein** —
+  CF блокирует датацентр-IP именно для api-spb endpoint. api-eu и api-msk
+  обычно проходят. Решение — `PO_PREFERRED_WS_URL=wss://api-eu.po.market/...`
+  в `/opt/po-bot/deploy/.env`. Бот использует circuit breaker если auth
+  падает 3 раза подряд — снимает пин на 1 цикл, потом возвращает.
+- **WARP на этом VPS НЕЛЬЗЯ ставить** — даже proxy mode ломает SSH inbound,
+  recovery только через Hetzner Rescue Mode + chroot. Trapped дважды.
+  Если нужен другой egress IP — используй WireGuard к WireGuard-серверу,
+  не WARP.
+- **TelegramConflictError** = два бота с одним токеном делают getUpdates.
+  Признак: `terminated by other getUpdates request`. Лечение: revoke токен
+  через @BotFather → новый в `/opt/po-bot/deploy/.env` → restart.
 - **git pull блокируется config.yaml** — всегда делать `git checkout -- config.yaml`
   ПЕРЕД pull. Уже встроено в Deploy кнопку HTML панели.
 - **Mini App не видит изменения** — Telegram cache. Решение: BotFather → Edit
@@ -67,7 +78,7 @@ Without checkout, git pull conflicts with local mode=real edit.
 ## Permissions you have (auto-allow in `.claude/settings.json` если настроено)
 
 If user has set up auto-allow:
-- SSH to 178.105.36.60 — yes (read-only commands like docker logs, ps, git log)
+- SSH to 37.27.13.173 — yes (read-only commands like docker logs, ps, git log)
 - git pull/push — yes (with confirmation for push)
 - docker compose restart — yes
 - docker compose down/up --build — needs confirmation (destructive)

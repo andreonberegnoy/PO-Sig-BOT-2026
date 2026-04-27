@@ -100,9 +100,14 @@ class TelegramBot:
             if s.day_off_until and s.day_off_until > int(time.time()):
                 mins = (s.day_off_until - int(time.time())) // 60
                 day_off = f"\n😴 Day-off: ещё {mins} мин"
+            # In active MG cycle but no pair locked → searching across all
+            if s.mg_step > 0 and not s.current_pair:
+                pair_display = "🔍 поиск сигнала на всех допустимых"
+            else:
+                pair_display = s.current_pair or "—"
             return (
                 f"Режим: {self.cfg['mode']}\n"
-                f"Пара: {s.current_pair or '—'}\n"
+                f"Пара: {pair_display}\n"
                 f"МГ-шаг: {s.mg_step}  (сумма ${self.sm._amount_for_step(s.mg_step):.2f})\n"
                 f"Сделок на паре: {s.trades_on_pair}\n"
                 f"Смен пары в цикле: {s.cycle_switches}\n"
@@ -115,13 +120,21 @@ class TelegramBot:
 
         def _build_status_keyboard() -> InlineKeyboardMarkup:
             s = self.sm.state if self.sm else None
-            in_cycle = s and s.mg_step > 0 and s.current_pair
+            in_cycle = s and s.mg_step > 0
+            in_search = in_cycle and not s.current_pair
             rows = []
             if in_cycle:
-                rows.append([
-                    InlineKeyboardButton(text="🔀 Сменить пару (МГ сохранить)", callback_data="sm:switch_pair"),
-                    InlineKeyboardButton(text="🔄 Сбросить цикл (FREE)", callback_data="sm:reset_cycle"),
-                ])
+                # Reset cycle works in both locked and search mode.
+                # Switch pair only makes sense when locked (need a pair to switch FROM).
+                cycle_buttons = []
+                if not in_search:
+                    cycle_buttons.append(
+                        InlineKeyboardButton(text="🔀 Сменить пару (МГ сохранить)", callback_data="sm:switch_pair")
+                    )
+                cycle_buttons.append(
+                    InlineKeyboardButton(text="🔄 Сбросить цикл (FREE)", callback_data="sm:reset_cycle")
+                )
+                rows.append(cycle_buttons)
             rows.append([
                 InlineKeyboardButton(text="⏸ Пауза" if (s and not s.paused) else "▶️ Продолжить",
                                      callback_data="sm:pause" if (s and not s.paused) else "sm:resume"),
@@ -322,7 +335,10 @@ class TelegramBot:
             sm = self.sm
             if sm:
                 s = sm.state
-                pair = s.current_pair or "—"
+                if s.mg_step > 0 and not s.current_pair:
+                    pair = "🔍 search-mode"
+                else:
+                    pair = s.current_pair or "—"
                 mg = s.mg_step
                 paused = "⏸ ПАУЗА" if s.paused else ("⏳ ОЖИДАНИЕ /resume" if s.waiting_resume else "▶️ активен")
                 lines.append(f"🤖 SM: {paused}  |  пара: {pair}  |  МГ-шаг: {mg}")

@@ -56,16 +56,25 @@
       document.getElementById("m-tracked").textContent = s.tracked_pairs ?? "—";
       document.getElementById("m-active").textContent = s.active_syms ?? "—";
       document.getElementById("m-banned").textContent = s.banned_pairs ?? "—";
-      document.getElementById("m-pair").textContent = s.current_pair || "—";
+      // In MG cycle but no pair locked → bot is searching all eligible pairs
+      const inSearchMode = (s.mg_step ?? 0) > 0 && !s.current_pair;
+      document.getElementById("m-pair").textContent = inSearchMode
+        ? "🔍 поиск сигнала на всех допустимых"
+        : (s.current_pair || "—");
       document.getElementById("m-base").textContent = s.base_amount != null ? `$${(+s.base_amount).toFixed(2)}` : "—";
       document.getElementById("m-expiry").textContent = s.expiry_seconds != null ? `${s.expiry_seconds} сек` : "—";
       document.getElementById("m-mg").textContent = s.mg_step ?? 0;
       document.getElementById("m-loss").textContent = `$${(+(s.session_loss || 0)).toFixed(2)}`;
       document.getElementById("m-paused").textContent = s.paused ? "ДА" : "нет";
-      // Cycle-only buttons (switch pair, reset cycle): show only when MG cycle active.
-      const inCycle = (s.mg_step ?? 0) > 0 && !!s.current_pair;
+      // Cycle-only buttons (switch pair, reset cycle): show whenever MG cycle is
+      // active — either locked on a pair OR in search mode (current_pair=None).
+      // Reset cycle is useful in both states; switch pair only when locked.
+      const inCycle = (s.mg_step ?? 0) > 0;
       const ca = document.getElementById("cycle-actions");
       if (ca) ca.style.display = inCycle ? "" : "none";
+      // Hide "switch pair" specifically in search mode (no pair to switch from)
+      const switchBtn = document.getElementById("btn-switch-pair");
+      if (switchBtn) switchBtn.style.display = inSearchMode ? "none" : "";
     } catch (e) {
       console.error(e);
     }

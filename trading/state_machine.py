@@ -707,9 +707,18 @@ class StateMachine:
                     # Between boundaries keep a loose refresh (fallback if tick stream lagged)
                     await self._maybe_refresh_all(min_interval_sec=15)
 
-                # Branch: in-cycle vs free
-                if self.state.mg_step > 0 and self.state.current_pair:
-                    await self._in_cycle_step()
+                # Branch: three modes
+                #  • FREE: no active cycle → scan all pairs for first signal
+                #  • IN-CYCLE LOCKED: cycle active + locked on a pair → wait
+                #    for next bar on THAT pair
+                #  • IN-CYCLE SEARCHING: cycle active but pair switched out
+                #    (payout drop, max_trades hit) → scan ALL eligible pairs,
+                #    first signal becomes new locked pair (preserves mg_step)
+                if self.state.mg_step > 0:
+                    if self.state.current_pair:
+                        await self._in_cycle_step()
+                    else:
+                        await self._in_cycle_search_step()
                 else:
                     await self._free_scan_step()
 
@@ -816,71 +825,33 @@ class StateMachine:
         # ── Hard cap: max trades per pair within this cycle ──
         # User-configured via trading.max_trades_on_pair (0 = no cap, current
         # legacy behavior). E.g. set to 2 → after 2 trades on the same pair
-        # bot force-switches to next best pair regardless of MG step.
+        # bot force-switches to "search any" mode.
         max_trades = int(self.cfg["trading"].get("max_trades_on_pair", 0) or 0)
         if max_trades > 0 and self.state.trades_on_pair >= max_trades:
-            exclude = {sym, *self.state.switched_pairs}
-            pick = self._pick_switch_pair(exclude)
-            if pick:
-                self.state.switched_pairs.append(sym)
-                self.state.cycle_switches += 1
-                self.state.current_pair = pick.symbol
-                self.state.trades_on_pair = 0
-                self._persist()
-                await self._notify(
-                    f"🔀 Лимит {max_trades} сделок на паре достигнут — смена: "
-                    f"{sym} → {pick.symbol} (payout {pick.payout}%). "
-                    f"МГ-шаг {self.state.mg_step} сохранён."
-                )
-                sym = pick.symbol
-                if sym not in self._tracked:
-                    try:
-                        await self._load_history(sym)
-                        self._tracked.add(sym)
-                    except Exception:
-                        logger.exception("max-trades switch: _load_history %s failed", sym)
-                    if hasattr(self.feed, "subscribe"):
-                        try: await self.feed.subscribe(sym, int(self.cfg["filter"]["tf"]))
-                        except Exception: logger.exception("max-trades switch: subscribe %s failed", sym)
-                self._last_closed_bar_time.pop(sym, None)
-            else:
-                logger.info("max-trades switch: no eligible pair, staying on %s", sym)
+            self.state.switched_pairs.append(sym)
+            self.state.cycle_switches += 1
+            self.state.current_pair = None   # enter SEARCHING mode
+            self.state.trades_on_pair = 0
+            self._persist()
+            await self._notify(
+                f"🔀 Лимит {max_trades} сделок на паре {sym} достигнут — "
+                f"ищу сигнал на других допустимых парах. МГ-шаг {self.state.mg_step} сохранён."
+            )
+            return  # next loop tick → _in_cycle_search_step
 
-        # Check payout drop → possibly switch
+        # Check payout drop → switch to SEARCHING mode (don't pick one specific pair)
         payout = int(self.feed.assets.get(sym, {}).get("payout", 0))
         floor = self.cfg["filter"]["payout_floor"]
         if payout < floor and self.state.cycle_switches < self.cfg["trading"]["max_pair_switch_per_cycle"]:
-            exclude = {sym, *self.state.switched_pairs}
-            pick = self._pick_switch_pair(exclude)
-            if pick:
-                self.state.switched_pairs.append(sym)
-                self.state.cycle_switches += 1
-                self.state.current_pair = pick.symbol
-                self._persist()
-                await self._notify(
-                    f"🔄 Смена пары: → {pick.symbol} (payout {pick.payout}%). "
-                    f"Причина: payout {payout}% < {floor}%. МГ-шаг {self.state.mg_step} сохранён."
-                )
-                sym = pick.symbol
-                # ── KEY FIX: ensure the new pair has history + WS subscription ──
-                # _pick_switch_pair returns any scored pair, not necessarily one
-                # already in _tracked. Without history, buf will be None and the
-                # bot loops in _in_cycle_step doing nothing forever (the "freeze
-                # after pair switch" bug).
-                if sym not in self._tracked:
-                    logger.info("in-cycle switch: loading history for %s (not yet tracked)", sym)
-                    try:
-                        await self._load_history(sym)
-                        self._tracked.add(sym)
-                    except Exception:
-                        logger.exception("in-cycle switch: _load_history %s failed", sym)
-                    if hasattr(self.feed, "subscribe"):
-                        try:
-                            await self.feed.subscribe(sym, int(self.cfg["filter"]["tf"]))
-                        except Exception:
-                            logger.exception("in-cycle switch: subscribe %s failed", sym)
-                # Reset bar-time so the next closed bar on the new pair is evaluated
-                self._last_closed_bar_time.pop(sym, None)
+            self.state.switched_pairs.append(sym)
+            self.state.cycle_switches += 1
+            self.state.current_pair = None   # enter SEARCHING mode
+            self._persist()
+            await self._notify(
+                f"🔄 Payout {payout}% < {floor}% на {sym} — "
+                f"ищу сигнал на других допустимых парах. МГ-шаг {self.state.mg_step} сохранён."
+            )
+            return  # next loop tick → _in_cycle_search_step
 
         # Stop-sum guardrail
         next_amt = self._amount_for_step(self.state.mg_step)
@@ -934,6 +905,110 @@ class StateMachine:
         # Fire-and-forget notify; never block trade entry on TG latency
         msg = f"📡 Новый сигнал {sym} → {action.upper()}. МГ-шаг {self.state.mg_step}, ставка ${next_amt}."
         asyncio.create_task(self._notify(msg), name=f"notify_mg_{sym}")
+        await self._open_and_track(sym, action, next_amt)
+
+    # ---------- in-cycle SEARCH (no pair locked, scan all eligible) ----------
+    async def _in_cycle_search_step(self):
+        """Active MG cycle but no pair locked (just switched away from previous).
+        Scan ALL eligible tracked pairs for a fresh CONSENSUS signal. First
+        match wins → that pair becomes new current_pair, MG step preserved.
+
+        Honours the same stop-sum / max-steps guardrails as _in_cycle_step.
+        Pairs already used in this cycle (in switched_pairs) are excluded so
+        we don't bounce back and forth.
+        """
+        if not self._tracked:
+            return
+
+        # Stop-sum guardrail (same as _in_cycle_step)
+        next_amt = self._amount_for_step(self.state.mg_step)
+        stop_sum = float(self.cfg["martingale"]["stop_sum"])
+        if self.state.session_loss + next_amt > stop_sum:
+            self.state.waiting_resume = True
+            self._persist()
+            await self._notify(
+                f"🛑 СТОП-СУММА: потери ${self.state.session_loss:.2f} + ставка ${next_amt} > ${stop_sum}.\n"
+                f"Жду /resume."
+            )
+            return
+        if self.state.mg_step > int(self.cfg["martingale"]["max_steps"]):
+            self.state.waiting_resume = True
+            self._persist()
+            await self._notify(
+                f"🛑 Достигнут максимум догонов ({self.cfg['martingale']['max_steps']}). Жду /resume."
+            )
+            return
+
+        tf = self.cfg["filter"]["tf"]
+        MAX_STALENESS = 25
+        now_ts = int(time.time())
+        min_payout = self.cfg["filter"]["min_payout"]
+
+        # Iterate by priority + payout (same ordering as _free_scan_step)
+        sorted_tracked = sorted(
+            self._tracked,
+            key=lambda s: (
+                (self._pair_scores.get(s).priority if self._pair_scores.get(s) else 999),
+                -int((self.feed.assets.get(s) or {}).get("payout", 0)),
+            ),
+        )
+
+        evaluated = 0
+        new_bars = 0
+        fired = None
+        for sym in sorted_tracked:
+            # Skip pairs already used in this cycle
+            if sym in self.state.switched_pairs:
+                continue
+            # Skip banned pairs
+            if self.journal.is_banned(sym):
+                continue
+            # Skip low payout
+            payout = int(self.feed.assets.get(sym, {}).get("payout", 0))
+            if payout < min_payout:
+                continue
+            buf = self._candles.get(sym)
+            if not buf or len(buf) < 200:
+                continue
+            evaluated += 1
+            last_closed_t = buf[-2]["time"]
+            last_eval_t = self._last_closed_bar_time.get(sym, 0)
+            if last_closed_t <= last_eval_t:
+                continue
+            self._last_closed_bar_time[sym] = last_closed_t
+            new_bars += 1
+            age = now_ts - (last_closed_t + tf)
+            if age > MAX_STALENESS:
+                continue
+            action = self._check_signal(sym)
+            if action:
+                fired = (sym, action)
+                break
+
+        # Heartbeat log so we know the search is alive (mirrors _free_scan_step)
+        logger.info("in-cycle SEARCH: tracked=%d eligible=%d new_bars=%d fired=%s mg_step=%d",
+                    len(self._tracked), evaluated, new_bars, fired, self.state.mg_step)
+
+        if not fired:
+            return  # no signal anywhere — keep waiting
+
+        sym, action = fired
+        payout = int(self.feed.assets.get(sym, {}).get("payout", 0))
+
+        # Lock onto this pair, adapt direction if needed
+        self.state.current_pair = sym
+        if action != self.state.direction:
+            logger.info("in-cycle search: direction flipped %s → %s on %s",
+                        self.state.direction, action, sym)
+            self.state.direction = action
+        self.state.trades_on_pair = 0
+        self._persist()
+
+        msg = (
+            f"🎯 Найден сигнал на {sym} → {action.upper()} "
+            f"(payout {payout}%). МГ-шаг {self.state.mg_step}, ставка ${next_amt:.2f}."
+        )
+        asyncio.create_task(self._notify(msg), name=f"notify_search_{sym}")
         await self._open_and_track(sym, action, next_amt)
 
     # ---------- trade open / close flow ----------

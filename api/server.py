@@ -218,7 +218,7 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
         _auth(request)
         import time as _t, datetime as _dt
         now = int(_t.time())
-        ranges = {"24h": 86400, "7d": 7*86400, "30d": 30*86400, "60d": 60*86400}
+        ranges = {"24h": 86400, "7d": 7*86400, "14d": 14*86400, "30d": 30*86400, "60d": 60*86400}
         if range == "all":
             since = 0
         else:
@@ -299,7 +299,7 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
         import time as _t, datetime as _dt
         now = int(_t.time())
         time_range = range  # alias, range is the builtin shadowed by arg name
-        ranges = {"24h": 86400, "7d": 7*86400, "30d": 30*86400, "60d": 60*86400}
+        ranges = {"24h": 86400, "7d": 7*86400, "14d": 14*86400, "30d": 30*86400, "60d": 60*86400}
         since = 0 if time_range == "all" else now - ranges.get(time_range, 7*86400)
         if not journal:
             return {"error": "no journal"}
@@ -852,7 +852,7 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
         time_range = payload.get("range", "30d")
         import time as _t, datetime as _dt
         now = int(_t.time())
-        ranges = {"24h": 86400, "7d": 7*86400, "30d": 30*86400, "60d": 60*86400}
+        ranges = {"24h": 86400, "7d": 7*86400, "14d": 14*86400, "30d": 30*86400, "60d": 60*86400}
         since = 0 if time_range == "all" else now - ranges.get(time_range, 30*86400)
         # Same TZ logic as /api/hourly_stats
         tz_name = (cfg.get("telegram") or {}).get("daily_report_timezone") or "Europe/Kyiv"

@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <title>PO-Sig Bot</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
-<link rel="stylesheet" href="/miniapp/style.css?v=20260504" />
+<link rel="stylesheet" href="/miniapp/style.css?v=20260505" />
 </head>
 <body>
 <header>
@@ -95,7 +95,9 @@
         Период:
         <button class="hour-range-btn" data-range="24h">24ч</button>
         <button class="hour-range-btn active" data-range="7d">7д</button>
+        <button class="hour-range-btn" data-range="14d">14д</button>
         <button class="hour-range-btn" data-range="30d">30д</button>
+        <button class="hour-range-btn" data-range="60d">60д</button>
         <button class="hour-range-btn" data-range="all">всё</button>
       </div>
       <div class="actions" style="margin-top:8px; flex-wrap:wrap; gap:6px;">
@@ -216,6 +218,6 @@
 
 <!-- Cache-bust: bump v=YYYYMMDD when app.js changes. Telegram кеширует
      sub-resources отдельно от index.html, поэтому нужен отдельный bump. -->
-<script src="/miniapp/app.js?v=20260504"></script>
+<script src="/miniapp/app.js?v=20260505"></script>
 </body>
 </html>

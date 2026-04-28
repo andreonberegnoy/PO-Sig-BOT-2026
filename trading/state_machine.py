@@ -122,7 +122,9 @@ class StateMachine:
         for analytics — not just the few trades the bot actually took.
         """
         import json as _json
+        from strategy.consensus import generate_signals as _gen_v, DEFAULT_PARAMS as _DEFV
         last_eval: dict[str, int] = {}
+        backfilled: set[str] = set()   # пары, уже прогнанные по истории один раз
         await asyncio.sleep(15)   # let initial scan + tracked-set populate
         while self._running:
             try:
@@ -134,6 +136,69 @@ class StateMachine:
                     buf = self._candles.get(sym)
                     if not buf or len(buf) < 200:
                         continue
+                    # ── ПЕРВАЯ встреча tracked-пары: авто-backfill всей
+                    # cached истории. Прогоняем CONSENSUS на ~1060 свечах,
+                    # вставляем все исторические сигналы + сразу считаем
+                    # exp_wins по следующим 5 барам в том же буфере. Делается
+                    # один раз на пару. INSERT OR IGNORE предотвращает дубли
+                    # если бот уже видел эти сигналы в предыдущем сеансе.
+                    if sym not in backfilled:
+                        backfilled.add(sym)
+                        try:
+                            params = {**_DEFV, **(self.cfg.get("indicator") or {})}
+                            f_cfg2 = self.cfg.get("filter") or {}
+                            if "stats_lookback_bars" in f_cfg2:
+                                params["statsLookbackBars"] = f_cfg2["stats_lookback_bars"]
+                            if "recent_lookback_bars" in f_cfg2:
+                                params["recentLookbackBars"] = f_cfg2["recent_lookback_bars"]
+                            closed_hist = buf[:-1]
+                            sigs, _ = _gen_v(closed_hist, params)
+                            inserted = 0
+                            for s in sigs:
+                                idx = int(s.i)
+                                if idx < 0 or idx >= len(closed_hist):
+                                    continue
+                                bar = closed_hist[idx]
+                                ent_ts = int(bar["time"]) + tf
+                                ent_close = float(bar.get("close") or 0)
+                                if ent_close == 0:
+                                    continue
+                                side = "call" if s.side == "buy" else "put"
+                                self.journal.insert_virtual_signal(sym, side, ent_ts, ent_close)
+                                inserted += 1
+                                # Compute exp_wins from following 5 bars
+                                results = []
+                                for n in (1, 2, 3, 4, 5):
+                                    ei = idx + n
+                                    if ei >= len(closed_hist):
+                                        results.append(None); continue
+                                    ex_close = float(closed_hist[ei].get("close") or 0)
+                                    if ex_close == 0:
+                                        results.append(None); continue
+                                    if side == "call":
+                                        results.append(1 if ex_close > ent_close else 0)
+                                    else:
+                                        results.append(1 if ex_close < ent_close else 0)
+                                if not all(r is None for r in results):
+                                    cur = self.journal.conn.execute(
+                                        "SELECT id, settled_at FROM virtual_signals "
+                                        "WHERE symbol=? AND signal_ts=?",
+                                        (sym, ent_ts),
+                                    ).fetchone()
+                                    if cur and cur[1] is None:
+                                        self.journal.settle_virtual_signal(
+                                            int(cur[0]), _json.dumps(results))
+                            if inserted:
+                                logger.info(
+                                    "virtual backfill %s: %d signals from %d cached candles",
+                                    sym, inserted, len(closed_hist),
+                                )
+                            # Mark last_eval to skip current bar in normal loop
+                            last_eval[sym] = int(buf[-2]["time"])
+                            continue   # не обрабатывать в этой же итерации
+                        except Exception:
+                            logger.exception("auto-backfill failed for %s", sym)
+                    # Normal incremental processing
                     last_closed_t = int(buf[-2]["time"])
                     if last_closed_t <= last_eval.get(sym, 0):
                         continue

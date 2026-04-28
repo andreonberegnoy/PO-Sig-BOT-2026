@@ -1270,6 +1270,33 @@ class StateMachine:
     # ---------- trade open / close flow ----------
     async def _open_and_track(self, sym: str, action: str, amount: float):
         expiry = int(self.cfg["trading"]["expiry_seconds"])
+        # Per-(symbol, current_hour) expiry override — set by Mini App
+        # «По часам» → ⭐ Применить как фильтр. Picks expiry that virtual
+        # signals showed best WR for this exact pair-hour combo.
+        try:
+            overrides = (self.cfg.get("filter") or {}).get("hour_expiry_overrides") or {}
+            if overrides and sym in overrides:
+                # Convert UTC time → user's TZ (same logic as _hour_allowed)
+                import datetime as _dt
+                tz_name = (self.cfg.get("telegram") or {}).get("daily_report_timezone") or "Europe/Kyiv"
+                try:
+                    import pytz
+                    tz = pytz.timezone(tz_name)
+                    cur_hour = _dt.datetime.now(tz).hour
+                except Exception:
+                    cur_hour = _dt.datetime.utcnow().hour
+                pref = overrides[sym].get(str(cur_hour))
+                if pref:
+                    pref = int(pref)
+                    if pref != expiry:
+                        logger.info(
+                            "expiry override applied for %s @ %02d:00 — using %ds "
+                            "(default was %ds) per virtual stats",
+                            sym, cur_hour, pref, expiry,
+                        )
+                        expiry = pref
+        except Exception:
+            logger.exception("hour_expiry_overrides lookup failed — using default")
         # Clear any stale pending_trade from a prior aborted attempt (otherwise
         # a restart could resume the wrong trade).
         if self.state.pending_trade:

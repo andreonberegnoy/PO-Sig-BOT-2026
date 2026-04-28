@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <title>PO-Sig Bot</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
-<link rel="stylesheet" href="/miniapp/style.css?v=20260503" />
+<link rel="stylesheet" href="/miniapp/style.css?v=20260504" />
 </head>
 <body>
 <header>
@@ -100,6 +100,7 @@
       </div>
       <div class="actions" style="margin-top:8px; flex-wrap:wrap; gap:6px;">
         <button id="btn-hourly-export" class="btn">📥 Экспорт CSV</button>
+        <button id="btn-hourly-backfill" class="btn" title="Прогнать CONSENSUS по cached свечам всех tracked пар и заполнить virtual_signals задним числом">⚡ Backfill истории</button>
         <button id="btn-hourly-apply" class="btn primary">⭐ Применить как фильтр</button>
         <button id="btn-hourly-clear" class="btn" style="display:none;">🔓 Снять фильтр</button>
       </div>
@@ -215,6 +216,6 @@
 
 <!-- Cache-bust: bump v=YYYYMMDD when app.js changes. Telegram кеширует
      sub-resources отдельно от index.html, поэтому нужен отдельный bump. -->
-<script src="/miniapp/app.js?v=20260503"></script>
+<script src="/miniapp/app.js?v=20260504"></script>
 </body>
 </html>

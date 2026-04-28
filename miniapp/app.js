@@ -718,6 +718,38 @@
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
+  // ─── Backfill virtual signals from cached candles ───
+  const backfillBtn = document.getElementById("btn-hourly-backfill");
+  if (backfillBtn) backfillBtn.addEventListener("click", async () => {
+    if (!confirm("Прогнать CONSENSUS по всем cached свечам всех tracked пар? Это создаст исторические virtual signals и заполнит базу для статистики «По часам». Займёт 5-15 секунд.")) return;
+    backfillBtn.disabled = true;
+    const orig = backfillBtn.textContent;
+    backfillBtn.textContent = "⏳ Backfill идёт...";
+    try {
+      const r = await fetch("/api/backfill_virtual_signals", {
+        method: "POST",
+        headers: {"X-Init-Data": tg.initData || "skip", "Content-Type": "application/json"},
+        body: "{}",
+      });
+      const data = await r.json();
+      if (!data.ok) {
+        alert("Ошибка: " + (data.error || JSON.stringify(data)));
+      } else {
+        const lines = Object.entries(data.report).map(([sym, st]) =>
+          st.skipped ? `${sym}: пропущено (${st.reason})`
+                     : `${sym}: ${st.signals_found} сигн., вставлено ${st.inserted}, settled ${st.settled}`
+        ).join("\n");
+        alert(`✅ Backfill готов: ${data.pairs_processed} пар, всего вставлено ${data.total_inserted} сигналов, settled ${data.total_settled}.\n\n${lines}`);
+        loadHourly();
+      }
+    } catch (e) {
+      alert("❌ Ошибка: " + (e.message || e));
+    } finally {
+      backfillBtn.disabled = false;
+      backfillBtn.textContent = orig;
+    }
+  });
+
   // ─── Export CSV ───
   const exportBtn = document.getElementById("btn-hourly-export");
   if (exportBtn) exportBtn.addEventListener("click", () => {

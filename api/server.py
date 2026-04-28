@@ -865,30 +865,166 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
         except Exception:
             pass
         mode = cfg.get("mode")
-        rows = journal.hourly_stats(since, mode=mode, tz_offset_sec=tz_offset_sec)
+        # Pull current expiry config so we can include virtual stats correctly
+        tf_h = int((cfg.get("filter") or {}).get("tf") or 60)
+        cur_exp_seconds = int((cfg.get("trading") or {}).get("expiry_seconds") or 120)
+        virt_expiry_bars = max(1, min(5, cur_exp_seconds // max(1, tf_h)))
+        virt_base_amount = float((cfg.get("trading") or {}).get("base_amount") or 1.0)
+        min_p_pct = int((cfg.get("filter") or {}).get("min_payout") or 92)
+        virt_avg_payout = max(0.5, min_p_pct / 100.0)
+        rows = journal.hourly_stats(
+            since, mode=mode, tz_offset_sec=tz_offset_sec,
+            virt_expiry_bars=virt_expiry_bars,
+            virt_base_amount=virt_base_amount,
+            virt_avg_payout=virt_avg_payout,
+        )
+        # Filter by REAL trades OR virtual signals (whichever has data),
+        # so user can apply filter even before real-trade history accumulates.
         whitelist: dict[str, list[int]] = {}
+        # Per-cell preferred expiry override: {symbol: {hour: expiry_seconds}}
+        # Computed from virtual_signals best_exp (if statistically meaningful).
+        # Bot will use this expiry instead of cfg.trading.expiry_seconds when
+        # opening trade on (symbol, current_hour) that has an entry here.
+        expiry_overrides: dict[str, dict[str, int]] = {}
         for r in rows:
-            if r["total"] >= min_trades and r["wr"] >= min_wr:
-                whitelist.setdefault(r["symbol"], []).append(int(r["hour"]))
-        # Persist as a settings override (survives reboot via journal volume)
+            sym = r["symbol"]; h = int(r["hour"])
+            real_qualifies = r["total"] >= min_trades and r["wr"] >= min_wr
+            v_total = r.get("v_total") or 0
+            v_wr = r.get("v_wr_now") or 0
+            virt_qualifies = v_total >= max(min_trades, 5) and v_wr >= min_wr
+            if not (real_qualifies or virt_qualifies):
+                continue
+            whitelist.setdefault(sym, []).append(h)
+            # Pick preferred expiry: from virtual best_exp if ≥5 signals.
+            # v_best_exp is in bars (1..5), convert to seconds via tf.
+            v_best_exp = r.get("v_best_exp")
+            if v_best_exp and v_total >= 5:
+                pref_seconds = int(v_best_exp) * tf_h
+                expiry_overrides.setdefault(sym, {})[str(h)] = pref_seconds
+        # Persist whitelist + expiry overrides as settings (survives reboot)
         try:
             overrides = journal.get("settings_overrides") or {}
             overrides["filter.hour_whitelist"] = whitelist
+            overrides["filter.hour_expiry_overrides"] = expiry_overrides
             journal.set("settings_overrides", overrides)
         except Exception:
-            logger.exception("failed to persist hour_whitelist")
+            logger.exception("failed to persist hour_whitelist/expiry_overrides")
         # Apply live to running cfg
         cfg.setdefault("filter", {})["hour_whitelist"] = whitelist
+        cfg["filter"]["hour_expiry_overrides"] = expiry_overrides
         count = sum(len(h) for h in whitelist.values())
+        exp_count = sum(len(v) for v in expiry_overrides.values())
         if sm and sm.notify:
             import asyncio as _aio
             _aio.create_task(sm.notify(
-                f"⭐ Применён фильтр по часам: {count} комбинаций пара×час "
-                f"(WR≥{int(min_wr)}%, сделок≥{min_trades}, период {time_range}). "
-                f"Бот будет входить только в эти окна."
+                f"⭐ Применён фильтр по часам: <b>{count}</b> комбинаций пара×час "
+                f"(WR≥{int(min_wr)}%, сделок/сигн≥{min_trades}, период {time_range}). "
+                f"Из них для <b>{exp_count}</b> ячеек подобрана оптимальная экспирация "
+                f"по виртуальной статистике — бот будет авто-применять её при входе."
             ))
-        return {"ok": True, "count": count, "whitelist": whitelist,
+        return {"ok": True, "count": count, "expiry_overrides_count": exp_count,
+                "whitelist": whitelist, "expiry_overrides": expiry_overrides,
                 "criteria": {"min_wr": min_wr, "min_trades": min_trades, "range": time_range}}
+
+    @app.post("/api/backfill_virtual_signals")
+    async def backfill_virtual_signals(request: Request):
+        """Прогоняет CONSENSUS по ВСЕМ cached свечам каждой tracked пары
+        (или указанных в payload symbols), генерирует исторические virtual
+        signals и сразу считает exp_wins для каждого. Заполняет БД задним
+        числом — статистика «По часам» сразу показывает реальную картину."""
+        _auth(request)
+        if not sm or not journal:
+            raise HTTPException(503, "state machine / journal not ready")
+        from strategy.consensus import generate_signals as _gen, DEFAULT_PARAMS
+        import json as _json
+        params = {**DEFAULT_PARAMS, **(cfg.get("indicator") or {})}
+        f_cfg = cfg.get("filter") or {}
+        if "stats_lookback_bars" in f_cfg:
+            params["statsLookbackBars"] = f_cfg["stats_lookback_bars"]
+        if "recent_lookback_bars" in f_cfg:
+            params["recentLookbackBars"] = f_cfg["recent_lookback_bars"]
+        tf = int(f_cfg.get("tf") or 60)
+        # Either user-passed symbols or current tracked
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        requested = payload.get("symbols") or list(getattr(sm, "_tracked", set()) or [])
+        if not requested:
+            return {"ok": False, "error": "no tracked pairs to backfill"}
+        cache = sm._candles or {}
+        report: dict = {}
+        total_inserted = total_settled = 0
+        for sym in requested:
+            candles = cache.get(sym) or []
+            if len(candles) < 200:
+                report[sym] = {"skipped": True, "reason": f"only {len(candles)} candles"}
+                continue
+            # Run CONSENSUS on the full history (drop incomplete tail bar same
+            # as live scan does)
+            closed = candles[:-1] if len(candles) > 1 else candles
+            try:
+                sigs, _ = _gen(closed, params)
+            except Exception as e:
+                report[sym] = {"skipped": True, "reason": f"strategy error: {e}"}
+                continue
+            inserted = settled = 0
+            for s in sigs:
+                try:
+                    entry_idx = int(s.i)
+                    if entry_idx < 0 or entry_idx >= len(closed):
+                        continue
+                    side = "call" if s.side == "buy" else "put"
+                    entry_bar = closed[entry_idx]
+                    signal_ts = int(entry_bar["time"]) + tf  # next bar open
+                    entry_close = float(entry_bar.get("close") or 0)
+                    if entry_close == 0:
+                        continue
+                    # Insert virtual signal (idempotent on UNIQUE constraint)
+                    journal.insert_virtual_signal(sym, side, signal_ts, entry_close)
+                    inserted += 1
+                    # Compute exp_wins from following 5 bars (in `closed` array)
+                    results = []
+                    for n in (1, 2, 3, 4, 5):
+                        ei = entry_idx + n
+                        if ei >= len(closed):
+                            results.append(None); continue
+                        exit_close = float(closed[ei].get("close") or 0)
+                        if exit_close == 0:
+                            results.append(None); continue
+                        if side == "call":
+                            results.append(1 if exit_close > entry_close else 0)
+                        else:
+                            results.append(1 if exit_close < entry_close else 0)
+                    if not all(r is None for r in results):
+                        # Look up the row's id by (sym, signal_ts) and settle
+                        cur = journal.conn.execute(
+                            "SELECT id, settled_at FROM virtual_signals "
+                            "WHERE symbol=? AND signal_ts=?",
+                            (sym, signal_ts),
+                        ).fetchone()
+                        if cur and cur[1] is None:
+                            journal.settle_virtual_signal(int(cur[0]),
+                                                          _json.dumps(results))
+                            settled += 1
+                except Exception:
+                    logger.exception("backfill: error processing signal")
+                    continue
+            report[sym] = {
+                "candles": len(candles),
+                "signals_found": len(sigs),
+                "inserted": inserted,
+                "settled": settled,
+            }
+            total_inserted += inserted
+            total_settled += settled
+        return {
+            "ok": True,
+            "pairs_processed": len(report),
+            "total_inserted": total_inserted,
+            "total_settled": total_settled,
+            "report": report,
+        }
 
     @app.post("/api/reset_hourly_stats")
     async def reset_hourly_stats(request: Request):
@@ -927,11 +1063,14 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
                 overrides = journal.get("settings_overrides") or {}
                 if "filter.hour_whitelist" in overrides:
                     overrides.pop("filter.hour_whitelist", None)
-                    journal.set("settings_overrides", overrides)
+                if "filter.hour_expiry_overrides" in overrides:
+                    overrides.pop("filter.hour_expiry_overrides", None)
+                journal.set("settings_overrides", overrides)
         except Exception:
             logger.exception("failed to clear hour_whitelist override")
         if "filter" in cfg:
             cfg["filter"].pop("hour_whitelist", None)
+            cfg["filter"].pop("hour_expiry_overrides", None)
         if sm and sm.notify:
             import asyncio as _aio
             _aio.create_task(sm.notify(

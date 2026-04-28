@@ -85,6 +85,23 @@ CREATE TABLE IF NOT EXISTS pair_stats_log (
 );
 CREATE INDEX IF NOT EXISTS idx_pair_stats_sym_ts ON pair_stats_log(symbol, ts);
 CREATE INDEX IF NOT EXISTS idx_pair_stats_ts     ON pair_stats_log(ts);
+
+-- Virtual signals: every CONSENSUS-fired signal on a tracked pair, even when
+-- bot was busy and didn't open a real trade. Settled with exp_wins after 5+
+-- bars accumulate. Lets user see "what the strategy would have done" — full
+-- coverage across all tracked pairs, not limited by LOCKED-state gaps.
+CREATE TABLE IF NOT EXISTS virtual_signals (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol       TEXT NOT NULL,
+    side         TEXT NOT NULL,            -- call | put
+    signal_ts    INTEGER NOT NULL,         -- entry minute (= bar close + tf)
+    entry_close  REAL NOT NULL,            -- close of entry bar
+    settled_at   INTEGER,                  -- unix ts when exp_wins computed
+    exp_wins     TEXT,                     -- JSON [w1..w5] or null
+    UNIQUE(symbol, signal_ts)
+);
+CREATE INDEX IF NOT EXISTS idx_virtsig_symts  ON virtual_signals(symbol, signal_ts);
+CREATE INDEX IF NOT EXISTS idx_virtsig_pending ON virtual_signals(settled_at, signal_ts);
 """
 
 
@@ -138,6 +155,45 @@ class Journal:
         try:
             self.conn.execute("UPDATE trades SET exp_wins=? WHERE trade_id=?",
                               (exp_wins_json, trade_id))
+            self.conn.commit()
+        except Exception:
+            pass
+
+    # ---------- virtual signals (CONSENSUS would-have-fired) ----------
+    def insert_virtual_signal(self, symbol: str, side: str, signal_ts: int,
+                              entry_close: float):
+        """Record a strategy-fired signal even if bot didn't open a real trade
+        (LOCKED state, MG cycle on another pair, etc). Idempotent on (symbol,
+        signal_ts) — duplicate INSERTs no-op via UNIQUE constraint."""
+        try:
+            self.conn.execute(
+                "INSERT OR IGNORE INTO virtual_signals "
+                "(symbol, side, signal_ts, entry_close) VALUES (?,?,?,?)",
+                (symbol, side, int(signal_ts), float(entry_close)),
+            )
+            self.conn.commit()
+        except Exception:
+            pass
+
+    def pending_virtual_signals(self, older_than_ts: int, limit: int = 200) -> list[dict]:
+        """Virtual signals waiting for exp_wins computation. older_than_ts —
+        only return signals whose entry was at least 5 minutes ago (need 5 bars
+        ahead to backtest expiries 1..5)."""
+        self.conn.row_factory = sqlite3.Row
+        cur = self.conn.execute(
+            "SELECT id, symbol, side, signal_ts, entry_close FROM virtual_signals "
+            "WHERE settled_at IS NULL AND signal_ts <= ? ORDER BY signal_ts LIMIT ?",
+            (int(older_than_ts), int(limit)),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+    def settle_virtual_signal(self, sig_id: int, exp_wins_json: str):
+        """Mark a virtual signal as settled with the computed exp_wins array."""
+        try:
+            self.conn.execute(
+                "UPDATE virtual_signals SET settled_at=?, exp_wins=? WHERE id=?",
+                (int(time.time()), exp_wins_json, int(sig_id)),
+            )
             self.conn.commit()
         except Exception:
             pass
@@ -265,6 +321,90 @@ class Journal:
                 o["avg_min_win_exp"] = round(avg_min, 2) if avg_min is not None else None
                 o["wins_per_exp"] = a["wins_per_exp"]
                 o["exp_data_trades"] = a["trades_with_data"]
+        except Exception:
+            pass
+
+        # ── Virtual signals aggregation per (sym, hour) — ВСЕ сигналы
+        # стратегии независимо от того, открывал ли бот реально сделку. Даёт
+        # полную картину покрытия фильтров и стратегии. Накапливается в
+        # фоновом таске _virtual_signals_loop в state_machine.
+        try:
+            import json as _json
+            cur3 = self.conn.execute(
+                """SELECT symbol,
+                          CAST(((signal_ts + ?) / 3600) AS INTEGER) % 24 AS hour,
+                          exp_wins
+                   FROM virtual_signals
+                   WHERE signal_ts >= ? AND exp_wins IS NOT NULL""",
+                (int(tz_offset_sec), int(since_ts)),
+            )
+            v_agg: dict = {}
+            for row in cur3.fetchall():
+                key = (row["symbol"], int(row["hour"]))
+                try:
+                    arr = _json.loads(row["exp_wins"] or "[]")
+                except Exception:
+                    continue
+                if not isinstance(arr, list) or len(arr) == 0:
+                    continue
+                bucket = v_agg.setdefault(key, {
+                    "total": 0,
+                    "wins_per_exp": [0]*5,
+                    "losses_per_exp": [0]*5,
+                    "min_wins": [],
+                })
+                bucket["total"] += 1
+                min_win = None
+                for i, w in enumerate(arr[:5]):
+                    if w == 1:
+                        bucket["wins_per_exp"][i] += 1
+                        if min_win is None: min_win = i + 1
+                    elif w == 0:
+                        bucket["losses_per_exp"][i] += 1
+                if min_win is not None:
+                    bucket["min_wins"].append(min_win)
+            # Merge into existing rows OR add new rows for (sym, hour) that have
+            # virtual data but no real trades yet.
+            existing_keys = {(o["symbol"], o["hour"]) for o in out}
+            for key, a in v_agg.items():
+                avg_min = (sum(a["min_wins"]) / len(a["min_wins"])) if a["min_wins"] else None
+                v_total = a["total"]
+                # Best expiry (highest WR with ≥3 samples) for virtual data
+                v_wr_per_exp = []
+                for i in range(5):
+                    w = a["wins_per_exp"][i]; l = a["losses_per_exp"][i]
+                    completed = w + l
+                    wr = (w / completed * 100.0) if completed else 0.0
+                    v_wr_per_exp.append(round(wr, 1) if completed >= 3 else None)
+                v_best_exp = None
+                v_best_wr = None
+                pairs_w_data = [(i+1, v_wr_per_exp[i]) for i in range(5) if v_wr_per_exp[i] is not None]
+                if pairs_w_data:
+                    v_best_exp, v_best_wr = max(pairs_w_data, key=lambda x: x[1])
+                v_payload = {
+                    "v_total": v_total,
+                    "v_avg_min_win_exp": round(avg_min, 2) if avg_min is not None else None,
+                    "v_wr_per_exp": v_wr_per_exp,
+                    "v_best_exp": v_best_exp,
+                    "v_best_wr": v_best_wr,
+                }
+                if key in existing_keys:
+                    for o in out:
+                        if (o["symbol"], o["hour"]) == key:
+                            o.update(v_payload)
+                            break
+                else:
+                    sym, hour = key
+                    out.append({
+                        "symbol": sym, "hour": hour,
+                        "total": 0, "wins": 0, "losses": 0, "draws": 0,
+                        "wr": 0.0, "profit": 0.0,
+                        "avg_win_payout": None, "min_win_payout": None,
+                        "max_win_payout": None,
+                        "avg_min_win_exp": None, "wins_per_exp": None,
+                        "exp_data_trades": 0,
+                        **v_payload,
+                    })
         except Exception:
             pass
         return out

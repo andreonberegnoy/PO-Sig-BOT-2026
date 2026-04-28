@@ -110,6 +110,87 @@ class StateMachine:
     def _persist(self):
         self.journal.set("runtime_state", self.state.to_dict())
 
+    # ---------- virtual signals collector (всегда пишет, даже когда LOCKED) ----------
+    async def _virtual_signals_loop(self):
+        """Independent loop that records every CONSENSUS-fired signal on each
+        tracked pair to journal.virtual_signals — regardless of whether the
+        bot itself entered a trade. Runs even in LOCKED / paused states.
+
+        Settles signals (computes exp_wins) once 5+ bars have elapsed since
+        the entry, using cached candles. Combined with /api/expiry_stats and
+        /api/hourly_stats virtual sources, this gives full strategy coverage
+        for analytics — not just the few trades the bot actually took.
+        """
+        import json as _json
+        last_eval: dict[str, int] = {}
+        await asyncio.sleep(15)   # let initial scan + tracked-set populate
+        while self._running:
+            try:
+                # Scan for new signals
+                tf = int(self.cfg["filter"].get("tf", 60))
+                now_ts = int(time.time())
+                MAX_STALENESS = 25
+                for sym in list(self._tracked):
+                    buf = self._candles.get(sym)
+                    if not buf or len(buf) < 200:
+                        continue
+                    last_closed_t = int(buf[-2]["time"])
+                    if last_closed_t <= last_eval.get(sym, 0):
+                        continue
+                    last_eval[sym] = last_closed_t
+                    age = now_ts - (last_closed_t + tf)
+                    if age > MAX_STALENESS:
+                        continue
+                    # _check_signal is pure (no side-effects on other state)
+                    action = self._check_signal(sym)
+                    if action:
+                        entry_ts = last_closed_t + tf
+                        entry_close = float(buf[-2].get("close") or 0)
+                        if entry_close > 0:
+                            self.journal.insert_virtual_signal(
+                                sym, action, entry_ts, entry_close,
+                            )
+                # Settle older virtual signals (those with 5+ bars after entry)
+                older_than = now_ts - 5 * tf - 10
+                pending = self.journal.pending_virtual_signals(older_than, limit=50)
+                for vs in pending:
+                    sym = vs["symbol"]
+                    candles = self._candles.get(sym) or []
+                    entry_ts = int(vs["signal_ts"])
+                    entry_close = float(vs["entry_close"])
+                    side = vs["side"]
+                    # Find entry candle by time
+                    entry_idx = None
+                    for i, c in enumerate(candles):
+                        if int(c["time"]) == entry_ts:
+                            entry_idx = i
+                            break
+                    if entry_idx is None:
+                        # Candle may have been pruned. Mark settled with empty data
+                        # so we stop reprocessing forever.
+                        self.journal.settle_virtual_signal(int(vs["id"]), _json.dumps([None]*5))
+                        continue
+                    results = []
+                    for n in (1, 2, 3, 4, 5):
+                        ei = entry_idx + n
+                        if ei >= len(candles):
+                            results.append(None)
+                            continue
+                        exit_close = float(candles[ei].get("close") or 0)
+                        if exit_close == 0 or entry_close == 0:
+                            results.append(None)
+                            continue
+                        if side == "call":
+                            results.append(1 if exit_close > entry_close else 0)
+                        elif side == "put":
+                            results.append(1 if exit_close < entry_close else 0)
+                        else:
+                            results.append(None)
+                    self.journal.settle_virtual_signal(int(vs["id"]), _json.dumps(results))
+            except Exception:
+                logger.exception("virtual_signals_loop iteration failed")
+            await asyncio.sleep(2)
+
     # ---------- exp_wins backtest ----------
     def _persist_exp_wins(self, symbol: str, action: str, open_ts: int, trade_id: str):
         """Compute & save which expiries (1..5 M1 bars) would have closed the

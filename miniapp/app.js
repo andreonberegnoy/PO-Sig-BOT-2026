@@ -573,7 +573,9 @@
           <th data-sort="losses">LOSS${arrow('losses')}</th>
           <th data-sort="wr">WR${arrow('wr')}</th>
           <th data-sort="avg_win_payout">Avg payout WIN${arrow('avg_win_payout')}</th>
-          <th data-sort="avg_min_win_exp" title="Среднее: какая минимальная экспирация (1-5 баров) закрыла бы каждую сделку в плюс. Накапливается по реальным сделкам.">Min ✓ exp${arrow('avg_min_win_exp')}</th>
+          <th data-sort="avg_min_win_exp" title="Среднее: какая минимальная экспирация (1-5 баров) закрыла бы каждую сделку в плюс. Накапливается по реальным сделкам.">Min ✓ exp (real)${arrow('avg_min_win_exp')}</th>
+          <th data-sort="v_avg_min_win_exp" title="Среднее по ВСЕМ сигналам стратегии (включая пропущенные из-за LOCKED/MG). Большая накопительная база.">Min ✓ exp (virt)${arrow('v_avg_min_win_exp')}</th>
+          <th data-sort="v_total" title="Сколько сигналов стратегия выдала на этот час по этой паре за весь период">Сигналов всего${arrow('v_total')}</th>
           <th data-sort="profit">Profit${arrow('profit')}</th>
         </tr></thead>`;
       const pairsBody = sortedBuckets.map(p => {
@@ -592,6 +594,12 @@
           (p.exp_data_trades ? ` <span class="hint" style="font-size:10px;">(n=${p.exp_data_trades})</span>` : '');
         const expCls = (p.avg_min_win_exp != null && p.avg_min_win_exp <= 2.5) ? 'cell-good' :
                        (p.avg_min_win_exp != null && p.avg_min_win_exp >= 4) ? 'cell-bad' : '';
+        const vExpTxt = (p.v_avg_min_win_exp == null) ? '—' :
+          `<b>${p.v_avg_min_win_exp.toFixed(1)}</b>` +
+          (p.v_best_exp ? ` <span class="hint" style="font-size:10px;">(best=${p.v_best_exp})</span>` : '');
+        const vExpCls = (p.v_avg_min_win_exp != null && p.v_avg_min_win_exp <= 2.5) ? 'cell-good' :
+                        (p.v_avg_min_win_exp != null && p.v_avg_min_win_exp >= 4) ? 'cell-bad' : '';
+        const vTotalTxt = p.v_total == null ? '—' : String(p.v_total);
         return `<tr>
           <td>${p.symbol}${star}</td>
           <td>${String(p.hour).padStart(2,'0')}:00</td>
@@ -601,10 +609,12 @@
           <td class="${wrCls}">${p.wr.toFixed(1)}%</td>
           <td class="${payCls}">${payTxt}</td>
           <td class="${expCls}">${expTxt}</td>
+          <td class="${vExpCls}">${vExpTxt}</td>
+          <td>${vTotalTxt}</td>
           <td class="${profCls}">$${p.profit.toFixed(2)}</td>
         </tr>`;
       }).join('');
-      pairsEl.innerHTML = pairsHeaders + `<tbody>${pairsBody || '<tr><td colspan="9">Нет данных</td></tr>'}</tbody>`;
+      pairsEl.innerHTML = pairsHeaders + `<tbody>${pairsBody || '<tr><td colspan="11">Нет данных</td></tr>'}</tbody>`;
 
       // Hook column-header sort
       pairsEl.querySelectorAll('th[data-sort]').forEach(th => {
@@ -770,7 +780,7 @@
   let _lastExpiryData = null;
   let _expiryScope = "tracked";
   let _expirySource = "backtest";
-  let _expiryWindow = 0;       // 0 = все сделки
+  let _expiryWindow = 30;       // дефолт: последние 30 сигналов (актуальная картина)
 
   // Scope selector buttons
   document.querySelectorAll(".exp-scope-btn").forEach(btn => {
@@ -780,14 +790,15 @@
       _expiryScope = btn.dataset.scope || "tracked";
     });
   });
-  // Source selector — toggles "Окно сделок" row visibility
+  // Source selector — toggles "Окно сделок" row visibility (для trades/virtual)
   document.querySelectorAll(".exp-source-btn").forEach(btn => {
     btn.addEventListener("click", () => {
       document.querySelectorAll(".exp-source-btn").forEach(b => b.classList.remove("active"));
       btn.classList.add("active");
       _expirySource = btn.dataset.source || "backtest";
       const winRow = document.getElementById("exp-window-row");
-      if (winRow) winRow.style.display = (_expirySource === "trades") ? "" : "none";
+      const showWin = (_expirySource === "trades" || _expirySource === "virtual");
+      if (winRow) winRow.style.display = showWin ? "" : "none";
     });
   });
   // Window selector
@@ -807,11 +818,15 @@
     if (!tbl) return;
 
     info.className = "action-msg info";
-    info.textContent = _expirySource === "trades"
-      ? `⏳ Считаю по реальным сделкам (окно: ${_expiryWindow || "все"})...`
-      : (_expiryScope === "all"
-          ? "⏳ Анализирую ВСЕ OTC пары (это может занять 10-60 сек)..."
-          : "⏳ Анализирую tracked пары...");
+    if (_expirySource === "trades") {
+      info.textContent = `⏳ Считаю по реальным сделкам (окно: ${_expiryWindow || "все"})...`;
+    } else if (_expirySource === "virtual") {
+      info.textContent = `⏳ Считаю по ВСЕМ сигналам стратегии (окно: ${_expiryWindow || "все"})...`;
+    } else {
+      info.textContent = _expiryScope === "all"
+        ? "⏳ Анализирую ВСЕ OTC пары (это может занять 10-60 сек)..."
+        : "⏳ Анализирую tracked пары...";
+    }
     tbl.innerHTML = "";
     if (loadBtn) loadBtn.disabled = true;
 
@@ -820,7 +835,7 @@
         scope: _expiryScope,
         source: _expirySource,
       });
-      if (_expirySource === "trades") {
+      if (_expirySource === "trades" || _expirySource === "virtual") {
         params.set("trades_window", String(_expiryWindow));
       }
       const r = await api(`/api/expiry_stats?${params.toString()}`);
@@ -841,7 +856,7 @@
       if (exportBtn) exportBtn.style.display = "";
 
       const compact = document.getElementById("exp-compact")?.checked || false;
-      const isTrades = (r.source === "trades");
+      const isTrades = (r.source === "trades" || r.source === "virtual");
 
       // Compact mode: только символ + рекомендованная экспирация + WR + n
       if (compact) {

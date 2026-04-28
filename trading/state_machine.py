@@ -418,38 +418,37 @@ class StateMachine:
         logger.info("FORCE RESET CYCLE: was %s MG%d → FREE", old_pair, old_step)
 
     async def force_switch_pair(self) -> str | None:
-        """Принудительная смена пары внутри текущего цикла.
-        МГ-шаг сохраняется. Возвращает символ новой пары или None если нет вариантов."""
-        exclude = {self.state.current_pair, *(self.state.switched_pairs or [])}
-        pick = self._pick_switch_pair(exclude)
-        if not pick:
-            # Попробуем без исключений кроме текущей
-            pick = self._pick_switch_pair({self.state.current_pair})
-        if not pick:
-            logger.warning("force_switch_pair: no eligible pair found")
+        """Принудительная смена пары — переход в SEARCH режим.
+        Бот не выбирает конкретную пару, а **сканирует все tracked-пары** и
+        войдёт на ту, где CONSENSUS первой даст сигнал. МГ-шаг сохраняется.
+        Старая пара уходит в switched_pairs (исключение от повторного входа
+        в этом цикле).
+
+        Возвращает 'SEARCH' если режим активирован, или None если нет
+        активного цикла / нет tracked-пар."""
+        if self.state.mg_step == 0:
+            logger.warning("force_switch_pair: no active MG cycle to switch")
+            return None
+        if not self._tracked:
+            logger.warning("force_switch_pair: no tracked pairs to search")
             return None
         old_pair = self.state.current_pair
-        self.state.switched_pairs.append(old_pair)
+        if old_pair and old_pair not in (self.state.switched_pairs or []):
+            self.state.switched_pairs.append(old_pair)
         self.state.cycle_switches += 1
-        self.state.current_pair = pick.symbol
+        self.state.current_pair = None   # ← SEARCH режим
         self.state.trades_on_pair = 0
         self._persist()
-        # Загрузить историю если пара не в трекере
-        if pick.symbol not in self._tracked:
-            try:
-                await self._load_history(pick.symbol)
-                self._tracked.add(pick.symbol)
-            except Exception:
-                logger.exception("force_switch_pair: _load_history %s failed", pick.symbol)
-            if hasattr(self.feed, "subscribe"):
-                try:
-                    await self.feed.subscribe(pick.symbol, int(self.cfg["filter"]["tf"]))
-                except Exception:
-                    logger.exception("force_switch_pair: subscribe %s failed", pick.symbol)
-        self._last_closed_bar_time.pop(pick.symbol, None)
-        self._force_rescan = True
+        # Сбросить last_closed_bar_time для всех tracked, чтобы _in_cycle_search_step
+        # видел все пары как "свежие" и не пропустил недавно закрытые бары
+        for sym in list(self._tracked):
+            self._last_closed_bar_time.pop(sym, None)
         self._tick_event.set()
-        logger.info("FORCE SWITCH PAIR: %s → %s  MG%d saved", old_pair, pick.symbol, self.state.mg_step)
+        logger.info(
+            "FORCE SWITCH PAIR: %s → SEARCH (MG%d saved, sym blacklisted from cycle)",
+            old_pair, self.state.mg_step,
+        )
+        return "SEARCH"
         return pick.symbol
 
     def _amount_for_step(self, step: int) -> float:

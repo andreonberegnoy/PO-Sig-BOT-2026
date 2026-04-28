@@ -93,13 +93,15 @@
     loadStatus();
   };
   document.getElementById("btn-switch-pair").onclick = async () => {
-    showActionMsg("🔀 Ищу лучшую пару…", "info");
+    showActionMsg("🔀 Перехожу в SEARCH режим…", "info");
     try {
       const r = await api("/api/control/switch_pair", { method: "POST" });
-      if (r && r.ok && r.new) {
+      if (r && r.ok && (r.new === "SEARCH" || r.mode === "SEARCH")) {
+        showActionMsg(`🔍 SEARCH режим: ${r.old || "пара"} исключена из цикла. Войду на первый CONSENSUS-сигнал на любой tracked-паре.`, "ok");
+      } else if (r && r.ok && r.new) {
         showActionMsg(`🔀 Сменена пара: ${r.old} → ${r.new}`, "ok");
       } else {
-        showActionMsg("⚠️ Нет доступных пар для смены. Жду сигнал на текущей.", "warn");
+        showActionMsg("⚠️ Нет активного цикла или tracked-пар.", "warn");
       }
     } catch (e) {
       showActionMsg(`❌ ${e.message || e}`, "err");

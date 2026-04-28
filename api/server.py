@@ -1113,19 +1113,21 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
             if not (sm.state.mg_step > 0 and sm.state.current_pair):
                 raise HTTPException(400, "no active cycle to switch")
             old_pair = sm.state.current_pair
-            new_pair = await sm.force_switch_pair()
-            if not new_pair:
+            result = await sm.force_switch_pair()
+            if not result:
                 if sm.notify:
                     _aio.create_task(sm.notify(
-                        f"⚠️ Mini App: попытка смены пары {old_pair} — нет доступных альтернатив."
+                        f"⚠️ Mini App: попытка смены пары {old_pair} — нет tracked-пар или цикла."
                     ))
                 return {"ok": False, "old": old_pair, "new": None,
-                        "reason": "no eligible pair"}
+                        "reason": "no tracked pairs or cycle"}
             if sm.notify:
                 _aio.create_task(sm.notify(
-                    f"🔀 Через Mini App вручную сменена пара: {old_pair} → {new_pair}"
+                    f"🔍 Через Mini App: пара {old_pair} исключена из цикла, "
+                    f"перехожу в SEARCH-режим. Войду на первый CONSENSUS-сигнал "
+                    f"среди tracked-пар (МГ-шаг сохранён)."
                 ))
-            return {"ok": True, "old": old_pair, "new": new_pair}
+            return {"ok": True, "old": old_pair, "new": result, "mode": result}
         raise HTTPException(400, f"unknown action: {action}")
 
     # ─── miniapp static ───

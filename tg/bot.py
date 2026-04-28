@@ -194,12 +194,12 @@ class TelegramBot:
                     return await cb.answer("SM не запущен", show_alert=True)
                 if not (self.sm.state.mg_step > 0 and self.sm.state.current_pair):
                     return await cb.answer("Нет активного цикла для смены пары", show_alert=True)
-                await cb.answer("🔀 Ищу лучшую пару…")
+                await cb.answer("🔀 Перехожу в SEARCH режим…")
                 old_pair = self.sm.state.current_pair
-                new_pair = await self.sm.force_switch_pair()
-                if new_pair:
+                result = await self.sm.force_switch_pair()
+                if result == "SEARCH":
                     await cb.message.edit_text(
-                        _build_status_text() + f"\n\n🔀 Вручную сменена пара: {old_pair} → {new_pair}",
+                        _build_status_text() + f"\n\n🔍 Перешёл в SEARCH режим: пара {old_pair} исключена из цикла. Жду CONSENSUS-сигнал на любой tracked-паре — войду на первый.",
                         reply_markup=_build_status_keyboard()
                     )
                 else:

@@ -199,7 +199,10 @@ class Journal:
             pass
 
     def hourly_stats(self, since_ts: int, mode: Optional[str] = None,
-                     tz_offset_sec: int = 0) -> list[dict]:
+                     tz_offset_sec: int = 0,
+                     virt_expiry_bars: int = 2,
+                     virt_base_amount: float = 1.0,
+                     virt_avg_payout: float = 0.85) -> list[dict]:
         """Aggregate trades by (symbol, local-hour-of-day) since `since_ts`.
 
         Hour-of-day is computed in the user's local timezone via tz_offset_sec
@@ -366,6 +369,8 @@ class Journal:
             # Merge into existing rows OR add new rows for (sym, hour) that have
             # virtual data but no real trades yet.
             existing_keys = {(o["symbol"], o["hour"]) for o in out}
+            # Clamp expiry index into [0..4] for indexing wins_per_exp arrays
+            exp_idx = max(0, min(4, int(virt_expiry_bars) - 1))
             for key, a in v_agg.items():
                 avg_min = (sum(a["min_wins"]) / len(a["min_wins"])) if a["min_wins"] else None
                 v_total = a["total"]
@@ -381,12 +386,30 @@ class Journal:
                 pairs_w_data = [(i+1, v_wr_per_exp[i]) for i in range(5) if v_wr_per_exp[i] is not None]
                 if pairs_w_data:
                     v_best_exp, v_best_wr = max(pairs_w_data, key=lambda x: x[1])
+                # Trade-equivalent metrics at CURRENT configured expiry
+                # (как если бы бот вошёл во ВСЕ сигналы на cfg.trading.expiry_seconds).
+                v_wins_now = a["wins_per_exp"][exp_idx]
+                v_losses_now = a["losses_per_exp"][exp_idx]
+                v_completed = v_wins_now + v_losses_now
+                v_wr_now = (v_wins_now / v_completed * 100.0) if v_completed else 0.0
+                # Симулированный профит: WIN = +amount*payout, LOSS = -amount
+                v_avg_win_amount = round(virt_base_amount * virt_avg_payout, 2)
+                v_profit = round(
+                    v_wins_now * v_avg_win_amount - v_losses_now * virt_base_amount, 2
+                )
                 v_payload = {
                     "v_total": v_total,
                     "v_avg_min_win_exp": round(avg_min, 2) if avg_min is not None else None,
                     "v_wr_per_exp": v_wr_per_exp,
                     "v_best_exp": v_best_exp,
                     "v_best_wr": v_best_wr,
+                    # Полные торговые метрики на текущей экспирации
+                    "v_wins_now": v_wins_now,
+                    "v_losses_now": v_losses_now,
+                    "v_wr_now": round(v_wr_now, 1),
+                    "v_avg_win_amount": v_avg_win_amount,
+                    "v_profit": v_profit,
+                    "v_expiry_bars": int(virt_expiry_bars),
                 }
                 if key in existing_keys:
                     for o in out:
@@ -403,6 +426,7 @@ class Journal:
                         "max_win_payout": None,
                         "avg_min_win_exp": None, "wins_per_exp": None,
                         "exp_data_trades": 0,
+                        "_virtual_only": True,
                         **v_payload,
                     })
         except Exception:

@@ -318,16 +318,31 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
         except Exception:
             pass
         mode = cfg.get("mode")
-        rows = journal.hourly_stats(since, mode=mode, tz_offset_sec=tz_offset_sec)
+        # Текущая экспирация и базовая сумма — для расчёта виртуальных
+        # «как-бы-сделок» на сигналах что бот не успел взять.
+        tf_h = int((cfg.get("filter") or {}).get("tf") or 60)
+        cur_exp_seconds = int((cfg.get("trading") or {}).get("expiry_seconds") or 120)
+        virt_expiry_bars = max(1, min(5, cur_exp_seconds // max(1, tf_h)))
+        virt_base_amount = float((cfg.get("trading") or {}).get("base_amount") or 1.0)
+        min_p_pct = int((cfg.get("filter") or {}).get("min_payout") or 92)
+        virt_avg_payout = max(0.5, min_p_pct / 100.0)
+        rows = journal.hourly_stats(
+            since, mode=mode, tz_offset_sec=tz_offset_sec,
+            virt_expiry_bars=virt_expiry_bars,
+            virt_base_amount=virt_base_amount,
+            virt_avg_payout=virt_avg_payout,
+        )
         # Build summary per hour (sum across all pairs).
         # For avg_win_payout we accumulate weighted (sum_payouts / total_wins)
         # rather than averaging averages — that would skew toward sparse pairs.
         from collections import defaultdict
         summary_acc: dict = defaultdict(lambda: {
             "total": 0, "wins": 0, "losses": 0, "draws": 0, "profit": 0.0,
-            "sum_win_payout": 0.0,   # accumulator: sum of (avg * wins) per pair
-            "min_win_payout": None,
-            "max_win_payout": None,
+            "sum_win_payout": 0.0,
+            "min_win_payout": None, "max_win_payout": None,
+            # Виртуальные метрики per-hour (накопительные)
+            "v_total": 0, "v_wins_now": 0, "v_losses_now": 0, "v_profit": 0.0,
+            "v_min_wins_sum": 0.0, "v_min_wins_count": 0,
         })
         for r in rows:
             h = r["hour"]
@@ -345,34 +360,49 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
             if r.get("max_win_payout") is not None:
                 s["max_win_payout"] = (r["max_win_payout"] if s["max_win_payout"] is None
                                        else max(s["max_win_payout"], r["max_win_payout"]))
+            # Виртуальные сигналы
+            if r.get("v_total"):
+                s["v_total"] += r["v_total"]
+                s["v_wins_now"] += r.get("v_wins_now", 0) or 0
+                s["v_losses_now"] += r.get("v_losses_now", 0) or 0
+                s["v_profit"] += r.get("v_profit", 0) or 0
+                if r.get("v_avg_min_win_exp") is not None:
+                    s["v_min_wins_sum"] += r["v_avg_min_win_exp"] * r["v_total"]
+                    s["v_min_wins_count"] += r["v_total"]
         summary_by_hour = []
-        # Reach the builtin range via __builtins__ since the arg name shadows it
         builtin_range = __builtins__["range"] if isinstance(__builtins__, dict) else __builtins__.range
-        for h in builtin_range(24):  # ensure all 24 buckets even if zero trades
-            s = summary_acc.get(h) or {"total": 0, "wins": 0, "losses": 0,
-                                        "draws": 0, "profit": 0.0,
-                                        "sum_win_payout": 0.0,
-                                        "min_win_payout": None,
-                                        "max_win_payout": None}
+        for h in builtin_range(24):
+            s = summary_acc.get(h) or {
+                "total": 0, "wins": 0, "losses": 0, "draws": 0, "profit": 0.0,
+                "sum_win_payout": 0.0, "min_win_payout": None, "max_win_payout": None,
+                "v_total": 0, "v_wins_now": 0, "v_losses_now": 0, "v_profit": 0.0,
+                "v_min_wins_sum": 0.0, "v_min_wins_count": 0,
+            }
             completed = s["wins"] + s["losses"]
             wr = (s["wins"] / completed * 100.0) if completed else 0.0
             avg_win_p = (s["sum_win_payout"] / s["wins"]) if s["wins"] > 0 else None
+            v_completed = s["v_wins_now"] + s["v_losses_now"]
+            v_wr_now = (s["v_wins_now"] / v_completed * 100.0) if v_completed else 0.0
+            v_avg_min_exp = (s["v_min_wins_sum"] / s["v_min_wins_count"]) if s["v_min_wins_count"] else None
             summary_by_hour.append({
                 "hour": h,
-                "total": s["total"],
-                "wins": s["wins"],
-                "losses": s["losses"],
-                "draws": s["draws"],
-                "wr": round(wr, 1),
-                "profit": round(s["profit"], 2),
+                "total": s["total"], "wins": s["wins"], "losses": s["losses"],
+                "draws": s["draws"], "wr": round(wr, 1), "profit": round(s["profit"], 2),
                 "avg_win_payout": round(avg_win_p, 1) if avg_win_p is not None else None,
-                "min_win_payout": s["min_win_payout"],
-                "max_win_payout": s["max_win_payout"],
+                "min_win_payout": s["min_win_payout"], "max_win_payout": s["max_win_payout"],
+                # Виртуальная сводка по часу
+                "v_total": s["v_total"],
+                "v_wins_now": s["v_wins_now"], "v_losses_now": s["v_losses_now"],
+                "v_wr_now": round(v_wr_now, 1),
+                "v_profit": round(s["v_profit"], 2),
+                "v_avg_min_win_exp": round(v_avg_min_exp, 2) if v_avg_min_exp is not None else None,
             })
         return {
             "range": time_range,
             "tz": tz_name,
             "tz_offset_sec": tz_offset_sec,
+            "virt_expiry_bars": virt_expiry_bars,
+            "virt_base_amount": virt_base_amount,
             "buckets": rows,
             "summary_by_hour": summary_by_hour,
         }

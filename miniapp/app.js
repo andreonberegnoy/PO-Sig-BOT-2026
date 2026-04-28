@@ -526,13 +526,22 @@
       const buckets = r.buckets || [];
 
       // ─── Summary table (24 rows, one per hour) ─────────────────────────
+      // Real columns + Virtual columns at currently configured expiry
+      const expBars = r.virt_expiry_bars || 2;
       const sumHeaders = `
         <thead><tr>
-          <th>Час</th><th>Сделок</th><th>WIN</th><th>LOSS</th>
-          <th>WR</th><th>Avg payout WIN</th><th>Profit</th>
+          <th>Час</th>
+          <th>Real сделок</th><th>WIN</th><th>LOSS</th>
+          <th>WR</th><th>Avg payout</th><th>Profit</th>
+          <th title="Виртуально на текущей экспирации (${expBars} бара): сколько сигналов стратегия выдала за период по этому часу">Virt сигн.</th>
+          <th title="Если бы бот вошёл во ВСЕ сигналы на ${expBars}-барной экспирации">Virt WIN</th>
+          <th>Virt LOSS</th>
+          <th>Virt WR</th>
+          <th title="Симулированный профит = WIN×base×payout - LOSS×base">Virt Profit</th>
+          <th title="Средняя минимальная экспирация (1-5 баров) которая бы закрыла сигналы в +">Best exp</th>
         </tr></thead>`;
       const sumBody = summary.map(s => {
-        if (s.total === 0) return '';   // skip empty hours
+        if (s.total === 0 && (s.v_total || 0) === 0) return '';
         const wrCls = s.wr >= 70 ? 'cell-good' : s.wr >= 55 ? '' : 'cell-bad';
         const profCls = s.profit >= 0 ? 'cell-good' : 'cell-bad';
         const payCls = s.avg_win_payout == null ? '' :
@@ -542,6 +551,13 @@
           `${s.avg_win_payout.toFixed(1)}%` +
           (s.min_win_payout != null && s.min_win_payout !== s.max_win_payout
             ? ` <span class="hint" style="font-size:10px;">(${s.min_win_payout}-${s.max_win_payout})</span>` : '');
+        const vWrCls = (s.v_wins_now + s.v_losses_now) === 0 ? '' :
+          s.v_wr_now >= 70 ? 'cell-good' : s.v_wr_now >= 55 ? '' : 'cell-bad';
+        const vProfCls = s.v_profit > 0 ? 'cell-good' : s.v_profit < 0 ? 'cell-bad' : '';
+        const vBestExpTxt = s.v_avg_min_win_exp == null ? '—' :
+          `${s.v_avg_min_win_exp.toFixed(1)} мин`;
+        const vBestCls = s.v_avg_min_win_exp != null && s.v_avg_min_win_exp <= 2.5 ? 'cell-good' :
+                        s.v_avg_min_win_exp != null && s.v_avg_min_win_exp >= 4 ? 'cell-bad' : '';
         return `<tr>
           <td><b>${String(s.hour).padStart(2,'0')}:00</b></td>
           <td>${s.total}</td>
@@ -550,9 +566,15 @@
           <td class="${wrCls}">${s.wr.toFixed(1)}%</td>
           <td class="${payCls}">${payTxt}</td>
           <td class="${profCls}">$${s.profit.toFixed(2)}</td>
+          <td>${s.v_total || 0}</td>
+          <td class="cell-good">${s.v_wins_now || 0}</td>
+          <td class="cell-bad">${s.v_losses_now || 0}</td>
+          <td class="${vWrCls}">${(s.v_wr_now || 0).toFixed(1)}%</td>
+          <td class="${vProfCls}">$${(s.v_profit || 0).toFixed(2)}</td>
+          <td class="${vBestCls}">${vBestExpTxt}</td>
         </tr>`;
       }).join('');
-      sumEl.innerHTML = sumHeaders + `<tbody>${sumBody || '<tr><td colspan="7">Нет сделок за выбранный период</td></tr>'}</tbody>`;
+      sumEl.innerHTML = sumHeaders + `<tbody>${sumBody || '<tr><td colspan="13">Нет сделок за выбранный период</td></tr>'}</tbody>`;
 
       // ─── Pairs × hours table ──────────────────────────────────────────
       // Sort by current sortKey
@@ -573,10 +595,14 @@
           <th data-sort="losses">LOSS${arrow('losses')}</th>
           <th data-sort="wr">WR${arrow('wr')}</th>
           <th data-sort="avg_win_payout">Avg payout WIN${arrow('avg_win_payout')}</th>
-          <th data-sort="avg_min_win_exp" title="Среднее: какая минимальная экспирация (1-5 баров) закрыла бы каждую сделку в плюс. Накапливается по реальным сделкам.">Min ✓ exp (real)${arrow('avg_min_win_exp')}</th>
-          <th data-sort="v_avg_min_win_exp" title="Среднее по ВСЕМ сигналам стратегии (включая пропущенные из-за LOCKED/MG). Большая накопительная база.">Min ✓ exp (virt)${arrow('v_avg_min_win_exp')}</th>
-          <th data-sort="v_total" title="Сколько сигналов стратегия выдала на этот час по этой паре за весь период">Сигналов всего${arrow('v_total')}</th>
-          <th data-sort="profit">Profit${arrow('profit')}</th>
+          <th data-sort="avg_min_win_exp" title="Real: средняя минимальная экспирация которая бы закрыла реальные сделки в +">Min ✓ exp (real)${arrow('avg_min_win_exp')}</th>
+          <th data-sort="v_total" title="Сколько сигналов стратегия выдала на этот час за весь период">Virt сигн.${arrow('v_total')}</th>
+          <th data-sort="v_wins_now" title="Если бы бот вошёл на текущей экспирации во ВСЕ сигналы">Virt WIN${arrow('v_wins_now')}</th>
+          <th data-sort="v_losses_now">Virt LOSS${arrow('v_losses_now')}</th>
+          <th data-sort="v_wr_now">Virt WR${arrow('v_wr_now')}</th>
+          <th data-sort="v_profit" title="Симулированный профит на текущей экспирации">Virt Profit${arrow('v_profit')}</th>
+          <th data-sort="v_avg_min_win_exp" title="Best: предпочтительная экспирация для этого часа (1-5 мин). Применяй как авто-настройку.">Best exp${arrow('v_avg_min_win_exp')}</th>
+          <th data-sort="profit">Real Profit${arrow('profit')}</th>
         </tr></thead>`;
       const pairsBody = sortedBuckets.map(p => {
         const star = (p.wr >= 70 && p.total >= 5) ? ' ⭐' : '';
@@ -594,12 +620,17 @@
           (p.exp_data_trades ? ` <span class="hint" style="font-size:10px;">(n=${p.exp_data_trades})</span>` : '');
         const expCls = (p.avg_min_win_exp != null && p.avg_min_win_exp <= 2.5) ? 'cell-good' :
                        (p.avg_min_win_exp != null && p.avg_min_win_exp >= 4) ? 'cell-bad' : '';
-        const vExpTxt = (p.v_avg_min_win_exp == null) ? '—' :
-          `<b>${p.v_avg_min_win_exp.toFixed(1)}</b>` +
-          (p.v_best_exp ? ` <span class="hint" style="font-size:10px;">(best=${p.v_best_exp})</span>` : '');
-        const vExpCls = (p.v_avg_min_win_exp != null && p.v_avg_min_win_exp <= 2.5) ? 'cell-good' :
-                        (p.v_avg_min_win_exp != null && p.v_avg_min_win_exp >= 4) ? 'cell-bad' : '';
         const vTotalTxt = p.v_total == null ? '—' : String(p.v_total);
+        const vWrCompleted = (p.v_wins_now || 0) + (p.v_losses_now || 0);
+        const vWrCls = vWrCompleted === 0 ? '' :
+          p.v_wr_now >= 70 ? 'cell-good' : p.v_wr_now >= 55 ? '' : 'cell-bad';
+        const vProfCls = (p.v_profit || 0) > 0 ? 'cell-good' :
+          (p.v_profit || 0) < 0 ? 'cell-bad' : '';
+        const vBestExpTxt = p.v_avg_min_win_exp == null ? '—' :
+          `<b>${p.v_avg_min_win_exp.toFixed(1)} мин</b>` +
+          (p.v_best_exp ? ` <span class="hint" style="font-size:10px;">(${p.v_best_exp})</span>` : '');
+        const vBestCls = p.v_avg_min_win_exp != null && p.v_avg_min_win_exp <= 2.5 ? 'cell-good' :
+                         p.v_avg_min_win_exp != null && p.v_avg_min_win_exp >= 4 ? 'cell-bad' : '';
         return `<tr>
           <td>${p.symbol}${star}</td>
           <td>${String(p.hour).padStart(2,'0')}:00</td>
@@ -609,12 +640,16 @@
           <td class="${wrCls}">${p.wr.toFixed(1)}%</td>
           <td class="${payCls}">${payTxt}</td>
           <td class="${expCls}">${expTxt}</td>
-          <td class="${vExpCls}">${vExpTxt}</td>
           <td>${vTotalTxt}</td>
+          <td class="cell-good">${p.v_wins_now || 0}</td>
+          <td class="cell-bad">${p.v_losses_now || 0}</td>
+          <td class="${vWrCls}">${(p.v_wr_now || 0).toFixed(1)}%</td>
+          <td class="${vProfCls}">$${(p.v_profit || 0).toFixed(2)}</td>
+          <td class="${vBestCls}">${vBestExpTxt}</td>
           <td class="${profCls}">$${p.profit.toFixed(2)}</td>
         </tr>`;
       }).join('');
-      pairsEl.innerHTML = pairsHeaders + `<tbody>${pairsBody || '<tr><td colspan="11">Нет данных</td></tr>'}</tbody>`;
+      pairsEl.innerHTML = pairsHeaders + `<tbody>${pairsBody || '<tr><td colspan="15">Нет данных</td></tr>'}</tbody>`;
 
       // Hook column-header sort
       pairsEl.querySelectorAll('th[data-sort]').forEach(th => {

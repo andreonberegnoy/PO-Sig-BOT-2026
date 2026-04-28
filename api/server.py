@@ -526,9 +526,31 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
         overall_best = max(valid_agg, key=lambda x: x[1]["avg_wr"])[0] if valid_agg else None
 
         scope_label = "tracked" if scope == "tracked" else "ВСЕ OTC"
+        # Period summary — сколько свечей в окне у каждой пары, и сколько это
+        # в часах истории. Помогает понять «за какой период» сделан анализ.
+        period_note = ""
+        if results:
+            cs = [r["candles_used"] for r in results]
+            cmin, cmax = min(cs), max(cs)
+            cavg = sum(cs) // len(cs)
+            tf_min = max(1, tf // 60)
+            hrs_avg = cavg * tf_min / 60.0
+            hrs_max = cmax * tf_min / 60.0
+            if cmin == cmax:
+                period_note = (
+                    f"Период истории: {cmin} свечей по {tf_min}м "
+                    f"(~{hrs_avg:.1f} ч / {hrs_avg/24:.1f} дн на пару). "
+                )
+            else:
+                period_note = (
+                    f"Период истории: {cmin}-{cmax} свечей по {tf_min}м "
+                    f"(в среднем {cavg} ≈ {hrs_avg:.1f} ч / {hrs_avg/24:.1f} дн; "
+                    f"макс {hrs_max:.1f} ч на пару). "
+                )
         note = (
             f"Анализ {len(results)} пар ({scope_label}). "
             f"Пропущено (мало свечей): {skipped}. "
+            + period_note +
             f"Применена CONSENSUS-стратегия из config, меняется только expiryBars (1..5)."
         )
         if rest_fetched:

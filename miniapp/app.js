@@ -769,6 +769,8 @@
   // ─── EXPIRY analysis ───
   let _lastExpiryData = null;
   let _expiryScope = "tracked";
+  let _expirySource = "backtest";
+  let _expiryWindow = 0;       // 0 = все сделки
 
   // Scope selector buttons
   document.querySelectorAll(".exp-scope-btn").forEach(btn => {
@@ -776,6 +778,24 @@
       document.querySelectorAll(".exp-scope-btn").forEach(b => b.classList.remove("active"));
       btn.classList.add("active");
       _expiryScope = btn.dataset.scope || "tracked";
+    });
+  });
+  // Source selector — toggles "Окно сделок" row visibility
+  document.querySelectorAll(".exp-source-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      document.querySelectorAll(".exp-source-btn").forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+      _expirySource = btn.dataset.source || "backtest";
+      const winRow = document.getElementById("exp-window-row");
+      if (winRow) winRow.style.display = (_expirySource === "trades") ? "" : "none";
+    });
+  });
+  // Window selector
+  document.querySelectorAll(".exp-window-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      document.querySelectorAll(".exp-window-btn").forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+      _expiryWindow = parseInt(btn.dataset.window || "0", 10);
     });
   });
 
@@ -787,14 +807,23 @@
     if (!tbl) return;
 
     info.className = "action-msg info";
-    info.textContent = _expiryScope === "all"
-      ? "⏳ Анализирую ВСЕ OTC пары (это может занять 10-60 сек)..."
-      : "⏳ Анализирую tracked пары...";
+    info.textContent = _expirySource === "trades"
+      ? `⏳ Считаю по реальным сделкам (окно: ${_expiryWindow || "все"})...`
+      : (_expiryScope === "all"
+          ? "⏳ Анализирую ВСЕ OTC пары (это может занять 10-60 сек)..."
+          : "⏳ Анализирую tracked пары...");
     tbl.innerHTML = "";
     if (loadBtn) loadBtn.disabled = true;
 
     try {
-      const r = await api(`/api/expiry_stats?scope=${encodeURIComponent(_expiryScope)}`);
+      const params = new URLSearchParams({
+        scope: _expiryScope,
+        source: _expirySource,
+      });
+      if (_expirySource === "trades") {
+        params.set("trades_window", String(_expiryWindow));
+      }
+      const r = await api(`/api/expiry_stats?${params.toString()}`);
       _lastExpiryData = r;
       const pairs = r.pairs || [];
       const expiries = r.expiries || [1, 2, 3, 4, 5];
@@ -811,11 +840,60 @@
       info.textContent = `✅ ${r.note}`;
       if (exportBtn) exportBtn.style.display = "";
 
-      // Header: Pair | Payout | Свечей/Сигналов | for each expiry: WR (sigs) | best
+      const compact = document.getElementById("exp-compact")?.checked || false;
+      const isTrades = (r.source === "trades");
+
+      // Compact mode: только символ + рекомендованная экспирация + WR + n
+      if (compact) {
+        let header = `<thead><tr>
+          <th>Пара</th>
+          <th>Payout</th>
+          <th>${isTrades ? "Сделок" : "Свечей"}</th>
+          <th>⭐ Рекомендуемая экспирация</th>
+          <th>WR при ней</th>
+        </tr></thead>`;
+        const body = pairs.map(p => {
+          const dataN = isTrades ? (p.completed_1000 || 0) : p.candles_used;
+          if (p.best_expiry === null) {
+            return `<tr>
+              <td><b>${p.symbol}</b></td>
+              <td>${p.payout}%</td>
+              <td>${dataN}</td>
+              <td class="hint">мало данных</td>
+              <td class="hint">—</td>
+            </tr>`;
+          }
+          const cls = p.best_wr >= 70 ? 'cell-good' : p.best_wr >= 55 ? '' : 'cell-bad';
+          const minutes = p.best_expiry; // 1 bar = 1 min on M1
+          return `<tr>
+            <td><b>${p.symbol}</b></td>
+            <td>${p.payout}%</td>
+            <td>${dataN}</td>
+            <td class="${cls}"><b>${minutes} мин</b> (exp=${p.best_expiry})</td>
+            <td class="${cls}">${p.best_wr.toFixed(1)}%</td>
+          </tr>`;
+        }).join("");
+        // Overall recommendation row at top
+        let topRow = '';
+        if (overallBest !== null && overallBest !== undefined) {
+          const bestAvg = overall[overallBest]?.avg_wr ?? 0;
+          const cls = bestAvg >= 70 ? 'cell-good' : bestAvg >= 55 ? '' : '';
+          topRow = `<tr style="background:rgba(255,200,0,0.07); font-weight:600;">
+            <td colspan="3">📊 В среднем по всем парам</td>
+            <td class="${cls}"><b>${overallBest} мин</b> (exp=${overallBest})</td>
+            <td class="${cls}">${bestAvg.toFixed(1)}%</td>
+          </tr>`;
+        }
+        tbl.innerHTML = header + `<tbody>${topRow}${body || '<tr><td colspan="5" class="hint">Нет данных</td></tr>'}</tbody>`;
+        return;
+      }
+
+      // Full table — Header: Pair | Payout | data-count | for each expiry: WR (sigs) | best
       let header = `<thead><tr>
         <th>Пара</th>
         <th>Payout</th>
-        <th>Свечей / Сигналов<br/><span class="hint" style="font-size:10px;">в окне 1000</span></th>`;
+        <th>${isTrades ? "Сделок<br/><span class=\"hint\" style=\"font-size:10px;\">в окне</span>"
+                       : "Свечей / Сигналов<br/><span class=\"hint\" style=\"font-size:10px;\">в окне 1000</span>"}</th>`;
       for (const exp of expiries) {
         header += `<th>exp=${exp}<br/><span class="hint" style="font-size:10px;">WR / W·L</span></th>`;
       }
@@ -846,11 +924,13 @@
       summaryRow += `</tr>`;
 
       const body = pairs.map(p => {
+        const dataCellInner = isTrades
+          ? `${p.completed_1000 || 0} <span class="hint" style="font-size:10px;">сделок</span>`
+          : `${p.candles_used}<br/><span class="hint" style="font-size:10px;">${p.completed_1000} сделок</span>`;
         let row = `<tr>
           <td><b>${p.symbol}</b></td>
           <td>${p.payout}%</td>
-          <td>${p.candles_used}<br/>
-              <span class="hint" style="font-size:10px;">${p.completed_1000} сделок</span></td>`;
+          <td>${dataCellInner}</td>`;
         for (const exp of expiries) {
           const d = p.expiries[exp];
           if (!d || d.signals === 0) {

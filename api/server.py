@@ -396,6 +396,14 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
         scope = (request.query_params.get("scope") or "tracked").lower()
         if scope not in ("tracked", "all"):
             scope = "tracked"
+        # source=backtest (default, CONSENSUS на свечах) | trades (real trades + exp_wins)
+        source = (request.query_params.get("source") or "backtest").lower()
+        if source not in ("backtest", "trades"):
+            source = "backtest"
+        try:
+            trades_window = int(request.query_params.get("trades_window") or 0)
+        except ValueError:
+            trades_window = 0   # 0 = все доступные сделки
 
         from strategy.consensus import analyze, DEFAULT_PARAMS
         from feed.history import fetch_candles
@@ -421,6 +429,125 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
                 s for s, info in assets.items()
                 if info.get("is_otc") and info.get("payout", 0) >= min_payout
             ]
+
+        # ── source=trades branch: aggregate exp_wins from trades table ──
+        # No CONSENSUS replay, just real-trade outcomes per expiry. Empty
+        # exp_wins → trade missed (didn't have candles to compute). Window
+        # by trades_window (last N) or all-time if 0.
+        if source == "trades":
+            import json as _json
+            results = []
+            skipped = 0
+            mode = cfg.get("mode")
+            symbols_to_query = symbols if symbols else []
+            # If scope=tracked but no tracked yet, fall back to ALL symbols
+            # that have trade history (so user sees something).
+            if not symbols_to_query and journal:
+                cur = journal.conn.execute(
+                    "SELECT DISTINCT symbol FROM trades WHERE exp_wins IS NOT NULL"
+                )
+                symbols_to_query = [r[0] for r in cur.fetchall()]
+            for sym in symbols_to_query:
+                if not journal:
+                    break
+                # Pull last N trades with exp_wins for this symbol
+                if trades_window > 0:
+                    rows = journal.conn.execute(
+                        "SELECT exp_wins FROM trades "
+                        "WHERE symbol=? AND exp_wins IS NOT NULL AND mode=? "
+                        "ORDER BY close_ts DESC LIMIT ?",
+                        (sym, mode, trades_window),
+                    ).fetchall()
+                else:
+                    rows = journal.conn.execute(
+                        "SELECT exp_wins FROM trades "
+                        "WHERE symbol=? AND exp_wins IS NOT NULL AND mode=? "
+                        "ORDER BY close_ts DESC",
+                        (sym, mode),
+                    ).fetchall()
+                if not rows:
+                    skipped += 1
+                    continue
+                # Aggregate per expiry
+                per_expiry: dict = {}
+                for exp_idx, exp in enumerate(EXPIRIES):
+                    wins = losses = 0
+                    for r in rows:
+                        try:
+                            arr = _json.loads(r[0] or "[]")
+                        except Exception:
+                            continue
+                        if exp_idx >= len(arr):
+                            continue
+                        v = arr[exp_idx]
+                        if v == 1:
+                            wins += 1
+                        elif v == 0:
+                            losses += 1
+                    completed = wins + losses
+                    wr = (wins / completed * 100.0) if completed else 0.0
+                    per_expiry[exp] = {
+                        "signals": completed,
+                        "wins": wins,
+                        "losses": losses,
+                        "wr": round(wr, 1),
+                        "wr1": round(wr, 1),  # same as wr for trades-source
+                        "max_streak": 0,
+                    }
+                valid = [(exp, d) for exp, d in per_expiry.items()
+                         if d["signals"] >= MIN_SIGNALS]
+                if valid:
+                    best_exp, best_data = max(valid, key=lambda x: x[1]["wr"])
+                    best_wr = best_data["wr"]
+                else:
+                    best_exp, best_wr = None, 0.0
+                info = (sm.feed.assets if sm.feed else {}).get(sym, {})
+                payout = int(info.get("payout", 0))
+                results.append({
+                    "symbol": sym,
+                    "payout": payout,
+                    "expiries": per_expiry,
+                    "best_expiry": best_exp,
+                    "best_wr": best_wr,
+                    "candles_used": 0,         # not applicable for trades-source
+                    "completed_1000": len(rows),  # = N trades analysed
+                })
+            results.sort(key=lambda r: (-r["best_wr"], -r["payout"]))
+            # Aggregate overall
+            agg = {}
+            for exp in EXPIRIES:
+                wr_w_num = 0.0
+                wr_w_den = 0
+                tw = tl = ts = 0
+                pwd = 0
+                for r in results:
+                    d = r["expiries"].get(exp)
+                    if not d or d["signals"] < MIN_SIGNALS:
+                        continue
+                    completed = d["wins"] + d["losses"]
+                    wr_w_num += d["wr"] * completed
+                    wr_w_den += completed
+                    ts += d["signals"]; tw += d["wins"]; tl += d["losses"]
+                    pwd += 1
+                avg_wr = (wr_w_num / wr_w_den) if wr_w_den else 0.0
+                agg[exp] = {"avg_wr": round(avg_wr, 1), "total_signals": ts,
+                            "total_wins": tw, "total_losses": tl,
+                            "pairs_with_data": pwd}
+            valid_agg = [(e, d) for e, d in agg.items() if d["pairs_with_data"] >= 1]
+            overall_best = max(valid_agg, key=lambda x: x[1]["avg_wr"])[0] if valid_agg else None
+            scope_label = "tracked" if scope == "tracked" else "ВСЕ OTC"
+            window_label = f"последние {trades_window}" if trades_window > 0 else "все"
+            note = (
+                f"Анализ {len(results)} пар ({scope_label}) по реальным сделкам. "
+                f"Окно: {window_label} сделок на пару. Пропущено (нет данных): {skipped}. "
+                f"Колонка показывает % WIN-сделок если бы их закрыли на N барах."
+            )
+            return {
+                "pairs": results, "expiries": EXPIRIES,
+                "min_signals_for_score": MIN_SIGNALS,
+                "scope": scope, "source": source, "trades_window": trades_window,
+                "overall": agg, "overall_best": overall_best, "note": note,
+            }
 
         cache = sm._candles or {}
         sem = asyncio.Semaphore(5)
@@ -561,6 +688,7 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
             "expiries": EXPIRIES,
             "min_signals_for_score": MIN_SIGNALS,
             "scope": scope,
+            "source": "backtest",
             "overall": agg,
             "overall_best": overall_best,
             "note": note,

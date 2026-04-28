@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <title>PO-Sig Bot</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
-<link rel="stylesheet" href="/miniapp/style.css?v=20260430" />
+<link rel="stylesheet" href="/miniapp/style.css?v=20260501" />
 </head>
 <body>
 <header>
@@ -148,6 +148,22 @@
         <button class="range-btn exp-scope-btn active" data-scope="tracked">Только tracked</button>
         <button class="range-btn exp-scope-btn" data-scope="all">Все OTC пары (медленнее)</button>
       </div>
+      <div class="range-selector" style="margin-top:6px;">
+        Источник:
+        <button class="range-btn exp-source-btn active" data-source="backtest">По свечам (CONSENSUS)</button>
+        <button class="range-btn exp-source-btn" data-source="trades">По реальным сделкам</button>
+      </div>
+      <div class="range-selector" id="exp-window-row" style="margin-top:6px; display:none;">
+        Окно сделок:
+        <button class="range-btn exp-window-btn active" data-window="0">Все</button>
+        <button class="range-btn exp-window-btn" data-window="10">10</button>
+        <button class="range-btn exp-window-btn" data-window="30">30</button>
+        <button class="range-btn exp-window-btn" data-window="100">100</button>
+      </div>
+      <label class="setting-row" style="padding: 6px 0; border: 0;">
+        <span style="flex:1; color:var(--fg); font-size:14px;">🎯 Компактный режим (только рекомендация)</span>
+        <input type="checkbox" id="exp-compact" />
+      </label>
       <div class="actions" style="margin-top:8px;">
         <button id="btn-expiry-load" class="btn primary">🔄 Запустить анализ</button>
         <button id="btn-expiry-export" class="btn" style="display:none;">📥 Экспорт CSV</button>
@@ -198,6 +214,6 @@
 
 <!-- Cache-bust: bump v=YYYYMMDD when app.js changes. Telegram кеширует
      sub-resources отдельно от index.html, поэтому нужен отдельный bump. -->
-<script src="/miniapp/app.js?v=20260430"></script>
+<script src="/miniapp/app.js?v=20260501"></script>
 </body>
 </html>

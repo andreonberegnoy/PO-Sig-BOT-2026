@@ -659,7 +659,19 @@ class StateMachine:
                 hours = self.cfg["filter"]["day_off_hours"]
                 self.state.day_off_until = int(time.time()) + hours * 3600
                 self._persist()
-                await self._notify(f"😴 Ни одна пара не прошла фильтр. Пауза {hours}ч.")
+                end_h = time.strftime("%H:%M UTC", time.gmtime(self.state.day_off_until))
+                logger.warning(
+                    "🛌 ENTERING DAY-OFF (startup): no pairs passed filter, "
+                    "pausing %dh until %s. Trading loop will sit idle. "
+                    "Clear via: python3 -c '... state_kv day_off_until=0' or wait.",
+                    hours, end_h,
+                )
+                await self._notify(
+                    f"😴 Ни одна пара не прошла фильтр на старте. "
+                    f"Пауза {hours}ч до <code>{end_h}</code>. Бот будет молчать "
+                    f"всё это время — открой /control → 🔄 Reset cycle если "
+                    f"хочешь снять раньше."
+                )
             else:
                 logger.info("initial scan empty — waiting for assets_list from WS")
 
@@ -722,16 +734,38 @@ class StateMachine:
 
             # Day-off handling
             if self.state.day_off_until and now < self.state.day_off_until:
+                # Periodic reminder so user sees bot is in day-off, not crashed.
+                # Every ~5 min: one heartbeat log line with remaining time.
+                if int(now) - getattr(self, "_last_dayoff_log", 0) > 300:
+                    self._last_dayoff_log = int(now)
+                    remain_min = int((self.state.day_off_until - now) / 60)
+                    end_h = time.strftime("%H:%M UTC", time.gmtime(self.state.day_off_until))
+                    logger.info(
+                        "🛌 day-off active: %d min remaining (until %s). "
+                        "No scan/trade until then.",
+                        remain_min, end_h,
+                    )
                 continue
             if self.state.day_off_until and now >= self.state.day_off_until:
                 self.state.day_off_until = 0
                 self._persist()
+                logger.info("⏰ day-off expired — running rescan")
                 await self._rescan_pairs()
                 await self._notify("⏰ Пауза истекла, возобновляю поиск.")
                 if not self._tracked:
                     # still no pairs → another day_off
-                    self.state.day_off_until = int(now) + self.cfg["filter"]["day_off_hours"] * 3600
+                    hours = self.cfg["filter"]["day_off_hours"]
+                    self.state.day_off_until = int(now) + hours * 3600
                     self._persist()
+                    end_h = time.strftime("%H:%M UTC", time.gmtime(self.state.day_off_until))
+                    logger.warning(
+                        "🛌 RE-ENTERING DAY-OFF: rescan still found 0 pairs. "
+                        "Pausing %dh until %s.", hours, end_h,
+                    )
+                    await self._notify(
+                        f"😴 После переоценки фильтр опять пуст. "
+                        f"Ещё пауза {hours}ч до <code>{end_h}</code>."
+                    )
                     continue
 
             # ── Main loop body wrapped in broad try/except so a single bad tick

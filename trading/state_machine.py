@@ -110,6 +110,55 @@ class StateMachine:
     def _persist(self):
         self.journal.set("runtime_state", self.state.to_dict())
 
+    # ---------- exp_wins backtest ----------
+    def _persist_exp_wins(self, symbol: str, action: str, open_ts: int, trade_id: str):
+        """Compute & save which expiries (1..5 M1 bars) would have closed the
+        trade in profit. Persists as JSON `[1,0,1,1,0]` in trades.exp_wins.
+
+        Approximation: entry price = open of bar containing open_ts, exit
+        price = close of bar at open_ts + N*60. For call: WIN if exit > entry.
+        For put: WIN if exit < entry. None if candle missing.
+
+        Aggregated over time by /api/hourly_stats to show avg min winning
+        expiry per (sym, hour) — helps tune trading.expiry_seconds.
+        """
+        import json as _json
+        candles = (self._candles or {}).get(symbol) or []
+        if not candles:
+            return
+        entry_minute = (open_ts // 60) * 60
+        # Find entry candle by time (binary search would be nicer; linear is fine)
+        entry_idx = None
+        for i, c in enumerate(candles):
+            if c["time"] == entry_minute:
+                entry_idx = i
+                break
+        if entry_idx is None:
+            return
+        entry_price = float(candles[entry_idx].get("open", 0) or 0)
+        if entry_price == 0:
+            return
+        results: list = []
+        for n in (1, 2, 3, 4, 5):
+            exit_idx = entry_idx + n
+            if exit_idx >= len(candles):
+                results.append(None)
+                continue
+            exit_price = float(candles[exit_idx].get("close", 0) or 0)
+            if exit_price == 0:
+                results.append(None)
+                continue
+            if action == "call":
+                results.append(1 if exit_price > entry_price else 0)
+            elif action == "put":
+                results.append(1 if exit_price < entry_price else 0)
+            else:
+                results.append(None)
+        # Skip persisting if all None (no data) — avoids polluting query agg
+        if all(r is None for r in results):
+            return
+        self.journal.update_exp_wins(trade_id, _json.dumps(results))
+
     # ---------- working hours ----------
     def _within_working_hours(self) -> bool:
         """Returns True if NOW is within the configured trading window. If
@@ -1261,6 +1310,7 @@ class StateMachine:
         # doesn't try to recover this trade again.
         self.state.pending_trade = None
         self.state.trades_on_pair += 1
+        open_ts_actual = opened.open_time or int(time.time())
         self.journal.log_trade({
             "trade_id": closed.trade_id,
             "symbol": opened.asset,
@@ -1270,11 +1320,19 @@ class StateMachine:
             "result": closed.result,
             "payout": opened.payout,
             "mg_step": self.state.mg_step,
-            "open_ts": opened.open_time or int(time.time()),
+            "open_ts": open_ts_actual,
             "close_ts": closed.close_time or int(time.time()),
             "balance_after": self.feed.balance(),
             "mode": self.cfg["mode"],
         })
+        # Backtest 1..5 bar expiries against cached candles around entry —
+        # persist as JSON in trades.exp_wins so /api/hourly_stats can show
+        # accumulated "min winning expiry per (sym, hour)" over time.
+        try:
+            self._persist_exp_wins(opened.asset, opened.action,
+                                   open_ts_actual, closed.trade_id)
+        except Exception:
+            logger.exception("exp_wins backtest failed for %s", closed.trade_id)
 
         if closed.result == "WIN":
             gained = closed.profit - opened.amount

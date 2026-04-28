@@ -96,6 +96,22 @@ class Journal:
         self.conn = sqlite3.connect(path)
         self.conn.executescript(SCHEMA)
         self.conn.commit()
+        self._migrate_columns()
+
+    def _migrate_columns(self):
+        """Idempotent column additions for backward-compat schema upgrades.
+        Safe to run on existing DBs — silently skips if column already exists."""
+        try:
+            cols = {row[1] for row in self.conn.execute("PRAGMA table_info(trades)").fetchall()}
+            if "exp_wins" not in cols:
+                # JSON array of 5 ints (1=win/0=loss/null=no candle data) for
+                # expiry=1..5 bars. Computed once at trade settle from cached
+                # candles around open_ts. Used by Mini App "По часам" tab to
+                # show min winning expiry per (sym, hour) — accumulates over time.
+                self.conn.execute("ALTER TABLE trades ADD COLUMN exp_wins TEXT")
+                self.conn.commit()
+        except Exception:
+            pass
 
     # ---------- trades ----------
 
@@ -113,6 +129,18 @@ class Journal:
         cur = self.conn.execute(
             "SELECT * FROM trades WHERE close_ts >= ? ORDER BY close_ts", (ts,))
         return cur.fetchall()
+
+    def update_exp_wins(self, trade_id: str, exp_wins_json: str):
+        """Persist computed winning-expiry array for a trade (json `[1,0,1,1,0]`).
+        Called from state_machine after trade settles + we have entry/exit candles.
+        Allows /api/hourly_stats to aggregate min winning expiry per (sym, hour)
+        over ALL historical trades (data survives candle pruning)."""
+        try:
+            self.conn.execute("UPDATE trades SET exp_wins=? WHERE trade_id=?",
+                              (exp_wins_json, trade_id))
+            self.conn.commit()
+        except Exception:
+            pass
 
     def hourly_stats(self, since_ts: int, mode: Optional[str] = None,
                      tz_offset_sec: int = 0) -> list[dict]:
@@ -186,6 +214,59 @@ class Journal:
                 "min_win_payout": int(min_win_p) if min_win_p is not None else None,
                 "max_win_payout": int(max_win_p) if max_win_p is not None else None,
             })
+
+        # ── Aggregate exp_wins per (symbol, hour) — accumulated history of
+        # which expiry would have closed each trade in profit. Helps user
+        # decide whether to switch trading.expiry_seconds.
+        try:
+            import json as _json
+            cur2 = self.conn.execute(
+                f"""SELECT symbol,
+                           CAST(((open_ts + ?) / 3600) AS INTEGER) % 24 AS hour,
+                           exp_wins
+                    FROM trades
+                    WHERE {where_sql} AND exp_wins IS NOT NULL""",
+                [int(tz_offset_sec)] + params,
+            )
+            agg: dict = {}
+            for row in cur2.fetchall():
+                key = (row["symbol"], int(row["hour"]))
+                try:
+                    arr = _json.loads(row["exp_wins"] or "[]")
+                except Exception:
+                    continue
+                if not isinstance(arr, list) or len(arr) == 0:
+                    continue
+                bucket = agg.setdefault(key, {
+                    "min_wins": [],          # min winning expiry per trade (ints 1..N)
+                    "wins_per_exp": [0]*5,   # total wins at each expiry slot 1..5
+                    "trades_with_data": 0,
+                })
+                bucket["trades_with_data"] += 1
+                # Find smallest winning expiry for this trade
+                min_win = None
+                for i, w in enumerate(arr[:5]):
+                    if w == 1:
+                        bucket["wins_per_exp"][i] += 1
+                        if min_win is None:
+                            min_win = i + 1   # exp counts from 1
+                if min_win is not None:
+                    bucket["min_wins"].append(min_win)
+            # Merge into output rows
+            for o in out:
+                key = (o["symbol"], o["hour"])
+                a = agg.get(key)
+                if not a:
+                    o["avg_min_win_exp"] = None
+                    o["wins_per_exp"] = None
+                    o["exp_data_trades"] = 0
+                    continue
+                avg_min = (sum(a["min_wins"]) / len(a["min_wins"])) if a["min_wins"] else None
+                o["avg_min_win_exp"] = round(avg_min, 2) if avg_min is not None else None
+                o["wins_per_exp"] = a["wins_per_exp"]
+                o["exp_data_trades"] = a["trades_with_data"]
+        except Exception:
+            pass
         return out
 
     # ---------- bans ----------

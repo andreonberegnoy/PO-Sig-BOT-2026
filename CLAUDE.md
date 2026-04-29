@@ -10,6 +10,14 @@ Trading bot for Pocket Option (binary options) using CONSENSUS 4/5 indicator.
 Direct WebSocket connection to PO (no browser), Telegram Mini App for control,
 runs 24/7 on Hetzner VPS in Docker.
 
+> 🚧 **АКТИВНЫЙ РЕФАКТОРИНГ** (с 2026-04-29). Перед любыми изменениями кода
+> прочитай [REFACTOR_PLAN.md](REFACTOR_PLAN.md) — там source of truth по
+> структуре. Сейчас Mini App перестроен на 3 топ-таба (Главная / Настройки бота
+> / Стратегия с подвкладками). Backend старых analytics endpoints ещё жив но
+> UI их не вызывает (этап 1.2 удалит их). Этап 2 — новая аналитика с market
+> snapshots на каждый CONSENSUS-сигнал.
+> Стабильная точка для отката: tag `stable-pre-strategy-removal`.
+
 ## Where things live
 
 - **Active worktree**: this directory (`.claude/worktrees/youthful-wiles-992d65/`)

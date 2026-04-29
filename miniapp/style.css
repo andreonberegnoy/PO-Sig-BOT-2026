@@ -102,17 +102,38 @@ input:focus, textarea:focus { outline: 2px solid var(--button); outline-offset: 
 .category-title { padding: 12px 16px; font-weight: 600; background: rgba(255,255,255,0.04); }
 
 ul.strategies { list-style: none; margin: 0; padding: 0; }
-ul.strategies li { padding: 10px 12px; border-bottom: 1px solid rgba(255,255,255,0.06);
-                   display: flex; align-items: center; gap: 8px; }
-ul.strategies li:last-child { border: 0; }
-ul.strategies li .name { flex: 1; }
-ul.strategies li .badge { font-size: 11px; padding: 2px 6px; border-radius: 4px; background: rgba(255,255,255,0.1); }
+ul.strategies li { padding: 14px 16px; margin-bottom: 8px;
+                   border: 1px solid rgba(255,255,255,0.08);
+                   border-radius: 10px;
+                   background: rgba(255,255,255,0.02);
+                   display: flex; align-items: center; gap: 8px;
+                   transition: background 0.15s, border-color 0.15s, transform 0.1s; }
+ul.strategies li:last-child { margin-bottom: 0; }
+ul.strategies li.strategy-card { cursor: pointer; user-select: none; }
+ul.strategies li.strategy-card:hover {
+  background: rgba(96, 165, 250, 0.08);
+  border-color: rgba(96, 165, 250, 0.3);
+}
+ul.strategies li.strategy-card:active { transform: scale(0.99); }
+ul.strategies li.strategy-active { background: rgba(96, 165, 250, 0.12);
+                                    border-color: rgba(96, 165, 250, 0.4); }
+ul.strategies li.strategy-hint { background: transparent; border: 0; padding: 4px 0;
+                                  margin-bottom: 6px; cursor: default; }
+ul.strategies li .badge { font-size: 11px; padding: 2px 8px; border-radius: 4px;
+                          background: rgba(255,255,255,0.1); white-space: nowrap; }
 ul.strategies li .badge.active { background: var(--button); color: var(--button-text); }
-ul.strategies li.strategy-active { background: rgba(109, 180, 255, 0.08); }
-.strategy-row { display: flex; flex-direction: column; gap: 8px; flex: 1; }
-.strategy-name { font-weight: 500; display: flex; align-items: center; gap: 8px; }
-.strategy-actions { display: flex; gap: 6px; flex-wrap: wrap; }
-.strategy-actions .btn { padding: 6px 12px; font-size: 13px; }
+.strategy-row { display: flex; align-items: center; gap: 10px; flex: 1; width: 100%; }
+.strategy-name { font-weight: 500; display: flex; align-items: center; gap: 8px;
+                 flex: 1; font-size: 15px; }
+.strategy-actions { display: flex; gap: 8px; align-items: center; flex-wrap: nowrap; }
+.strategy-arrow { color: var(--hint); font-size: 18px; transition: transform 0.15s; }
+ul.strategies li.strategy-card:hover .strategy-arrow {
+  color: var(--button); transform: translateX(3px);
+}
+.btn-mini { background: transparent; border: 1px solid rgba(255,255,255,0.15);
+            color: var(--hint); padding: 4px 8px; border-radius: 6px;
+            font-size: 13px; cursor: pointer; line-height: 1; }
+.btn-mini:hover { color: #ef4444; border-color: rgba(239, 68, 68, 0.4); }
 .badge.source-user { background: rgba(255, 200, 80, 0.2); color: #ffc850; }
 .badge.source-builtin { background: rgba(180, 180, 180, 0.15); color: #aaa; }
 

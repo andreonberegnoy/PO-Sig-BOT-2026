@@ -63,22 +63,9 @@
   });
 
   // ─── Sub-tab switching внутри «Стратегия» ──────────────────────────────
+  // gotoSubtab() определена ниже у loadStrategies — общий помощник.
   document.querySelectorAll(".subtab").forEach((sub) => {
-    sub.addEventListener("click", () => {
-      document.querySelectorAll(".subtab").forEach((x) => x.classList.remove("active"));
-      document.querySelectorAll(".subtab-panel").forEach((x) => x.classList.remove("active"));
-      sub.classList.add("active");
-      const target = sub.dataset.subtab;
-      // Map subtab name → panel id
-      const panelId = target === "list" ? "sub-list"
-        : target === "strategy-settings" ? "sub-strategy-settings"
-        : target === "analytics" ? "sub-analytics"
-        : null;
-      if (panelId) document.getElementById(panelId)?.classList.add("active");
-      if (target === "list") loadStrategies();
-      if (target === "strategy-settings") loadStrategyParams();
-      // analytics — placeholder, ничего не грузим пока
-    });
+    sub.addEventListener("click", () => gotoSubtab(sub.dataset.subtab));
   });
 
   // ═════════════════════ ГЛАВНАЯ (STATUS) ════════════════════════════════
@@ -365,45 +352,80 @@
   }
 
   // ═════════════════════ СТРАТЕГИЯ → СПИСОК ════════════════════════════════
+  // UX-flow: клик по карточке стратегии =
+  //   1) активирует её (если не активна)
+  //   2) автоматически переходит в подвкладку «Настройки стратегии»
+  // Кнопка «🗑 Удалить» — только для пользовательских неактивных, отдельно.
+
+  function gotoSubtab(name) {
+    document.querySelectorAll(".subtab").forEach((x) => x.classList.remove("active"));
+    document.querySelectorAll(".subtab-panel").forEach((x) => x.classList.remove("active"));
+    const tabBtn = document.querySelector(`.subtab[data-subtab="${name}"]`);
+    if (tabBtn) tabBtn.classList.add("active");
+    const panelId = name === "list" ? "sub-list"
+      : name === "strategy-settings" ? "sub-strategy-settings"
+      : name === "analytics" ? "sub-analytics" : null;
+    if (panelId) document.getElementById(panelId)?.classList.add("active");
+    if (name === "strategy-settings") loadStrategyParams();
+    if (name === "list") loadStrategies();
+  }
+
   async function loadStrategies() {
     const list = document.getElementById("strategies-list");
     list.innerHTML = "<li>Загрузка…</li>";
     try {
       const data = await api("/api/strategies");
       list.innerHTML = "";
+      // Подсказка пользователю — что делать
+      const hint = document.createElement("li");
+      hint.className = "strategy-hint";
+      hint.innerHTML = `<span class="hint">Клик на карточку → активация + переход к настройкам этой стратегии.</span>`;
+      list.appendChild(hint);
       for (const s of data.strategies) {
         const li = document.createElement("li");
         li.classList.toggle("strategy-active", s.active);
+        li.classList.add("strategy-card");
+        li.dataset.name = s.name;
         const activeBadge = s.active
           ? `<span class="badge active">✓ Активна</span>`
           : `<span class="badge source-${s.source}">${s.source === "user" ? "своя" : "встроенная"}</span>`;
-        let actionBtn = "";
-        if (!s.active) {
-          actionBtn = `<button class="btn primary" data-act="activate" data-name="${s.name}">▶ Активировать</button>`;
-        } else if (s.name !== "consensus") {
-          actionBtn = `<button class="btn" data-act="activate" data-name="consensus">⏹ Выключить (на consensus)</button>`;
-        }
+        const arrow = `<span class="strategy-arrow">→</span>`;
         const delBtn = (s.source === "user" && !s.active)
-          ? `<button class="btn" data-act="delete" data-name="${s.name}">🗑 Удалить</button>`
+          ? `<button class="btn-mini" data-act="delete" data-name="${s.name}" title="Удалить">🗑</button>`
           : "";
         li.innerHTML = `
           <div class="strategy-row">
             <div class="strategy-name">${s.name} ${activeBadge}</div>
-            <div class="strategy-actions">${actionBtn}${delBtn}</div>
+            <div class="strategy-actions">${delBtn}${arrow}</div>
           </div>
         `;
         list.appendChild(li);
       }
-      list.querySelectorAll("[data-act]").forEach((b) => {
-        b.addEventListener("click", async () => {
-          const name = b.dataset.name;
-          const act = b.dataset.act;
-          if (act === "activate") {
-            await api(`/api/strategies/${encodeURIComponent(name)}/activate`, { method: "POST" });
-          } else if (act === "delete") {
-            if (!confirm(`Удалить стратегию "${name}"?`)) return;
-            await api(`/api/strategies/${encodeURIComponent(name)}`, { method: "DELETE" });
+      // Клик по всей карточке → активация + переход к Настройки
+      list.querySelectorAll(".strategy-card").forEach((card) => {
+        card.addEventListener("click", async (e) => {
+          // если кликнули на 🗑 — обработаем отдельно
+          if (e.target.closest("[data-act='delete']")) return;
+          const name = card.dataset.name;
+          try {
+            // Если уже активна — просто переходим (без лишнего API-call)
+            if (!card.classList.contains("strategy-active")) {
+              await api(`/api/strategies/${encodeURIComponent(name)}/activate`, { method: "POST" });
+              loadStatus();
+            }
+            gotoSubtab("strategy-settings");
+          } catch (err) {
+            alert(`Не удалось активировать «${name}»: ${err.message || err}`);
           }
+        });
+      });
+      // Удаление — отдельным обработчиком, не передаёт клик карточке
+      list.querySelectorAll("[data-act='delete']").forEach((b) => {
+        b.addEventListener("click", async (e) => {
+          e.stopPropagation();
+          const name = b.dataset.name;
+          if (!confirm(`Удалить стратегию "${name}"?`)) return;
+          await api(`/api/strategies/${encodeURIComponent(name)}`, { method: "DELETE" });
           loadStrategies();
           loadStatus();
         });

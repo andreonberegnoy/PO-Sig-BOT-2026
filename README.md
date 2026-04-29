@@ -1,6 +1,8 @@
 # MY PO-SIG BOT
 
-Торговый бот для Pocket Option с **прямым подключением через WebSocket**, индикатором **CONSENSUS 4/5**, **Telegram Mini App** для визуального управления и **системой пользовательских стратегий**. Работает 24/7 на VPS / Railway без браузера.
+Торговый бот для Pocket Option с **прямым подключением через WebSocket**, индикатором **CONSENSUS 4/5**, **Telegram Mini App** для визуального управления и **системой пользовательских стратегий**. Работает 24/7 на VPS Hetzner Helsinki без браузера.
+
+> 🚧 **В процессе рефакторинга** (с 2026-04-29). См. [REFACTOR_PLAN.md](REFACTOR_PLAN.md) — там полная картина что меняется и в каком порядке. Этап 1.1 (визуальная реструктуризация Mini App) ✅ завершён. Дальше — этап 1.2 (удаление backend endpoints) и этап 2 (новая аналитика с market snapshots).
 
 ---
 
@@ -35,7 +37,7 @@ api/
 ├── server.py                  FastAPI: REST endpoints + Mini App static + hourly_stats + control
 └── auth.py                    верификация Telegram WebApp initData
 miniapp/
-├── index.html                 6 вкладок: Status / Settings / Strategies / Аналитика / По часам / Экспирация
+├── index.html                 3 топ-таба: Главная / Настройки бота / Стратегия (с подвкладками)
 ├── style.css                  dark theme + multi-checkbox UI
 └── app.js                     vanilla JS, без сборки. Sort, CSV-экспорт, multi-select, экспирация-бэктест
 journal/
@@ -195,9 +197,14 @@ Stop-sum ($1000) или max_steps (10) → waiting_resume → /resume
 - `true` (дефолт): классический МГ с догонами
 - `false`: каждая сделка `base_amount`. После LOSS — сброс цикла, поиск нового сигнала на любой паре. "Плоская" торговля без удвоений.
 
-### Шаг 6. Hour Whitelist (опционально)
+### Шаг 6. Аналитика и фильтры (этап 2 рефакторинга)
 
-После накопления статистики (Mini App → "По часам" → "⭐ Применить как фильтр") бот может торговать **только в определённые часы для определённых пар**. Например: EURUSD_otc только 09:00-10:00 и 14:00-15:00 (где WR ≥ 70%). В другое время — пара пропускается.
+В процессе [рефакторинга](REFACTOR_PLAN.md): новая аналитика будет агрегировать
+ВСЕ CONSENSUS-сигналы (включая те что бот не взял по причине занятости) и
+записывать market snapshots (ATR, EMA, RSI, QQE, BB, votes...) на каждый
+сигнал. Из этой накопительной базы можно будет построить per-hour, per-pair
+и per-condition фильтры. Hour whitelist + per-hour preferred expiry сохранятся
+как функция «Применить как фильтр» внутри новой Аналитики.
 
 ### Шаг 7. Детект закрытия сделки
 
@@ -320,28 +327,36 @@ docker compose up -d --build
 
 `https://<твой-домен>/` — подключается через @BotFather → Bot Settings → Menu Button.
 
-### Вкладки
+### Структура (после рефакторинга 2026-04-29)
 
-1. **Статус** — режим, баланс, пара (или "🔍 поиск"), MG-шаг, потери. Кнопки Pause/Resume + Switch/Reset Cycle.
-2. **Настройки** — все параметры стратегии с слайдерами и multi-checkbox.
-3. **Стратегии** — встроенные + пользовательские, активация, загрузка кода.
-4. **Аналитика** — таблица пар с цветовой кодировкой по WR/payout.
-5. **По часам** — анализ сделок по часам дня:
-   - Сводка по часам (все пары)
-   - Детальная таблица пара × час с сортировкой
-   - Колонка `Avg payout WIN` — средний % выплаты на WIN-сделках
-   - ⭐ для пар/часов с WR ≥ 70% и ≥ 5 сделок
-   - **📥 Экспорт CSV** (две таблицы)
-   - **⭐ Применить как фильтр** — создать hour_whitelist
-   - **🔓 Снять фильтр** — отключить hour_whitelist
-   - **⤺ reset stats** (маленькая) — soft-reset baseline для нового цикла измерения
-6. **Экспирация** ← новое — бэктест экспираций на накопленных свечах:
-   - По нажатию **🔄 Запустить анализ** прогоняет CONSENSUS на ≥1000 свечах
-     каждой `_tracked` пары с экспирациями **2 / 3 / 4 / 5 баров**
-   - Для каждой пары/экспирации показывает: signals, WR, profit
-   - ⭐ — лучшая экспирация для пары (≥5 сигналов в окне)
-   - **📥 Экспорт CSV** результатов
-   - Используй для подбора оптимального `trading.expiry_seconds`
+**3 топ-таба** с группировкой по логическим зонам:
+
+1. **🏠 Главная (Status)** — режим, баланс, **список tracked-пар по именам**,
+   текущая пара (или "🔍 поиск"), MG-шаг, потери. Кнопки Pause/Resume +
+   Switch/Reset Cycle.
+
+2. **⚙️ Настройки бота** — только общие настройки:
+   - 🔍 Фильтр пар (asset_categories, min_payout, WR1 пороги, ban/pause hours)
+   - 💰 Торговля (base_amount, expiry_seconds, max_trades_on_pair)
+   - 🎰 Мартингейл (enabled, coefficient, max_steps, stop_sum)
+   - ⏰ Расписание работы (start_hour, end_hour, weekend skip — этап 2)
+   - 📋 Периодический отчёт
+
+3. **🧠 Стратегия** — с **3 подвкладками**:
+   - **📋 Список стратегий** — встроенные + пользовательские, активация, загрузка кода
+   - **⚙️ Настройки стратегии** — ТОЛЬКО indicator params активной стратегии
+     (RSI period, EMA, BB, ATR, QQE, HTF — без переписывания, тот же
+     `consensus.py`, просто отдельный UI)
+   - **📊 Аналитика** — placeholder (будет наполнена в этапе 2)
+
+### Что планируется в этапе 2 — см. [REFACTOR_PLAN.md](REFACTOR_PLAN.md)
+
+Аналитика будет агрегировать ВСЕ CONSENSUS-сигналы (включая пропущенные
+из-за занятости бота на другой паре) с market snapshots на момент каждого
+сигнала: ATR, EMA, RSI, QQE, BB position, candle/ATR ratio, голоса 5
+индикаторов, hour, day_of_week, payout. Это даст возможность фильтровать
+торговлю по комбинациям рыночных условий («торговать только при `atr_ratio
+∈ [1.0, 1.8]` AND `bb_position < 0.2` для buy»).
 
 ### Категории активов (multi-checkbox)
 
@@ -481,15 +496,8 @@ Mini App: `http://localhost:8080/`
 | `/api/strategies/{name}/params` | GET / PUT | Параметры стратегии |
 | `/api/control/pause` | POST | Пауза |
 | `/api/control/resume` | POST | Возобновить |
-| `/api/control/switch_pair` | POST | Сменить пару (MG сохр.) |
+| `/api/control/switch_pair` | POST | Сменить пару → SEARCH режим (MG сохр.) |
 | `/api/control/reset_cycle` | POST | Сбросить цикл в FREE |
-| `/api/pair_stats` | GET | Аналитика по парам |
-| `/api/hourly_stats` | GET | Сделки по часам (для Mini App "По часам") |
-| `/api/hour_whitelist` | GET | Текущий whitelist часов |
-| `/api/apply_hour_whitelist` | POST | Применить фильтр (min_wr, min_trades, range) |
-| `/api/clear_hour_whitelist` | POST | Снять фильтр |
-| `/api/reset_hourly_stats` | POST | Soft-reset baseline (старые сделки скрыть) |
-| `/api/expiry_stats` | GET | Бэктест экспираций (2/3/4/5 баров) по `_tracked` парам |
 | `/api/debug/journal` | GET | Диагностика SQLite |
 | `/health` | GET | Healthcheck для Docker / monitoring |
 | `/strategy_template` | GET | Шаблон стратегии |
@@ -506,10 +514,10 @@ Mini App: `http://localhost:8080/`
 - Настройки из Mini App (`settings_overrides`)
 - Параметры активной стратегии (`strategy_params:<name>`)
 - Загруженные пользовательские стратегии (`/data/user_strategies/*.py`)
-- Аналитика (`payout_log`, `pair_stats_log`)
-- Hour whitelist (`filter.hour_whitelist`)
-- Analytics baseline (`analytics.baseline_ts`)
 - Crash markers (для алерта "бот падал")
+- *Этап 2 рефакторинга добавит*: таблица `signals` (все CONSENSUS-сигналы
+  с market snapshots + exp_wins + флагом `entered`). Retention 6 мес default,
+  до 12. См. [REFACTOR_PLAN.md](REFACTOR_PLAN.md).
 
 ---
 
@@ -553,13 +561,11 @@ python3 tools/make_deploy_pdf.py      → DEPLOY_CHEATSHEET.pdf
 - [ ] 🔄 Сбросить цикл → МГ=0, бот ищет сигнал
 - [ ] `/ping` → показывает реальный статус WS, фрейм-фрешность, задачи
 - [ ] Mini App → Status загружает реальные данные
-- [ ] Mini App → Settings → редактирование сохраняется (включая multi-checkbox категорий)
-- [ ] Mini App → По часам → загрузка таблиц, переключение периода, CSV экспорт
-- [ ] Mini App → По часам → ⭐ Применить фильтр → бот шлёт TG-уведомление
-- [ ] Mini App → Экспирация → 🔄 Запустить анализ → таблица 2/3/4/5 баров появляется
-- [ ] Mini App → Экспирация → ⭐ помечает лучшую экспирацию (≥5 сигналов)
-- [ ] Mini App → Экспирация → 📥 Экспорт CSV скачивает файл
-- [ ] Mini App → Strategies → загрузка кастома + активация работает
+- [ ] Mini App → Настройки бота → редактирование сохраняется (включая multi-checkbox категорий)
+- [ ] Mini App → Главная → tracked_pairs показывает имена пар (не только число)
+- [ ] Mini App → Стратегия → Список → загрузка кастома + активация работает
+- [ ] Mini App → Стратегия → Настройки стратегии → indicator params редактируются
+- [ ] Mini App → Стратегия → Аналитика → видна placeholder-страница (этап 2 рефакторинга)
 - [ ] После рестарта контейнера — candles.db и state.db не теряются
 - [ ] Графики приходят в TG для всех типов пар (forex, crypto, stocks с `#`, indices)
 - [ ] График показывает счётчики ✓/✗ для обоих окон (1000 и 200 свечей)

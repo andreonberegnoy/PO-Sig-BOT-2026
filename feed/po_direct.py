@@ -25,6 +25,7 @@ Exposes:
 import asyncio
 import json
 import logging
+import os
 import re
 import ssl
 import time
@@ -132,6 +133,15 @@ class PoDirectFeed:
         self._alert_cooldown: dict[str, float] = {}
 
     # ---------- connect / disconnect ----------
+    @staticmethod
+    def _proxy_log_safe(proxy_url: str) -> tuple[str, int]:
+        """Parse proxy URL and return (host, port) for logging — no creds."""
+        try:
+            from urllib.parse import urlparse
+            p = urlparse(proxy_url)
+            return (p.hostname or "?", int(p.port or 0))
+        except Exception:
+            return ("?", 0)
 
     async def connect(self):
         ssl_ctx = ssl.create_default_context()
@@ -139,22 +149,49 @@ class PoDirectFeed:
             ssl_ctx.check_hostname = False
             ssl_ctx.verify_mode = ssl.CERT_NONE
 
-        logger.info("connecting %s", self.ws_url)
-        self._ws = await websockets.connect(
-            self.ws_url,
+        # Optional egress through residential proxy (PO_PROXY env). Routes
+        # ONLY *.po.market traffic — SSH/Telegram/cloudflared stay direct.
+        # Format: socks5://user:pass@host:port  OR  http://user:pass@host:port
+        # Used to bypass Cloudflare datacenter-IP block on api-spb.
+        proxy_url = os.environ.get("PO_PROXY", "").strip()
+        proxy_sock = None
+        if proxy_url:
+            try:
+                from python_socks.async_.asyncio import Proxy
+                from urllib.parse import urlparse
+                parsed = urlparse(self.ws_url)
+                target_host = parsed.hostname
+                target_port = parsed.port or (443 if parsed.scheme == "wss" else 80)
+                logger.info("connecting via proxy → %s:%d (target=%s)",
+                            *self._proxy_log_safe(proxy_url), self.ws_url)
+                proxy = Proxy.from_url(proxy_url)
+                proxy_sock = await proxy.connect(
+                    dest_host=target_host, dest_port=target_port, timeout=30,
+                )
+            except Exception as e:
+                logger.exception("proxy setup failed (%s) — falling back to direct", e)
+                proxy_sock = None
+
+        logger.info("connecting %s%s", self.ws_url, " [via PROXY]" if proxy_sock else "")
+        ws_kwargs = dict(
             ssl=ssl_ctx,
             additional_headers={
                 "Origin": "https://pocketoption.com",
                 "User-Agent": USER_AGENT,
             },
             max_size=16 * 1024 * 1024,
-            ping_interval=None,  # we handle socket.io ping ourselves
-            # Default open_timeout is 10s — too tight on Railway cold-start
-            # (DNS + TLS + Cloudflare IUAM check can take 15-25s on first hit).
-            # Generous timeout here means a slow handshake retries via the
-            # outer reconnect loop instead of failing prematurely.
+            ping_interval=None,
             open_timeout=45,
         )
+        if proxy_sock is not None:
+            # When using pre-connected socket, websockets needs server_hostname
+            # for SNI/TLS verification.
+            ws_kwargs["sock"] = proxy_sock
+            from urllib.parse import urlparse as _up
+            ws_kwargs["server_hostname"] = _up(self.ws_url).hostname
+            self._ws = await websockets.connect(self.ws_url, **ws_kwargs)
+        else:
+            self._ws = await websockets.connect(self.ws_url, **ws_kwargs)
         self._running = True
         # Cancel any previous recv task before creating a new one. Without this,
         # a parallel reconnect (or the auto_reconnect_loop racing with itself)

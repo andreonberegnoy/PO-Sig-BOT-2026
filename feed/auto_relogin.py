@@ -18,6 +18,7 @@ Browser opens for ~30-60 seconds then closes — no persistent overhead.
 
 import asyncio
 import base64
+import os
 import json
 import logging
 import random
@@ -159,9 +160,30 @@ async def _fetch_via_state_impl(state_b64: str, is_demo: bool, timeout_sec: int)
     captured, on_ws = _make_ws_capture()
     logger.info("auto-relogin (state): launching chromium with saved session")
 
+    # Optional residential proxy for Playwright — must match the WS proxy
+    # so the captured ssid is bound to the same egress IP. Otherwise relogin
+    # via direct IP gives ssid that PO will reject when WS uses proxy.
+    _proxy_url = os.environ.get("PO_PROXY", "").strip()
+    _proxy_arg = None
+    if _proxy_url:
+        try:
+            from urllib.parse import urlparse as _up
+            _pp = _up(_proxy_url)
+            _proxy_arg = {"server": f"{_pp.scheme}://{_pp.hostname}:{_pp.port}"}
+            if _pp.username:
+                _proxy_arg["username"] = _pp.username
+            if _pp.password:
+                _proxy_arg["password"] = _pp.password
+            logger.info("auto-relogin: using proxy %s://%s:%s",
+                        _pp.scheme, _pp.hostname, _pp.port)
+        except Exception:
+            logger.exception("auto-relogin: proxy URL parse failed")
+            _proxy_arg = None
+
     async with async_playwright() as p:
         browser = await asyncio.wait_for(p.chromium.launch(
             headless=True,
+            proxy=_proxy_arg,
             args=[
                 "--no-sandbox",
                 "--disable-blink-features=AutomationControlled",
@@ -291,10 +313,26 @@ async def _fetch_fresh_ssid_impl(
             pass
 
     logger.info("auto-relogin: entering async_playwright()")
+    # Same proxy as state-based path so captured ssid matches WS egress IP
+    _proxy_url2 = os.environ.get("PO_PROXY", "").strip()
+    _proxy_arg2 = None
+    if _proxy_url2:
+        try:
+            from urllib.parse import urlparse as _up2
+            _pp2 = _up2(_proxy_url2)
+            _proxy_arg2 = {"server": f"{_pp2.scheme}://{_pp2.hostname}:{_pp2.port}"}
+            if _pp2.username:
+                _proxy_arg2["username"] = _pp2.username
+            if _pp2.password:
+                _proxy_arg2["password"] = _pp2.password
+        except Exception:
+            logger.exception("auto-relogin (interactive): proxy URL parse failed")
+            _proxy_arg2 = None
     async with async_playwright() as p:
         logger.info("auto-relogin: launching chromium…")
         browser = await asyncio.wait_for(p.chromium.launch(
             headless=True,
+            proxy=_proxy_arg2,
             args=[
                 "--no-sandbox",
                 "--disable-blink-features=AutomationControlled",

@@ -1,4 +1,5 @@
 websockets>=12.0
+python-socks[asyncio]>=2.4
 msgpack>=1.0
 aiogram>=3.0
 pyyaml>=6.0

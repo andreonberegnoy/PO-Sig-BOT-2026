@@ -55,18 +55,44 @@
       document.getElementById(`tab-${t.dataset.tab}`).classList.add("active");
       if (t.dataset.tab === "settings") loadGlobalSettings();
       if (t.dataset.tab === "strategy") {
-        // При входе в Стратегия — активна подвкладка «Список»
+        // При входе в Стратегия → всегда возвращаемся на уровень «Список»
+        showStrategyLevel("list");
         loadStrategies();
       }
       if (t.dataset.tab === "status") loadStatus();
     });
   });
 
-  // ─── Sub-tab switching внутри «Стратегия» ──────────────────────────────
-  // gotoSubtab() определена ниже у loadStrategies — общий помощник.
+  // ─── Drill-down navigation в «Стратегия» ───────────────────────────────
+  // Уровни: list (default) → detail (Настройки + Аналитика подвкладки)
+  // Между уровнями — кнопка «← Назад».
+  function showStrategyLevel(level) {
+    document.querySelectorAll(".strategy-level").forEach((x) => x.classList.remove("active"));
+    const target = document.getElementById(`strategy-level-${level}`);
+    if (target) target.classList.add("active");
+  }
+  function gotoSubtab(name) {
+    // Внутри уровня detail — переключение между Настройки/Аналитика
+    document.querySelectorAll(".subtab").forEach((x) => x.classList.remove("active"));
+    document.querySelectorAll(".subtab-panel").forEach((x) => x.classList.remove("active"));
+    const tabBtn = document.querySelector(`.subtab[data-subtab="${name}"]`);
+    if (tabBtn) tabBtn.classList.add("active");
+    const panelId = name === "strategy-settings" ? "sub-strategy-settings"
+      : name === "analytics" ? "sub-analytics" : null;
+    if (panelId) document.getElementById(panelId)?.classList.add("active");
+    if (name === "strategy-settings") loadStrategyParams();
+  }
   document.querySelectorAll(".subtab").forEach((sub) => {
     sub.addEventListener("click", () => gotoSubtab(sub.dataset.subtab));
   });
+  // Кнопка «← Назад к списку» — возврат на уровень list
+  const backBtn = document.getElementById("btn-back-to-list");
+  if (backBtn) {
+    backBtn.addEventListener("click", () => {
+      showStrategyLevel("list");
+      loadStrategies();
+    });
+  }
 
   // ═════════════════════ ГЛАВНАЯ (STATUS) ════════════════════════════════
   function showActionMsg(text, kind = "info") {
@@ -354,21 +380,9 @@
   // ═════════════════════ СТРАТЕГИЯ → СПИСОК ════════════════════════════════
   // UX-flow: клик по карточке стратегии =
   //   1) активирует её (если не активна)
-  //   2) автоматически переходит в подвкладку «Настройки стратегии»
-  // Кнопка «🗑 Удалить» — только для пользовательских неактивных, отдельно.
-
-  function gotoSubtab(name) {
-    document.querySelectorAll(".subtab").forEach((x) => x.classList.remove("active"));
-    document.querySelectorAll(".subtab-panel").forEach((x) => x.classList.remove("active"));
-    const tabBtn = document.querySelector(`.subtab[data-subtab="${name}"]`);
-    if (tabBtn) tabBtn.classList.add("active");
-    const panelId = name === "list" ? "sub-list"
-      : name === "strategy-settings" ? "sub-strategy-settings"
-      : name === "analytics" ? "sub-analytics" : null;
-    if (panelId) document.getElementById(panelId)?.classList.add("active");
-    if (name === "strategy-settings") loadStrategyParams();
-    if (name === "list") loadStrategies();
-  }
+  //   2) переходит на уровень «detail» (Настройки + Аналитика подвкладки)
+  // Из detail-уровня → кнопка «← Назад к списку» возвращает на list.
+  // 🗑 — только для пользовательских неактивных, не триггерит drill-down.
 
   async function loadStrategies() {
     const list = document.getElementById("strategies-list");
@@ -401,18 +415,21 @@
         `;
         list.appendChild(li);
       }
-      // Клик по всей карточке → активация + переход к Настройки
+      // Клик по карточке → активация (если надо) + drill-down в detail
       list.querySelectorAll(".strategy-card").forEach((card) => {
         card.addEventListener("click", async (e) => {
-          // если кликнули на 🗑 — обработаем отдельно
           if (e.target.closest("[data-act='delete']")) return;
           const name = card.dataset.name;
           try {
-            // Если уже активна — просто переходим (без лишнего API-call)
             if (!card.classList.contains("strategy-active")) {
               await api(`/api/strategies/${encodeURIComponent(name)}/activate`, { method: "POST" });
               loadStatus();
             }
+            // Заполняем имя стратегии в шапке detail-уровня
+            const nameEl = document.getElementById("strategy-detail-name");
+            if (nameEl) nameEl.textContent = name;
+            // Переход на detail-уровень → дефолтная подвкладка «Настройки»
+            showStrategyLevel("detail");
             gotoSubtab("strategy-settings");
           } catch (err) {
             alert(`Не удалось активировать «${name}»: ${err.message || err}`);

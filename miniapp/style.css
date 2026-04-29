@@ -25,6 +25,24 @@ main { padding: 12px; padding-bottom: 80px; }
 .tab-panel { display: none; }
 .tab-panel.active { display: block; }
 
+/* Drill-down уровни внутри «Стратегия» (list ↔ detail) */
+.strategy-level { display: none; }
+.strategy-level.active { display: block; }
+.strategy-detail-header {
+  display: flex; align-items: center; gap: 12px; margin-bottom: 12px;
+  padding: 12px 14px; background: var(--section-bg); border-radius: 10px;
+}
+.strategy-detail-header h2 { margin: 0; font-size: 16px; flex: 1;
+                              white-space: nowrap; overflow: hidden;
+                              text-overflow: ellipsis; }
+.btn-back {
+  background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1);
+  color: var(--fg); padding: 8px 14px; border-radius: 8px; font-size: 13px;
+  cursor: pointer; flex-shrink: 0; transition: background 0.15s;
+}
+.btn-back:hover { background: rgba(96, 165, 250, 0.15);
+                  border-color: rgba(96, 165, 250, 0.3); }
+
 /* Sub-tabs внутри top-level tabs (например: Стратегия → Список / Настройки / Аналитика) */
 .subtabs { display: flex; gap: 6px; margin-bottom: 12px; padding: 6px;
            background: rgba(255,255,255,0.04); border-radius: 10px; flex-wrap: wrap; }

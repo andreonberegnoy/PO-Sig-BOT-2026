@@ -255,6 +255,7 @@
 ```sql
 CREATE TABLE signals (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    strategy_name   TEXT NOT NULL,           -- ИЗ КАКОЙ СТРАТЕГИИ родился сигнал (consensus / my_custom / ...)
     symbol          TEXT NOT NULL,
     side            TEXT NOT NULL,           -- call | put
     signal_ts       INTEGER NOT NULL,        -- entry minute (= bar close + tf)
@@ -295,6 +296,7 @@ CREATE TABLE signals (
 
     UNIQUE(symbol, signal_ts)
 );
+CREATE INDEX idx_signals_strat ON signals(strategy_name);
 CREATE INDEX idx_signals_symts ON signals(symbol, signal_ts);
 CREATE INDEX idx_signals_pending ON signals(settled_at, signal_ts);
 CREATE INDEX idx_signals_entered ON signals(entered);
@@ -302,6 +304,19 @@ CREATE INDEX idx_signals_atr ON signals(atr14_1m);
 CREATE INDEX idx_signals_hour ON signals(hour_local);
 CREATE INDEX idx_signals_dow ON signals(day_of_week);
 ```
+
+#### Per-strategy изоляция аналитики
+
+Каждая стратегия имеет **свои signals** (через `strategy_name`). Когда
+пользователь в UI кликает на стратегию X и переходит в её Аналитику —
+запрос идёт `WHERE strategy_name = 'X'`. Это значит:
+
+- Аналитика consensus и аналитика my_custom — **полностью изолированы**
+- Параметры тоже per-strategy (через `strategy_params:<name>` в `state_kv`,
+  уже работает)
+- Каждая стратегия накапливает свою историю независимо
+- При активации новой стратегии — её signals начинают писаться с момента
+  активации (старая стратегия больше не пишет, но её данные сохраняются)
 
 Все market params снимаются из cached candles на момент signal_ts через переиспользуемые функции из `strategy/indicators.py`. Добавлена расширяемость для нестандартных стратегий — индикаторы которые не использует загруженная стратегия будут NULL.
 

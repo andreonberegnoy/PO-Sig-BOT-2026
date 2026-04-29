@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <title>PO-Sig Bot</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
-<link rel="stylesheet" href="/miniapp/style.css?v=20260510" />
+<link rel="stylesheet" href="/miniapp/style.css?v=20260511" />
 </head>
 <body>
 <header>
@@ -56,16 +56,10 @@
     <div id="settings-list">Загрузка…</div>
   </section>
 
-  <!-- ═══════════ СТРАТЕГИЯ (с подвкладками) ═══════════ -->
+  <!-- ═══════════ СТРАТЕГИЯ (drill-down: список → детали стратегии) ═══════════ -->
   <section id="tab-strategy" class="tab-panel">
-    <div class="subtabs">
-      <button class="subtab active" data-subtab="list">📋 Список стратегий</button>
-      <button class="subtab" data-subtab="strategy-settings">⚙️ Настройки стратегии</button>
-      <button class="subtab" data-subtab="analytics">📊 Аналитика</button>
-    </div>
-
-    <!-- ─── Подвкладка: Список стратегий ─── -->
-    <div id="sub-list" class="subtab-panel active">
+    <!-- ─── Уровень 1: Список стратегий (default view) ─── -->
+    <div id="strategy-level-list" class="strategy-level active">
       <div class="card">
         <h2>📋 Список стратегий</h2>
         <ul id="strategies-list" class="strategies"></ul>
@@ -100,49 +94,60 @@
       </div>
     </div>
 
-    <!-- ─── Подвкладка: Настройки стратегии (indicator params) ─── -->
-    <div id="sub-strategy-settings" class="subtab-panel">
-      <div class="card">
-        <h2>⚙️ Настройки активной стратегии</h2>
-        <p class="hint">
-          Параметры индикаторов: RSI, EMA, BB, ATR, QQE, HTF — относятся
-          ТОЛЬКО к выбранной стратегии. Общие настройки бота (базовая ставка,
-          мартингейл, расписание) — во вкладке «⚙️ Настройки бота».
-        </p>
-        <div id="strategy-params-list">Загрузка…</div>
+    <!-- ─── Уровень 2: Детали выбранной стратегии (Настройки + Аналитика) ─── -->
+    <div id="strategy-level-detail" class="strategy-level">
+      <div class="strategy-detail-header">
+        <button class="btn-back" id="btn-back-to-list">← Назад к списку</button>
+        <h2 class="strategy-detail-name">🧠 <span id="strategy-detail-name">—</span></h2>
       </div>
-    </div>
 
-    <!-- ─── Подвкладка: Аналитика (placeholder) ─── -->
-    <div id="sub-analytics" class="subtab-panel">
-      <div class="card">
-        <h2>📊 Аналитика стратегии</h2>
-        <p class="hint" style="font-size: 14px; line-height: 1.6;">
-          Будет наполнено в этапе 2 рефакторинга. Согласно плану:
-        </p>
-        <ul style="color: var(--fg-muted); font-size: 13px; line-height: 1.7;">
-          <li>Главная таблица: <b>пары × 24h-средние</b></li>
-          <li>Фильтры периода: <b>1д / 7д / 14д / 30д / 60д / по дате</b></li>
-          <li>Сортировка по любому столбцу</li>
-          <li>Клик на пару → раскрытие 24-часовой детализации</li>
-          <li>Плашка «<b>Рабочие часы</b>» (визуальный индикатор активного фильтра)</li>
-          <li>Плашка фильтр по времени (<code>13:00-19:00</code> — суммарно за период)</li>
-          <li>Колонка «<b>Best exp за последние N сделок</b>» (фильтруемое окно)</li>
-          <li>Кнопка «<b>Применить как фильтр</b>» к стратегии</li>
-          <li>Кнопка «<b>Экспорт данных</b>» (CSV)</li>
-          <li>Цветовая подсветка: 🟢/🟡/🟠/🔴 по WR</li>
-        </ul>
-        <p class="hint" style="margin-top: 14px; padding: 10px; background: rgba(96, 165, 250, 0.08); border-left: 3px solid var(--primary); border-radius: 4px;">
-          📍 Все CONSENSUS-сигналы будут писаться в БД <b>signals</b> с флагом
-          <code>entered=True/False</code>. БД хранится 6 месяцев минимум
-          (configurable до 12). Profit-метрики считают только <code>entered=True AND WIN</code>.
-        </p>
+      <div class="subtabs">
+        <button class="subtab active" data-subtab="strategy-settings">⚙️ Настройки</button>
+        <button class="subtab" data-subtab="analytics">📊 Аналитика</button>
+      </div>
+
+      <!-- Подвкладка: Настройки стратегии (indicator params) -->
+      <div id="sub-strategy-settings" class="subtab-panel active">
+        <div class="card">
+          <p class="hint">
+            Параметры индикаторов: RSI, EMA, BB, ATR, QQE, HTF — относятся
+            ТОЛЬКО к этой стратегии. Общие настройки бота (базовая ставка,
+            мартингейл, расписание) — во вкладке «⚙️ Настройки бота».
+          </p>
+          <div id="strategy-params-list">Загрузка…</div>
+        </div>
+      </div>
+
+      <!-- Подвкладка: Аналитика (placeholder для этапа 2) -->
+      <div id="sub-analytics" class="subtab-panel">
+        <div class="card">
+          <p class="hint" style="font-size: 14px; line-height: 1.6;">
+            Будет наполнено в этапе 2 рефакторинга. Согласно плану:
+          </p>
+          <ul style="color: var(--fg-muted); font-size: 13px; line-height: 1.7;">
+            <li>Главная таблица: <b>пары × 24h-средние</b></li>
+            <li>Фильтры периода: <b>1д / 7д / 14д / 30д / 60д / по дате</b></li>
+            <li>Сортировка по любому столбцу</li>
+            <li>Клик на пару → раскрытие 24-часовой детализации</li>
+            <li>Плашка «<b>Рабочие часы</b>» (визуальный индикатор активного фильтра)</li>
+            <li>Плашка фильтр по времени (<code>13:00-19:00</code> — суммарно за период)</li>
+            <li>Колонка «<b>Best exp за последние N сделок</b>» (фильтруемое окно)</li>
+            <li>Кнопка «<b>Применить как фильтр</b>» к стратегии</li>
+            <li>Кнопка «<b>Экспорт данных</b>» (CSV)</li>
+            <li>Цветовая подсветка: 🟢/🟡/🟠/🔴 по WR</li>
+          </ul>
+          <p class="hint" style="margin-top: 14px; padding: 10px; background: rgba(96, 165, 250, 0.08); border-left: 3px solid var(--primary); border-radius: 4px;">
+            📍 Все CONSENSUS-сигналы будут писаться в БД <b>signals</b> с флагом
+            <code>entered=True/False</code>. БД хранится 6 месяцев минимум
+            (configurable до 12). Profit-метрики считают только <code>entered=True AND WIN</code>.
+          </p>
+        </div>
       </div>
     </div>
   </section>
 </main>
 
 <!-- Cache-bust: bump v=YYYYMMDD when app.js changes. -->
-<script src="/miniapp/app.js?v=20260510"></script>
+<script src="/miniapp/app.js?v=20260511"></script>
 </body>
 </html>

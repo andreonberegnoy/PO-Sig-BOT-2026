@@ -102,7 +102,12 @@
       document.getElementById("m-mode").textContent = s.mode || "—";
       document.getElementById("m-balance").textContent = s.balance != null ? `$${(+s.balance).toFixed(2)}` : "—";
       document.getElementById("m-strategy").textContent = s.active_strategy || "—";
-      document.getElementById("m-tracked").textContent = s.tracked_pairs ?? "—";
+      // Tracked пары: показать count + список имён (compact comma-separated)
+      const tList = Array.isArray(s.tracked_pairs_list) ? s.tracked_pairs_list : [];
+      const tCount = s.tracked_pairs ?? tList.length;
+      document.getElementById("m-tracked").innerHTML = tCount > 0 && tList.length > 0
+        ? `<b>${tCount}</b>: <span style="font-size:12px; color:var(--hint); word-break:break-all;">${tList.join(", ")}</span>`
+        : (tCount === 0 ? "0 (нет подходящих пар)" : (tCount ?? "—"));
       document.getElementById("m-active").textContent = s.active_syms ?? "—";
       document.getElementById("m-banned").textContent = s.banned_pairs ?? "—";
       const inSearchMode = (s.mg_step ?? 0) > 0 && !s.current_pair;

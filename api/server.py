@@ -95,6 +95,7 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
             "paused": getattr(s, "paused", False),
             "waiting_resume": getattr(s, "waiting_resume", False),
             "tracked_pairs": len(getattr(sm, "_tracked", set()) or set()) if sm else 0,
+            "tracked_pairs_list": sorted(list(getattr(sm, "_tracked", set()) or set())) if sm else [],
             "banned_pairs": banned_count,
             "active_strategy": registry.active_name if registry else None,
             "active_syms": sum(1 for v in (getattr(sm, "_tick_counts", {}) or {}).values() if v > 0) if sm else 0,

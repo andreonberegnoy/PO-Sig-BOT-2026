@@ -206,20 +206,49 @@
 
 **| РАЗДЕЛИТЕЛЬ |**
 
-**Второстепенные показатели — market snapshots на момент сигнала** (собираются для ВСЕХ signals):
-12. ATR(14) 1m на плюсовых сделках (среднее)
-13. ATR(14) 1m на минусовых сделках (среднее) — позволит фильтровать «торговать только при ATR в диапазоне X-Y»
-14. ATR(14) старший ТФ 5M
-15. Размер последней свечи / ATR (импульсность входа)
-16. Направление 5min EMA50 (тренд старшего ТФ)
-17. EMA20 1m на момент входа
-18. RSI(14) на момент входа
-19. QQE Factor
+**Второстепенные показатели — market snapshots на момент сигнала**
 
-Эти данные собираются `_persist_market_snapshot()` в момент закрытия каждого CONSENSUS-сигнала и сохраняются в таблицу `signals`. Источники:
+Собираются для ВСЕХ signals. Полный список того что **фактически вычисляет** CONSENSUS (просмотрел код `strategy/consensus.py`):
+
+#### Голоса CONSENSUS (5 индикаторов, каждый 0 или 1)
+12. `votes_rsi` — голос RSI/QQE кросса (всегда 1, иначе сигнала бы не было)
+13. `votes_htf` — голос HTF (тренд старшего ТФ совпал?)
+14. `votes_vol` — голос Volatility (ATR ratio в диапазоне atrMinRatio..atrMaxRatio?)
+15. `votes_bb` — голос Bollinger (цена в зоне покупки/продажи?)
+16. `votes_candle` — голос Candle (свеча выровнена + размер OK?)
+17. `votes_total` — сумма голосов (4 или 5)
+
+#### Числовые значения индикаторов
+18. `rsi_ma` — текущее RSI MA значение (RSI period 14, smoothing 5)
+19. `qqe_trailing` — текущая QQE trailing line
+20. `htf_value` — направление HTF тренда (+1 up / 0 flat / -1 down) на TF = htfMultiplier × 1m (5m по умолчанию)
+21. `atr14_1m` — ATR(14) текущий на 1m
+22. `atr_avg` — SMA(ATR, atrAvgWindow=100) — средний ATR за 100 баров
+23. `atr_ratio` = atr14_1m / atr_avg (насколько волатильность отличается от средней — фильтруем торговлю при ratio < 0.7 или > 2.0)
+24. `bb_upper` — верх Bollinger канала
+25. `bb_lower` — низ канала
+26. `bb_position` = (close − lower) / (upper − lower), значение 0..1 (где находится цена в канале)
+27. `candle_body` = abs(close − open) (размер тела свечи)
+28. `candle_atr_ratio` = candle_body / atr14_1m (импульсность входа)
+29. `candle_direction` — 1 если close>open (бычья), -1 если медвежья, 0 если doji
+
+#### Контекстные мета (для day-of-week и hour-of-day анализа)
+30. `hour_local` (0..23 в TZ пользователя)
+31. `day_of_week` (0=Mon..6=Sun)
+32. `payout_at_signal` (% выплаты PO в момент сигнала)
+33. `wr1_long_at_signal` (WR1 за 1000 свечей этой пары на момент сигнала — динамическая метрика стратегии)
+34. `wr1_recent_at_signal` (WR1 за 200 свечей — recent form пары)
+
+Эти данные собираются `_persist_market_snapshot()` в момент закрытия каждого CONSENSUS-сигнала и сохраняются в таблицу `signals`.
+
+#### Источники данных
 - Из cached candles (`sm._candles`) — последние N баров до signal_ts
-- Расчёты те же что в `strategy/indicators.py` (RSI, ATR, EMA, QQE)
-- Без переписывания логики индикаторов — переиспользуем существующие функции
+- Расчёты используют существующие функции из `strategy/indicators.py` (rsi/qqe, htf_trend, atr, sma, bollinger, candle_aligned) — **без переписывания**
+- Голоса передаются прямо из `Signal.votes` dict который уже формирует CONSENSUS
+- WR1-1000 / WR1-200 берутся из `_pair_scores[symbol]` (актуальные на тот момент)
+
+#### Расширяемость для других стратегий
+Если активна не-CONSENSUS стратегия (загруженная пользователем) — собираем минимум: `votes_total`, `rsi_ma` (если стратегия его экспортирует), `atr14_1m`, `bb_position`, `candle_atr_ratio`, `hour_local`, `day_of_week`, `payout_at_signal`. Колонки специфичные для CONSENSUS будут NULL — UI это покажет как «—».
 
 ### 2.3 Новая таблица signals (заменяет virtual_signals)
 
@@ -230,32 +259,51 @@ CREATE TABLE signals (
     side            TEXT NOT NULL,           -- call | put
     signal_ts       INTEGER NOT NULL,        -- entry minute (= bar close + tf)
     entry_close     REAL NOT NULL,
-    entered         BOOLEAN NOT NULL DEFAULT 0,    -- бот реально вошёл?
-    trade_id        TEXT,                    -- если entered, FK к trades.trade_id
+    entered         BOOLEAN NOT NULL DEFAULT 0,
+    trade_id        TEXT,                    -- FK к trades.trade_id если entered
     exp_wins        TEXT,                    -- JSON [w1..w5]
     settled_at      INTEGER,
 
-    -- Market snapshot на момент сигнала (для аналитики/фильтрации)
-    payout_at_signal INTEGER,                -- payout % в момент сигнала
-    atr14_1m        REAL,                    -- ATR(14) на 1m TF
-    atr14_5m        REAL,                    -- ATR(14) на старшем 5m TF
-    ema20_1m        REAL,                    -- EMA(20) 1m
-    ema50_5m        REAL,                    -- EMA(50) 5m (направление тренда)
-    rsi14           REAL,                    -- RSI(14) текущий
-    qqe_factor      REAL,                    -- QQE значение
-    candle_size_ratio REAL,                  -- abs(close-open) / atr14 (импульсность)
-    -- Производные (можно вычислять при выборке, но индексировать удобнее так):
-    htf_trend       INTEGER,                 -- 1=up (close>ema50_5m), -1=down, 0=flat
+    -- Голоса CONSENSUS (или эквивалент в кастомных стратегиях)
+    votes_rsi       INTEGER,                 -- 0/1
+    votes_htf       INTEGER,                 -- 0/1
+    votes_vol       INTEGER,                 -- 0/1
+    votes_bb        INTEGER,                 -- 0/1
+    votes_candle    INTEGER,                 -- 0/1
+    votes_total     INTEGER,                 -- сумма (4 или 5)
+
+    -- Числовые значения индикаторов на момент сигнала
+    rsi_ma          REAL,                    -- RSI MA значение
+    qqe_trailing    REAL,                    -- QQE trailing line
+    htf_value       INTEGER,                 -- +1 up / 0 flat / -1 down
+    atr14_1m        REAL,                    -- ATR(14) на 1m
+    atr_avg         REAL,                    -- SMA(ATR, atrAvgWindow=100)
+    atr_ratio       REAL,                    -- atr14_1m / atr_avg
+    bb_upper        REAL,
+    bb_lower        REAL,
+    bb_position     REAL,                    -- 0..1, позиция close в канале
+    candle_body     REAL,                    -- abs(close - open)
+    candle_atr_ratio REAL,                   -- candle_body / atr14_1m
+    candle_direction INTEGER,                -- 1=бычья, -1=медвежья, 0=doji
+
+    -- Контекстные мета (для day-of-week / hour-of-day анализа)
+    hour_local      INTEGER,                 -- 0..23 в TZ пользователя
+    day_of_week     INTEGER,                 -- 0=Mon..6=Sun
+    payout_at_signal INTEGER,                -- %
+    wr1_long_at_signal REAL,                 -- WR1-1000 этой пары
+    wr1_recent_at_signal REAL,               -- WR1-200 этой пары
 
     UNIQUE(symbol, signal_ts)
 );
 CREATE INDEX idx_signals_symts ON signals(symbol, signal_ts);
 CREATE INDEX idx_signals_pending ON signals(settled_at, signal_ts);
 CREATE INDEX idx_signals_entered ON signals(entered);
-CREATE INDEX idx_signals_atr ON signals(atr14_1m);   -- для фильтрации «при ATR ∈ [X,Y]»
+CREATE INDEX idx_signals_atr ON signals(atr14_1m);
+CREATE INDEX idx_signals_hour ON signals(hour_local);
+CREATE INDEX idx_signals_dow ON signals(day_of_week);
 ```
 
-Чистая семантика, никакого «virtual». Все market params снимаются из cached candles на момент signal_ts через переиспользуемые функции из `strategy/indicators.py`.
+Все market params снимаются из cached candles на момент signal_ts через переиспользуемые функции из `strategy/indicators.py`. Добавлена расширяемость для нестандартных стратегий — индикаторы которые не использует загруженная стратегия будут NULL.
 
 ### 2.4 Гибкий Martingale (общие настройки)
 

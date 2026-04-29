@@ -4,6 +4,31 @@
   const initData = tg?.initData || "";
   if (tg) { tg.ready(); tg.expand(); }
 
+  // ─── Auto-dismiss keyboard ────────────────────────────────────────────
+  // Тап вне input/textarea/select/button/label → снять фокус с активного
+  // поля. Telegram Mini App в iOS/Android не закрывает клавиатуру по
+  // тапу в пустоту — добавляем сами. pointerdown а не click, чтобы
+  // клавиатура исчезала МГНОВЕННО, до выполнения действия.
+  document.addEventListener("pointerdown", (e) => {
+    const t = e.target;
+    if (!t || !(t instanceof Element)) return;
+    if (t.closest("input, textarea, select, button, label, [contenteditable]")) return;
+    const a = document.activeElement;
+    if (a && (a.tagName === "INPUT" || a.tagName === "TEXTAREA" || a.tagName === "SELECT")) {
+      a.blur();
+    }
+  }, { passive: true });
+  // Дополнительно — Enter в input снимает фокус (на цифровых полях
+  // часто кнопки Done нет, а Enter работает как submit).
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      const a = document.activeElement;
+      if (a && (a.tagName === "INPUT" || a.tagName === "TEXTAREA")) {
+        a.blur();
+      }
+    }
+  });
+
   const api = async (path, opts = {}) => {
     const res = await fetch(path, {
       ...opts,

@@ -25,6 +25,18 @@ main { padding: 12px; padding-bottom: 80px; }
 .tab-panel { display: none; }
 .tab-panel.active { display: block; }
 
+/* Sub-tabs внутри top-level tabs (например: Стратегия → Список / Настройки / Аналитика) */
+.subtabs { display: flex; gap: 6px; margin-bottom: 12px; padding: 6px;
+           background: rgba(255,255,255,0.04); border-radius: 10px; flex-wrap: wrap; }
+.subtab { flex: 1; min-width: 110px; background: transparent; border: 0;
+          color: var(--hint); padding: 10px 12px; border-radius: 8px;
+          font-size: 13px; cursor: pointer; transition: background 0.15s; }
+.subtab.active { background: rgba(96, 165, 250, 0.15); color: var(--fg);
+                 font-weight: 600; }
+.subtab:hover:not(.active) { background: rgba(255,255,255,0.04); }
+.subtab-panel { display: none; }
+.subtab-panel.active { display: block; }
+
 .card { background: var(--section-bg); border-radius: 12px; padding: 16px; margin-bottom: 12px; }
 .card h2, .card h3 { margin: 0 0 12px 0; font-size: 16px; }
 
@@ -115,31 +127,8 @@ ul.strategies li.strategy-active { background: rgba(109, 180, 255, 0.08); }
 .action-msg.warn { color: #fdf647; }
 .action-msg.info { color: var(--hint); }
 
-/* ─── Analytics tab ─── */
+/* ─── Hint text (общее использование) ─── */
 .hint { color: var(--hint); font-size: 13px; margin: 0 0 12px 0; line-height: 1.4; }
-.range-selector { display: flex; gap: 6px; align-items: center; margin-bottom: 12px;
-                  color: var(--hint); font-size: 13px; flex-wrap: wrap; }
-.range-btn, .hour-range-btn {
-  background: transparent; border: 1px solid rgba(255,255,255,0.15);
-  color: var(--fg); padding: 6px 12px; border-radius: 6px;
-  cursor: pointer; font-size: 13px;
-}
-.range-btn.active, .hour-range-btn.active {
-  background: var(--button); color: var(--button-text); border-color: var(--button);
-}
-
-/* Tiny low-emphasis button for destructive actions you don't want to fat-finger */
-.btn-tiny {
-  background: transparent;
-  border: 1px solid rgba(239, 68, 68, 0.3);
-  color: rgba(239, 68, 68, 0.7);
-  padding: 3px 8px;
-  border-radius: 4px;
-  font-size: 11px;
-  cursor: pointer;
-  opacity: 0.6;
-}
-.btn-tiny:hover { opacity: 1; }
 
 /* Multi-select checkbox group (used for asset_categories) */
 .multi-row {
@@ -157,16 +146,8 @@ ul.strategies li.strategy-active { background: rgba(109, 180, 255, 0.08); }
   background: rgba(109, 180, 255, 0.15);
   border-color: var(--button);
 }
-table.analytics { width: 100%; border-collapse: collapse; font-size: 12px; }
-table.analytics th { text-align: left; padding: 8px 6px; color: var(--hint);
-                     border-bottom: 1px solid rgba(255,255,255,0.1); cursor: pointer;
-                     user-select: none; white-space: nowrap; }
-table.analytics th.sort-asc::after  { content: " ▲"; color: var(--button); }
-table.analytics th.sort-desc::after { content: " ▼"; color: var(--button); }
-table.analytics td { padding: 6px; border-bottom: 1px solid rgba(255,255,255,0.05);
-                     white-space: nowrap; }
-table.analytics tr:hover { background: rgba(255,255,255,0.03); }
-.analytics-wrap { overflow-x: auto; }
+
+/* Утилитарные классы для подсветки ячеек (понадобятся в этапе 2 для аналитики) */
 .cell-good { color: #22c55e; }
 .cell-warn { color: #fdf647; }
 .cell-bad  { color: #ef4444; }

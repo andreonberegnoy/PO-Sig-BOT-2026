@@ -1,14 +1,19 @@
-/* Mini App logic. Vanilla JS, no build step. */
+/* Mini App logic. Vanilla JS, no build step.
+ *
+ * Структура (после рефакторинга):
+ *   🏠 Главная (Status)
+ *   ⚙️ Настройки бота (общие — base_amount, MG, schedule, weekends, filter)
+ *   🧠 Стратегия
+ *      ├─ Список стратегий + загрузка
+ *      ├─ Настройки стратегии (indicator params: RSI, EMA, BB, ATR, QQE, HTF)
+ *      └─ Аналитика (placeholder, наполнится в этапе 2 рефакторинга)
+ */
 (() => {
   const tg = window.Telegram?.WebApp;
   const initData = tg?.initData || "";
   if (tg) { tg.ready(); tg.expand(); }
 
-  // ─── Auto-dismiss keyboard ────────────────────────────────────────────
-  // Тап вне input/textarea/select/button/label → снять фокус с активного
-  // поля. Telegram Mini App в iOS/Android не закрывает клавиатуру по
-  // тапу в пустоту — добавляем сами. pointerdown а не click, чтобы
-  // клавиатура исчезала МГНОВЕННО, до выполнения действия.
+  // ─── Auto-dismiss keyboard on tap outside input ───────────────────────
   document.addEventListener("pointerdown", (e) => {
     const t = e.target;
     if (!t || !(t instanceof Element)) return;
@@ -18,14 +23,10 @@
       a.blur();
     }
   }, { passive: true });
-  // Дополнительно — Enter в input снимает фокус (на цифровых полях
-  // часто кнопки Done нет, а Enter работает как submit).
   document.addEventListener("keydown", (e) => {
     if (e.key === "Enter") {
       const a = document.activeElement;
-      if (a && (a.tagName === "INPUT" || a.tagName === "TEXTAREA")) {
-        a.blur();
-      }
+      if (a && (a.tagName === "INPUT" || a.tagName === "TEXTAREA")) a.blur();
     }
   });
 
@@ -45,24 +46,42 @@
     return res.json();
   };
 
-  // ─── Tab switching ───
-  // Note: /api/status auto-poll every 5s while Status tab is active is set up
-  // at the bottom of this file (search for `setInterval`). No need to wire it here.
+  // ─── Top-level tab switching ───────────────────────────────────────────
   document.querySelectorAll(".tab").forEach((t) => {
     t.addEventListener("click", () => {
       document.querySelectorAll(".tab").forEach((x) => x.classList.remove("active"));
       document.querySelectorAll(".tab-panel").forEach((x) => x.classList.remove("active"));
       t.classList.add("active");
       document.getElementById(`tab-${t.dataset.tab}`).classList.add("active");
-      if (t.dataset.tab === "settings") loadSettings();
-      if (t.dataset.tab === "strategies") loadStrategies();
+      if (t.dataset.tab === "settings") loadGlobalSettings();
+      if (t.dataset.tab === "strategy") {
+        // При входе в Стратегия — активна подвкладка «Список»
+        loadStrategies();
+      }
       if (t.dataset.tab === "status") loadStatus();
-      if (t.dataset.tab === "hourly") loadHourly();
-      // expiry tab — explicit click of "Запустить анализ", не auto-load
     });
   });
 
-  // ─── STATUS ───
+  // ─── Sub-tab switching внутри «Стратегия» ──────────────────────────────
+  document.querySelectorAll(".subtab").forEach((sub) => {
+    sub.addEventListener("click", () => {
+      document.querySelectorAll(".subtab").forEach((x) => x.classList.remove("active"));
+      document.querySelectorAll(".subtab-panel").forEach((x) => x.classList.remove("active"));
+      sub.classList.add("active");
+      const target = sub.dataset.subtab;
+      // Map subtab name → panel id
+      const panelId = target === "list" ? "sub-list"
+        : target === "strategy-settings" ? "sub-strategy-settings"
+        : target === "analytics" ? "sub-analytics"
+        : null;
+      if (panelId) document.getElementById(panelId)?.classList.add("active");
+      if (target === "list") loadStrategies();
+      if (target === "strategy-settings") loadStrategyParams();
+      // analytics — placeholder, ничего не грузим пока
+    });
+  });
+
+  // ═════════════════════ ГЛАВНАЯ (STATUS) ════════════════════════════════
   function showActionMsg(text, kind = "info") {
     const el = document.getElementById("action-msg");
     if (!el) return;
@@ -70,7 +89,10 @@
     el.className = `action-msg ${kind}`;
     if (text) {
       clearTimeout(showActionMsg._t);
-      showActionMsg._t = setTimeout(() => { el.textContent = ""; el.className = "action-msg"; }, 6000);
+      showActionMsg._t = setTimeout(() => {
+        el.textContent = "";
+        el.className = "action-msg";
+      }, 6000);
     }
   }
 
@@ -83,7 +105,6 @@
       document.getElementById("m-tracked").textContent = s.tracked_pairs ?? "—";
       document.getElementById("m-active").textContent = s.active_syms ?? "—";
       document.getElementById("m-banned").textContent = s.banned_pairs ?? "—";
-      // In MG cycle but no pair locked → bot is searching all eligible pairs
       const inSearchMode = (s.mg_step ?? 0) > 0 && !s.current_pair;
       document.getElementById("m-pair").textContent = inSearchMode
         ? "🔍 поиск сигнала на всех допустимых"
@@ -93,13 +114,9 @@
       document.getElementById("m-mg").textContent = s.mg_step ?? 0;
       document.getElementById("m-loss").textContent = `$${(+(s.session_loss || 0)).toFixed(2)}`;
       document.getElementById("m-paused").textContent = s.paused ? "ДА" : "нет";
-      // Cycle-only buttons (switch pair, reset cycle): show whenever MG cycle is
-      // active — either locked on a pair OR in search mode (current_pair=None).
-      // Reset cycle is useful in both states; switch pair only when locked.
       const inCycle = (s.mg_step ?? 0) > 0;
       const ca = document.getElementById("cycle-actions");
       if (ca) ca.style.display = inCycle ? "" : "none";
-      // Hide "switch pair" specifically in search mode (no pair to switch from)
       const switchBtn = document.getElementById("btn-switch-pair");
       if (switchBtn) switchBtn.style.display = inSearchMode ? "none" : "";
     } catch (e) {
@@ -122,7 +139,7 @@
     try {
       const r = await api("/api/control/switch_pair", { method: "POST" });
       if (r && r.ok && (r.new === "SEARCH" || r.mode === "SEARCH")) {
-        showActionMsg(`🔍 SEARCH режим: ${r.old || "пара"} исключена из цикла. Войду на первый CONSENSUS-сигнал на любой tracked-паре.`, "ok");
+        showActionMsg(`🔍 SEARCH режим: ${r.old || "пара"} исключена из цикла. Войду на первый CONSENSUS-сигнал.`, "ok");
       } else if (r && r.ok && r.new) {
         showActionMsg(`🔀 Сменена пара: ${r.old} → ${r.new}`, "ok");
       } else {
@@ -145,9 +162,8 @@
     loadStatus();
   };
 
-  // ─── SETTINGS ───
-  // Global (cross-strategy) settings only. Indicator parameters are now
-  // per-strategy and rendered dynamically below.
+  // ═════════════════════ НАСТРОЙКИ БОТА (общие) ══════════════════════════
+  // Только общие настройки. Indicator params живут в «Стратегия → Настройки».
   const GLOBAL_SCHEMA = {
     "🔍 Фильтр пар": [
       { k: "filter.asset_categories", t: "multi",
@@ -196,51 +212,18 @@
     return "string";
   }
 
-  async function loadSettings() {
+  function flashSetting(el, ok) {
+    el.style.outline = `2px solid ${ok ? "#22c55e" : "#ef4444"}`;
+    setTimeout(() => (el.style.outline = ""), 600);
+  }
+
+  // Загружает только GLOBAL_SCHEMA в #settings-list (без strategy params)
+  async function loadGlobalSettings() {
     const cont = document.getElementById("settings-list");
     cont.innerHTML = "Загрузка…";
     try {
-      const [cfg, stratData] = await Promise.all([
-        api("/api/settings"),
-        api("/api/strategies"),
-      ]);
+      const cfg = await api("/api/settings");
       cont.innerHTML = "";
-
-      // ── Strategy-specific section ──
-      const active = stratData.strategies.find((s) => s.active) || stratData.strategies[0];
-      if (active) {
-        const stratDiv = document.createElement("div");
-        stratDiv.className = "category";
-        stratDiv.innerHTML = `<div class="category-title">🧠 Параметры стратегии: <b>${active.name}</b></div>`;
-        const paramKeys = Object.keys(active.default_params || {});
-        for (const key of paramKeys) {
-          const schema = (active.param_schema || {})[key] || {};
-          const value = (active.params || {})[key] ?? active.default_params[key];
-          const t = schema.type || inferType(value);
-          const label = schema.label || key;
-          const row = document.createElement("div");
-          row.className = "setting-row";
-          let input;
-          if (t === "bool") {
-            input = `<input type="checkbox" data-strat-k="${key}" data-strat="${active.name}" data-t="bool" ${value ? "checked" : ""}/>`;
-          } else if (t === "choice" && Array.isArray(schema.options)) {
-            input = `<select data-strat-k="${key}" data-strat="${active.name}" data-t="choice">` +
-              schema.options.map((o) => `<option value="${o}" ${o === value ? "selected" : ""}>${o}</option>`).join("") +
-              `</select>`;
-          } else if (t === "string") {
-            input = `<input type="text" data-strat-k="${key}" data-strat="${active.name}" data-t="string" value="${value ?? ""}"/>`;
-          } else {
-            const step = schema.step || (t === "int" ? 1 : 0.1);
-            input = `<input type="number" data-strat-k="${key}" data-strat="${active.name}" data-t="${t}"
-                            min="${schema.min ?? ""}" max="${schema.max ?? ""}" step="${step}" value="${value ?? ""}"/>`;
-          }
-          row.innerHTML = `<label>${label}<span class="hint">${key}</span></label>${input}`;
-          stratDiv.appendChild(row);
-        }
-        cont.appendChild(stratDiv);
-      }
-
-      // ── Global sections ──
       for (const [cat, items] of Object.entries(GLOBAL_SCHEMA)) {
         const div = document.createElement("div");
         div.className = "category";
@@ -257,7 +240,6 @@
               it.options.map((o) => `<option value="${o}" ${o === v ? "selected" : ""}>${o}</option>`).join("") +
               `</select>`;
           } else if (it.t === "multi") {
-            // Multi-select via checkboxes. Value is an array.
             const arr = Array.isArray(v) ? v : [];
             const opts = it.options.map((o) =>
               `<label class="multi-opt"><input type="checkbox" data-multi="${it.k}" data-opt="${o}" ${arr.includes(o) ? "checked" : ""}/> ${o}</label>`
@@ -273,13 +255,7 @@
         }
         cont.appendChild(div);
       }
-
-      // ── handlers ──
-      const flash = (el, ok) => {
-        el.style.outline = `2px solid ${ok ? "#22c55e" : "#ef4444"}`;
-        setTimeout(() => (el.style.outline = ""), 600);
-      };
-
+      // Handlers — single-key updates
       cont.querySelectorAll("[data-k]").forEach((el) => {
         el.addEventListener("change", async () => {
           const key = el.dataset.k;
@@ -291,25 +267,76 @@
           else value = el.value;
           try {
             await api("/api/settings", { method: "PUT", body: JSON.stringify({ [key]: value }) });
-            flash(el, true);
-          } catch (e) { flash(el, false); console.error(e); }
+            flashSetting(el, true);
+          } catch (e) { flashSetting(el, false); console.error(e); }
         });
       });
-      // Multi-select handlers (asset_categories etc.)
+      // Handlers — multi-select (asset_categories)
       cont.querySelectorAll("[data-multi]").forEach((el) => {
         el.addEventListener("change", async () => {
           const key = el.dataset.multi;
-          // Collect all checked options for this key
           const opts = [];
           cont.querySelectorAll(`[data-multi="${key}"]:checked`).forEach((c) =>
             opts.push(c.dataset.opt)
           );
           try {
             await api("/api/settings", { method: "PUT", body: JSON.stringify({ [key]: opts }) });
-            flash(el, true);
-          } catch (e) { flash(el, false); console.error(e); }
+            flashSetting(el, true);
+          } catch (e) { flashSetting(el, false); console.error(e); }
         });
       });
+    } catch (e) {
+      cont.innerHTML = `<div class="status-line err">Ошибка: ${e.message}</div>`;
+    }
+  }
+
+  // ═════════════════════ СТРАТЕГИЯ → НАСТРОЙКИ ══════════════════════════
+  // Загружает ТОЛЬКО indicator params активной стратегии
+  async function loadStrategyParams() {
+    const cont = document.getElementById("strategy-params-list");
+    cont.innerHTML = "Загрузка…";
+    try {
+      const stratData = await api("/api/strategies");
+      cont.innerHTML = "";
+      const active = stratData.strategies.find((s) => s.active) || stratData.strategies[0];
+      if (!active) {
+        cont.innerHTML = `<div class="status-line">Нет активной стратегии. Выбери в подвкладке «Список».</div>`;
+        return;
+      }
+      const div = document.createElement("div");
+      div.className = "category";
+      div.innerHTML = `<div class="category-title">Параметры: <b>${active.name}</b></div>`;
+      const paramKeys = Object.keys(active.default_params || {});
+      if (paramKeys.length === 0) {
+        div.innerHTML += `<div class="status-line">У этой стратегии нет настраиваемых параметров.</div>`;
+        cont.appendChild(div);
+        return;
+      }
+      for (const key of paramKeys) {
+        const schema = (active.param_schema || {})[key] || {};
+        const value = (active.params || {})[key] ?? active.default_params[key];
+        const t = schema.type || inferType(value);
+        const label = schema.label || key;
+        const row = document.createElement("div");
+        row.className = "setting-row";
+        let input;
+        if (t === "bool") {
+          input = `<input type="checkbox" data-strat-k="${key}" data-strat="${active.name}" data-t="bool" ${value ? "checked" : ""}/>`;
+        } else if (t === "choice" && Array.isArray(schema.options)) {
+          input = `<select data-strat-k="${key}" data-strat="${active.name}" data-t="choice">` +
+            schema.options.map((o) => `<option value="${o}" ${o === value ? "selected" : ""}>${o}</option>`).join("") +
+            `</select>`;
+        } else if (t === "string") {
+          input = `<input type="text" data-strat-k="${key}" data-strat="${active.name}" data-t="string" value="${value ?? ""}"/>`;
+        } else {
+          const step = schema.step || (t === "int" ? 1 : 0.1);
+          input = `<input type="number" data-strat-k="${key}" data-strat="${active.name}" data-t="${t}"
+                          min="${schema.min ?? ""}" max="${schema.max ?? ""}" step="${step}" value="${value ?? ""}"/>`;
+        }
+        row.innerHTML = `<label>${label}<span class="hint">${key}</span></label>${input}`;
+        div.appendChild(row);
+      }
+      cont.appendChild(div);
       cont.querySelectorAll("[data-strat-k]").forEach((el) => {
         el.addEventListener("change", async () => {
           const key = el.dataset.stratK;
@@ -323,8 +350,8 @@
           try {
             await api(`/api/strategies/${encodeURIComponent(strat)}/params`,
                       { method: "PUT", body: JSON.stringify({ [key]: value }) });
-            flash(el, true);
-          } catch (e) { flash(el, false); console.error(e); }
+            flashSetting(el, true);
+          } catch (e) { flashSetting(el, false); console.error(e); }
         });
       });
     } catch (e) {
@@ -332,7 +359,7 @@
     }
   }
 
-  // ─── STRATEGIES ───
+  // ═════════════════════ СТРАТЕГИЯ → СПИСОК ════════════════════════════════
   async function loadStrategies() {
     const list = document.getElementById("strategies-list");
     list.innerHTML = "<li>Загрузка…</li>";
@@ -345,8 +372,6 @@
         const activeBadge = s.active
           ? `<span class="badge active">✓ Активна</span>`
           : `<span class="badge source-${s.source}">${s.source === "user" ? "своя" : "встроенная"}</span>`;
-        // For active strategies — show "Switch to consensus" (so user can disable
-        // a custom strategy and fall back to builtin). For inactive — "Активировать".
         let actionBtn = "";
         if (!s.active) {
           actionBtn = `<button class="btn primary" data-act="activate" data-name="${s.name}">▶ Активировать</button>`;
@@ -415,708 +440,7 @@
     }
   };
 
-  // ─── Analytics tab ───
-  let analyticsState = { range: "7d", sortKey: "score", sortDir: "desc", data: [], workHoursOnly: false };
-
-  function fmt(v, digits = 0, suffix = "") {
-    if (v === undefined || v === null || Number.isNaN(v)) return "—";
-    return (typeof v === "number" ? v.toFixed(digits) : v) + suffix;
-  }
-  function pctClass(v, good = 60, bad = 45) {
-    if (v === undefined || v === null) return "";
-    if (v >= good) return "cell-good";
-    if (v < bad) return "cell-bad";
-    return "cell-warn";
-  }
-  function streakClass(v) {
-    if (v === undefined || v === null) return "";
-    if (v <= 2) return "cell-good";
-    if (v >= 4) return "cell-bad";
-    return "cell-warn";
-  }
-
-  function renderAnalyticsTable() {
-    const wrap = document.getElementById("analytics-table");
-    if (!analyticsState.data || analyticsState.data.length === 0) {
-      wrap.innerHTML = '<div class="status-line">Данных пока нет — снапшоты пишутся каждые 5 мин (выплаты) и каждый час (бэктест). Подожди и обнови.</div>';
-      return;
-    }
-    const cols = [
-      { key: "symbol",         label: "Пара" },
-      { key: "current_payout", label: "Выплата сейчас" },
-      { key: "avg_payout",     label: "Средняя выплата" },
-      { key: "pct_above_min",  label: "% времени ≥ min" },
-      { key: "pct_above_floor",label: "% времени ≥ floor" },
-      { key: "last_wr1",       label: "1-я WR" },
-      { key: "avg_wr1",        label: "1-я WR (средн.)" },
-      { key: "last_wr",        label: "Общая WR" },
-      { key: "last_max_streak",label: "Max минусов" },
-      { key: "max_max_streak", label: "Max мин подряд" },
-      { key: "avg_signals",    label: "Кол сигнал" },
-      { key: "n_snapshots",    label: "Снапшотов" },
-    ];
-    // Sort
-    const dir = analyticsState.sortDir === "asc" ? 1 : -1;
-    const key = analyticsState.sortKey;
-    const score = (r) => (r.last_wr1 || 0) * 0.5 + (r.pct_above_min || 0) * 0.3 - (r.last_max_streak || 0) * 5;
-    const sorted = [...analyticsState.data].sort((a, b) => {
-      let av = key === "score" ? score(a) : a[key];
-      let bv = key === "score" ? score(b) : b[key];
-      if (typeof av === "string") return av.localeCompare(bv) * dir;
-      av = av ?? -Infinity; bv = bv ?? -Infinity;
-      return (av - bv) * dir;
-    });
-    const head = cols.map(c => {
-      const cls = c.key === key ? `sort-${analyticsState.sortDir}` : "";
-      return `<th class="${cls}" data-sort="${c.key}">${c.label}</th>`;
-    }).join("");
-    const rows = sorted.map(r => {
-      const wr1 = r.last_wr1, streak = r.last_max_streak;
-      return `<tr>
-        <td><b>${r.symbol}</b></td>
-        <td>${fmt(r.current_payout, 0, "%")}</td>
-        <td>${fmt(r.avg_payout, 1, "%")}</td>
-        <td>${fmt(r.pct_above_min, 1, "%")}</td>
-        <td>${fmt(r.pct_above_floor, 1, "%")}</td>
-        <td class="${pctClass(wr1)}">${fmt(wr1, 0, "%")}</td>
-        <td class="${pctClass(r.avg_wr1)}">${fmt(r.avg_wr1, 0, "%")}</td>
-        <td class="${pctClass(r.last_wr)}">${fmt(r.last_wr, 0, "%")}</td>
-        <td class="${streakClass(streak)}">${fmt(streak)}</td>
-        <td class="${streakClass(r.max_max_streak)}">${fmt(r.max_max_streak)}</td>
-        <td>${fmt(r.avg_signals, 0)}</td>
-        <td>${fmt(r.n_snapshots, 0)}</td>
-      </tr>`;
-    }).join("");
-    wrap.innerHTML = `
-      <div class="analytics-wrap">
-        <table class="analytics">
-          <thead><tr>${head}</tr></thead>
-          <tbody>${rows}</tbody>
-        </table>
-      </div>`;
-    wrap.querySelectorAll("th[data-sort]").forEach((th) => {
-      th.addEventListener("click", () => {
-        const k = th.dataset.sort;
-        if (analyticsState.sortKey === k) {
-          analyticsState.sortDir = analyticsState.sortDir === "asc" ? "desc" : "asc";
-        } else {
-          analyticsState.sortKey = k;
-          analyticsState.sortDir = "desc";
-        }
-        renderAnalyticsTable();
-      });
-    });
-  }
-
-  async function loadAnalytics() {
-    const wrap = document.getElementById("analytics-table");
-    wrap.innerHTML = '<div class="status-line">Загрузка…</div>';
-    try {
-      const wh = analyticsState.workHoursOnly ? 1 : 0;
-      const r = await api(`/api/pair_stats?range=${encodeURIComponent(analyticsState.range)}&work_hours_only=${wh}`);
-      analyticsState.data = r.pairs || [];
-      renderAnalyticsTable();
-    } catch (e) {
-      wrap.innerHTML = `<div class="status-line err">Ошибка: ${e.message}</div>`;
-    }
-  }
-  document.querySelectorAll(".range-btn").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      document.querySelectorAll(".range-btn").forEach(b => b.classList.remove("active"));
-      btn.classList.add("active");
-      analyticsState.range = btn.dataset.range;
-      loadAnalytics();
-    });
-  });
-  const workHoursToggle = document.getElementById("analytics-workhours");
-  if (workHoursToggle) {
-    workHoursToggle.addEventListener("change", () => {
-      analyticsState.workHoursOnly = workHoursToggle.checked;
-      loadAnalytics();
-    });
-  }
-  document.querySelector('.tab[data-tab="analytics"]').addEventListener("click", loadAnalytics);
-
-  // ─── HOURLY analytics ───
-  const hourlyState = { range: "7d", sortKey: "total", sortAsc: false };
-
-  async function loadHourly() {
-    const sumEl = document.getElementById("hourly-summary");
-    const pairsEl = document.getElementById("hourly-pairs");
-    if (!sumEl || !pairsEl) return;
-    sumEl.innerHTML = '<tr><td>Загрузка…</td></tr>';
-    pairsEl.innerHTML = '';
-    try {
-      const r = await api(`/api/hourly_stats?range=${encodeURIComponent(hourlyState.range)}`);
-      _lastHourlyData = r;   // cache for CSV export / apply-filter actions
-      const summary = r.summary_by_hour || [];
-      const buckets = r.buckets || [];
-
-      // ─── Summary table (24 rows, one per hour) ─────────────────────────
-      // Real columns + Virtual columns at currently configured expiry
-      const expBars = r.virt_expiry_bars || 2;
-      const sumHeaders = `
-        <thead><tr>
-          <th>Час</th>
-          <th>Real сделок</th><th>WIN</th><th>LOSS</th>
-          <th>WR</th><th>Avg payout</th><th>Profit</th>
-          <th title="Виртуально на текущей экспирации (${expBars} бара): сколько сигналов стратегия выдала за период по этому часу">Virt сигн.</th>
-          <th title="Если бы бот вошёл во ВСЕ сигналы на ${expBars}-барной экспирации">Virt WIN</th>
-          <th>Virt LOSS</th>
-          <th>Virt WR</th>
-          <th title="Симулированный профит = WIN×base×payout - LOSS×base">Virt Profit</th>
-          <th title="Средняя минимальная экспирация (1-5 баров) которая бы закрыла сигналы в +">Best exp</th>
-        </tr></thead>`;
-      const sumBody = summary.map(s => {
-        if (s.total === 0 && (s.v_total || 0) === 0) return '';
-        const wrCls = s.wr >= 70 ? 'cell-good' : s.wr >= 55 ? '' : 'cell-bad';
-        const profCls = s.profit >= 0 ? 'cell-good' : 'cell-bad';
-        const payCls = s.avg_win_payout == null ? '' :
-          s.avg_win_payout >= 90 ? 'cell-good' :
-          s.avg_win_payout >= 80 ? '' : 'cell-bad';
-        const payTxt = s.avg_win_payout == null ? '—' :
-          `${s.avg_win_payout.toFixed(1)}%` +
-          (s.min_win_payout != null && s.min_win_payout !== s.max_win_payout
-            ? ` <span class="hint" style="font-size:10px;">(${s.min_win_payout}-${s.max_win_payout})</span>` : '');
-        const vWrCls = (s.v_wins_now + s.v_losses_now) === 0 ? '' :
-          s.v_wr_now >= 70 ? 'cell-good' : s.v_wr_now >= 55 ? '' : 'cell-bad';
-        const vProfCls = s.v_profit > 0 ? 'cell-good' : s.v_profit < 0 ? 'cell-bad' : '';
-        const vBestExpTxt = s.v_avg_min_win_exp == null ? '—' :
-          `${s.v_avg_min_win_exp.toFixed(1)} мин`;
-        const vBestCls = s.v_avg_min_win_exp != null && s.v_avg_min_win_exp <= 2.5 ? 'cell-good' :
-                        s.v_avg_min_win_exp != null && s.v_avg_min_win_exp >= 4 ? 'cell-bad' : '';
-        return `<tr>
-          <td><b>${String(s.hour).padStart(2,'0')}:00</b></td>
-          <td>${s.total}</td>
-          <td class="cell-good">${s.wins}</td>
-          <td class="cell-bad">${s.losses}</td>
-          <td class="${wrCls}">${s.wr.toFixed(1)}%</td>
-          <td class="${payCls}">${payTxt}</td>
-          <td class="${profCls}">$${s.profit.toFixed(2)}</td>
-          <td>${s.v_total || 0}</td>
-          <td class="cell-good">${s.v_wins_now || 0}</td>
-          <td class="cell-bad">${s.v_losses_now || 0}</td>
-          <td class="${vWrCls}">${(s.v_wr_now || 0).toFixed(1)}%</td>
-          <td class="${vProfCls}">$${(s.v_profit || 0).toFixed(2)}</td>
-          <td class="${vBestCls}">${vBestExpTxt}</td>
-        </tr>`;
-      }).join('');
-      sumEl.innerHTML = sumHeaders + `<tbody>${sumBody || '<tr><td colspan="13">Нет сделок за выбранный период</td></tr>'}</tbody>`;
-
-      // ─── Pairs × hours table ──────────────────────────────────────────
-      // Sort by current sortKey
-      const sortedBuckets = [...buckets].sort((a, b) => {
-        const k = hourlyState.sortKey;
-        const av = a[k], bv = b[k];
-        if (typeof av === 'string') return hourlyState.sortAsc ? av.localeCompare(bv) : bv.localeCompare(av);
-        return hourlyState.sortAsc ? av - bv : bv - av;
-      });
-      const arrow = (key) => key === hourlyState.sortKey
-        ? (hourlyState.sortAsc ? ' ▲' : ' ▼') : '';
-      const pairsHeaders = `
-        <thead><tr>
-          <th data-sort="symbol">Пара${arrow('symbol')}</th>
-          <th data-sort="hour">Час${arrow('hour')}</th>
-          <th data-sort="total">Сделок${arrow('total')}</th>
-          <th data-sort="wins">WIN${arrow('wins')}</th>
-          <th data-sort="losses">LOSS${arrow('losses')}</th>
-          <th data-sort="wr">WR${arrow('wr')}</th>
-          <th data-sort="avg_win_payout">Avg payout WIN${arrow('avg_win_payout')}</th>
-          <th data-sort="avg_min_win_exp" title="Real: средняя минимальная экспирация которая бы закрыла реальные сделки в +">Min ✓ exp (real)${arrow('avg_min_win_exp')}</th>
-          <th data-sort="v_total" title="Сколько сигналов стратегия выдала на этот час за весь период">Virt сигн.${arrow('v_total')}</th>
-          <th data-sort="v_wins_now" title="Если бы бот вошёл на текущей экспирации во ВСЕ сигналы">Virt WIN${arrow('v_wins_now')}</th>
-          <th data-sort="v_losses_now">Virt LOSS${arrow('v_losses_now')}</th>
-          <th data-sort="v_wr_now">Virt WR${arrow('v_wr_now')}</th>
-          <th data-sort="v_profit" title="Симулированный профит на текущей экспирации">Virt Profit${arrow('v_profit')}</th>
-          <th data-sort="v_avg_min_win_exp" title="Best: предпочтительная экспирация для этого часа (1-5 мин). Применяй как авто-настройку.">Best exp${arrow('v_avg_min_win_exp')}</th>
-          <th data-sort="profit">Real Profit${arrow('profit')}</th>
-        </tr></thead>`;
-      const pairsBody = sortedBuckets.map(p => {
-        const star = (p.wr >= 70 && p.total >= 5) ? ' ⭐' : '';
-        const wrCls = p.wr >= 70 ? 'cell-good' : p.wr >= 55 ? '' : 'cell-bad';
-        const profCls = p.profit >= 0 ? 'cell-good' : 'cell-bad';
-        const payCls = p.avg_win_payout == null ? '' :
-          p.avg_win_payout >= 90 ? 'cell-good' :
-          p.avg_win_payout >= 80 ? '' : 'cell-bad';
-        const payTxt = p.avg_win_payout == null ? '—' :
-          `${p.avg_win_payout.toFixed(1)}%` +
-          (p.min_win_payout != null && p.min_win_payout !== p.max_win_payout
-            ? ` <span class="hint" style="font-size:10px;">(${p.min_win_payout}-${p.max_win_payout})</span>` : '');
-        const expTxt = (p.avg_min_win_exp == null) ? '—' :
-          `${p.avg_min_win_exp.toFixed(1)}` +
-          (p.exp_data_trades ? ` <span class="hint" style="font-size:10px;">(n=${p.exp_data_trades})</span>` : '');
-        const expCls = (p.avg_min_win_exp != null && p.avg_min_win_exp <= 2.5) ? 'cell-good' :
-                       (p.avg_min_win_exp != null && p.avg_min_win_exp >= 4) ? 'cell-bad' : '';
-        const vTotalTxt = p.v_total == null ? '—' : String(p.v_total);
-        const vWrCompleted = (p.v_wins_now || 0) + (p.v_losses_now || 0);
-        const vWrCls = vWrCompleted === 0 ? '' :
-          p.v_wr_now >= 70 ? 'cell-good' : p.v_wr_now >= 55 ? '' : 'cell-bad';
-        const vProfCls = (p.v_profit || 0) > 0 ? 'cell-good' :
-          (p.v_profit || 0) < 0 ? 'cell-bad' : '';
-        const vBestExpTxt = p.v_avg_min_win_exp == null ? '—' :
-          `<b>${p.v_avg_min_win_exp.toFixed(1)} мин</b>` +
-          (p.v_best_exp ? ` <span class="hint" style="font-size:10px;">(${p.v_best_exp})</span>` : '');
-        const vBestCls = p.v_avg_min_win_exp != null && p.v_avg_min_win_exp <= 2.5 ? 'cell-good' :
-                         p.v_avg_min_win_exp != null && p.v_avg_min_win_exp >= 4 ? 'cell-bad' : '';
-        return `<tr>
-          <td>${p.symbol}${star}</td>
-          <td>${String(p.hour).padStart(2,'0')}:00</td>
-          <td>${p.total}</td>
-          <td class="cell-good">${p.wins}</td>
-          <td class="cell-bad">${p.losses}</td>
-          <td class="${wrCls}">${p.wr.toFixed(1)}%</td>
-          <td class="${payCls}">${payTxt}</td>
-          <td class="${expCls}">${expTxt}</td>
-          <td>${vTotalTxt}</td>
-          <td class="cell-good">${p.v_wins_now || 0}</td>
-          <td class="cell-bad">${p.v_losses_now || 0}</td>
-          <td class="${vWrCls}">${(p.v_wr_now || 0).toFixed(1)}%</td>
-          <td class="${vProfCls}">$${(p.v_profit || 0).toFixed(2)}</td>
-          <td class="${vBestCls}">${vBestExpTxt}</td>
-          <td class="${profCls}">$${p.profit.toFixed(2)}</td>
-        </tr>`;
-      }).join('');
-      pairsEl.innerHTML = pairsHeaders + `<tbody>${pairsBody || '<tr><td colspan="15">Нет данных</td></tr>'}</tbody>`;
-
-      // Hook column-header sort
-      pairsEl.querySelectorAll('th[data-sort]').forEach(th => {
-        th.addEventListener('click', () => {
-          const key = th.dataset.sort;
-          if (hourlyState.sortKey === key) hourlyState.sortAsc = !hourlyState.sortAsc;
-          else { hourlyState.sortKey = key; hourlyState.sortAsc = false; }
-          loadHourly();
-        });
-      });
-    } catch (e) {
-      sumEl.innerHTML = `<tr><td>Ошибка: ${e.message || e}</td></tr>`;
-      pairsEl.innerHTML = '';
-    }
-    // Update active-filter status indicator (separate endpoint)
-    try { await refreshHourlyFilterStatus(); } catch (e) { /* non-fatal */ }
-  }
-
-  // Period buttons for hourly tab
-  document.querySelectorAll(".hour-range-btn").forEach(btn => {
-    btn.addEventListener("click", () => {
-      document.querySelectorAll(".hour-range-btn").forEach(b => b.classList.remove("active"));
-      btn.classList.add("active");
-      hourlyState.range = btn.dataset.range;
-      loadHourly();
-    });
-  });
-
-  // Cache last-loaded hourly data for CSV export and apply-filter actions
-  let _lastHourlyData = null;
-
-  async function refreshHourlyFilterStatus() {
-    try {
-      const r = await api("/api/hour_whitelist");
-      const status = document.getElementById("hourly-filter-status");
-      const clearBtn = document.getElementById("btn-hourly-clear");
-      if (r.count > 0) {
-        const pairCount = Object.keys(r.whitelist).length;
-        status.className = "action-msg ok";
-        status.textContent = `⭐ Активный фильтр: ${pairCount} пар × ${r.count} комбинаций пара/час. Бот торгует только в этих окнах.`;
-        if (clearBtn) clearBtn.style.display = "";
-      } else {
-        status.className = "action-msg";
-        status.textContent = "";
-        if (clearBtn) clearBtn.style.display = "none";
-      }
-    } catch (e) { /* ignore — endpoint may not exist on older server */ }
-  }
-
-  // Helper: trigger CSV download
-  function downloadCSV(filename, headers, rows) {
-    const escape = (v) => {
-      if (v == null) return "";
-      const s = String(v);
-      return s.includes(",") || s.includes('"') || s.includes("\n")
-        ? `"${s.replace(/"/g, '""')}"` : s;
-    };
-    const csv = [headers.join(",")]
-      .concat(rows.map(r => r.map(escape).join(",")))
-      .join("\n");
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url; a.download = filename;
-    document.body.appendChild(a); a.click(); document.body.removeChild(a);
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-  }
-
-  // ─── Backfill virtual signals from cached candles ───
-  const backfillBtn = document.getElementById("btn-hourly-backfill");
-  if (backfillBtn) backfillBtn.addEventListener("click", async () => {
-    if (!confirm("Прогнать CONSENSUS по всем cached свечам всех tracked пар? Это создаст исторические virtual signals и заполнит базу для статистики «По часам». Займёт 5-15 секунд.")) return;
-    backfillBtn.disabled = true;
-    const orig = backfillBtn.textContent;
-    backfillBtn.textContent = "⏳ Backfill идёт...";
-    try {
-      const r = await fetch("/api/backfill_virtual_signals", {
-        method: "POST",
-        headers: {"X-Init-Data": tg.initData || "skip", "Content-Type": "application/json"},
-        body: "{}",
-      });
-      const data = await r.json();
-      if (!data.ok) {
-        alert("Ошибка: " + (data.error || JSON.stringify(data)));
-      } else {
-        const lines = Object.entries(data.report).map(([sym, st]) =>
-          st.skipped ? `${sym}: пропущено (${st.reason})`
-                     : `${sym}: ${st.signals_found} сигн., вставлено ${st.inserted}, settled ${st.settled}`
-        ).join("\n");
-        alert(`✅ Backfill готов: ${data.pairs_processed} пар, всего вставлено ${data.total_inserted} сигналов, settled ${data.total_settled}.\n\n${lines}`);
-        loadHourly();
-      }
-    } catch (e) {
-      alert("❌ Ошибка: " + (e.message || e));
-    } finally {
-      backfillBtn.disabled = false;
-      backfillBtn.textContent = orig;
-    }
-  });
-
-  // ─── Export CSV ───
-  const exportBtn = document.getElementById("btn-hourly-export");
-  if (exportBtn) exportBtn.addEventListener("click", () => {
-    if (!_lastHourlyData) {
-      alert("Загрузи данные сначала (клик на 24ч/7д/30д/всё)");
-      return;
-    }
-    const ts = new Date().toISOString().slice(0, 10);
-    const range = hourlyState.range;
-    // 1. Summary CSV
-    downloadCSV(
-      `hourly_summary_${range}_${ts}.csv`,
-      ["hour", "total", "wins", "losses", "draws", "wr",
-       "avg_win_payout", "min_win_payout", "max_win_payout", "profit"],
-      (_lastHourlyData.summary_by_hour || []).filter(s => s.total > 0).map(s =>
-        [s.hour, s.total, s.wins, s.losses, s.draws, s.wr,
-         s.avg_win_payout ?? "", s.min_win_payout ?? "", s.max_win_payout ?? "",
-         s.profit]
-      )
-    );
-    // 2. Pairs × hours CSV
-    downloadCSV(
-      `hourly_pairs_${range}_${ts}.csv`,
-      ["symbol", "hour", "total", "wins", "losses", "draws", "wr",
-       "avg_win_payout", "min_win_payout", "max_win_payout", "profit"],
-      (_lastHourlyData.buckets || []).map(p =>
-        [p.symbol, p.hour, p.total, p.wins, p.losses, p.draws, p.wr,
-         p.avg_win_payout ?? "", p.min_win_payout ?? "", p.max_win_payout ?? "",
-         p.profit]
-      )
-    );
-  });
-
-  // ─── Apply hour filter ───
-  const applyBtn = document.getElementById("btn-hourly-apply");
-  if (applyBtn) applyBtn.addEventListener("click", async () => {
-    const minWrStr = prompt("Минимальный WR % (по умолчанию 70):", "70");
-    if (minWrStr === null) return;
-    const minTradesStr = prompt("Минимум сделок в окне (по умолчанию 5):", "5");
-    if (minTradesStr === null) return;
-    const minWr = parseFloat(minWrStr) || 70;
-    const minTrades = parseInt(minTradesStr, 10) || 5;
-    const range = hourlyState.range;
-    if (!confirm(
-      `Применить фильтр?\n\n` +
-      `Будут торговаться ТОЛЬКО (пара × час) с WR ≥ ${minWr}% и сделок ≥ ${minTrades} ` +
-      `за период "${range}".\n\n` +
-      `Применяется сразу. Можешь снять кнопкой "🔓 Снять фильтр".`
-    )) return;
-    try {
-      const r = await api("/api/apply_hour_whitelist", {
-        method: "POST",
-        body: JSON.stringify({ min_wr: minWr, min_trades: minTrades, range }),
-      });
-      alert(`✅ Применено. ${r.count} комбинаций пара/час в фильтре. Бот сразу применяет фильтр.`);
-      refreshHourlyFilterStatus();
-    } catch (e) {
-      alert(`❌ Ошибка: ${e.message || e}`);
-    }
-  });
-
-  // ─── Clear hour filter ───
-  const clearBtn = document.getElementById("btn-hourly-clear");
-  if (clearBtn) clearBtn.addEventListener("click", async () => {
-    if (!confirm("Снять фильтр по часам? Бот вернётся к торговле по всем подходящим парам без ограничения по времени.")) return;
-    try {
-      await api("/api/clear_hour_whitelist", { method: "POST" });
-      refreshHourlyFilterStatus();
-    } catch (e) {
-      alert(`❌ Ошибка: ${e.message || e}`);
-    }
-  });
-
-  // ─── Reset stats baseline (small button, double-confirm) ───
-  const resetBtn = document.getElementById("btn-hourly-reset");
-  if (resetBtn) resetBtn.addEventListener("click", async () => {
-    if (!confirm(
-      "⤺ Сбросить статистику по часам?\n\n" +
-      "Подсчёт начнётся с НУЛЯ с этого момента.\n" +
-      "Старые сделки в БД сохраняются — это просто метка времени для аналитики.\n\n" +
-      "Используй когда меняешь стратегию и хочешь чистый старт."
-    )) return;
-    if (!confirm("Точно? Это последнее подтверждение.")) return;
-    try {
-      const r = await api("/api/reset_hourly_stats", { method: "POST" });
-      const date = new Date(r.baseline_ts * 1000).toLocaleString("ru-RU");
-      alert(`✅ Статистика сброшена. Подсчёт пойдёт с ${date}.`);
-      loadHourly();
-    } catch (e) {
-      alert(`❌ Ошибка: ${e.message || e}`);
-    }
-  });
-
-  // ─── EXPIRY analysis ───
-  let _lastExpiryData = null;
-  let _expiryScope = "tracked";
-  let _expirySource = "backtest";
-  let _expiryWindow = 30;       // дефолт: последние 30 сигналов (актуальная картина)
-
-  // Scope selector buttons
-  document.querySelectorAll(".exp-scope-btn").forEach(btn => {
-    btn.addEventListener("click", () => {
-      document.querySelectorAll(".exp-scope-btn").forEach(b => b.classList.remove("active"));
-      btn.classList.add("active");
-      _expiryScope = btn.dataset.scope || "tracked";
-    });
-  });
-  // Source selector — toggles "Окно сделок" row visibility (для trades/virtual)
-  document.querySelectorAll(".exp-source-btn").forEach(btn => {
-    btn.addEventListener("click", () => {
-      document.querySelectorAll(".exp-source-btn").forEach(b => b.classList.remove("active"));
-      btn.classList.add("active");
-      _expirySource = btn.dataset.source || "backtest";
-      const winRow = document.getElementById("exp-window-row");
-      const showWin = (_expirySource === "trades" || _expirySource === "virtual");
-      if (winRow) winRow.style.display = showWin ? "" : "none";
-    });
-  });
-  // Window selector
-  document.querySelectorAll(".exp-window-btn").forEach(btn => {
-    btn.addEventListener("click", () => {
-      document.querySelectorAll(".exp-window-btn").forEach(b => b.classList.remove("active"));
-      btn.classList.add("active");
-      _expiryWindow = parseInt(btn.dataset.window || "0", 10);
-    });
-  });
-
-  async function loadExpiry() {
-    const tbl = document.getElementById("expiry-table");
-    const info = document.getElementById("expiry-info");
-    const exportBtn = document.getElementById("btn-expiry-export");
-    const loadBtn = document.getElementById("btn-expiry-load");
-    if (!tbl) return;
-
-    info.className = "action-msg info";
-    if (_expirySource === "trades") {
-      info.textContent = `⏳ Считаю по реальным сделкам (окно: ${_expiryWindow || "все"})...`;
-    } else if (_expirySource === "virtual") {
-      info.textContent = `⏳ Считаю по ВСЕМ сигналам стратегии (окно: ${_expiryWindow || "все"})...`;
-    } else {
-      info.textContent = _expiryScope === "all"
-        ? "⏳ Анализирую ВСЕ OTC пары (это может занять 10-60 сек)..."
-        : "⏳ Анализирую tracked пары...";
-    }
-    tbl.innerHTML = "";
-    if (loadBtn) loadBtn.disabled = true;
-
-    try {
-      const params = new URLSearchParams({
-        scope: _expiryScope,
-        source: _expirySource,
-      });
-      if (_expirySource === "trades" || _expirySource === "virtual") {
-        params.set("trades_window", String(_expiryWindow));
-      }
-      const r = await api(`/api/expiry_stats?${params.toString()}`);
-      _lastExpiryData = r;
-      const pairs = r.pairs || [];
-      const expiries = r.expiries || [1, 2, 3, 4, 5];
-      const overall = r.overall || {};
-      const overallBest = r.overall_best;
-
-      if (pairs.length === 0) {
-        info.className = "action-msg warn";
-        info.textContent = r.note || "Нет данных. Бот ещё не загрузил свечи.";
-        return;
-      }
-
-      info.className = "action-msg ok";
-      info.textContent = `✅ ${r.note}`;
-      if (exportBtn) exportBtn.style.display = "";
-
-      const compact = document.getElementById("exp-compact")?.checked || false;
-      const isTrades = (r.source === "trades" || r.source === "virtual");
-
-      // Compact mode: только символ + рекомендованная экспирация + WR + n
-      if (compact) {
-        let header = `<thead><tr>
-          <th>Пара</th>
-          <th>Payout</th>
-          <th>${isTrades ? "Сделок" : "Свечей"}</th>
-          <th>⭐ Рекомендуемая экспирация</th>
-          <th>WR при ней</th>
-        </tr></thead>`;
-        const body = pairs.map(p => {
-          const dataN = isTrades ? (p.completed_1000 || 0) : p.candles_used;
-          if (p.best_expiry === null) {
-            return `<tr>
-              <td><b>${p.symbol}</b></td>
-              <td>${p.payout}%</td>
-              <td>${dataN}</td>
-              <td class="hint">мало данных</td>
-              <td class="hint">—</td>
-            </tr>`;
-          }
-          const cls = p.best_wr >= 70 ? 'cell-good' : p.best_wr >= 55 ? '' : 'cell-bad';
-          const minutes = p.best_expiry; // 1 bar = 1 min on M1
-          return `<tr>
-            <td><b>${p.symbol}</b></td>
-            <td>${p.payout}%</td>
-            <td>${dataN}</td>
-            <td class="${cls}"><b>${minutes} мин</b> (exp=${p.best_expiry})</td>
-            <td class="${cls}">${p.best_wr.toFixed(1)}%</td>
-          </tr>`;
-        }).join("");
-        // Overall recommendation row at top
-        let topRow = '';
-        if (overallBest !== null && overallBest !== undefined) {
-          const bestAvg = overall[overallBest]?.avg_wr ?? 0;
-          const cls = bestAvg >= 70 ? 'cell-good' : bestAvg >= 55 ? '' : '';
-          topRow = `<tr style="background:rgba(255,200,0,0.07); font-weight:600;">
-            <td colspan="3">📊 В среднем по всем парам</td>
-            <td class="${cls}"><b>${overallBest} мин</b> (exp=${overallBest})</td>
-            <td class="${cls}">${bestAvg.toFixed(1)}%</td>
-          </tr>`;
-        }
-        tbl.innerHTML = header + `<tbody>${topRow}${body || '<tr><td colspan="5" class="hint">Нет данных</td></tr>'}</tbody>`;
-        return;
-      }
-
-      // Full table — Header: Pair | Payout | data-count | for each expiry: WR (sigs) | best
-      let header = `<thead><tr>
-        <th>Пара</th>
-        <th>Payout</th>
-        <th>${isTrades ? "Сделок<br/><span class=\"hint\" style=\"font-size:10px;\">в окне</span>"
-                       : "Свечей / Сигналов<br/><span class=\"hint\" style=\"font-size:10px;\">в окне 1000</span>"}</th>`;
-      for (const exp of expiries) {
-        header += `<th>exp=${exp}<br/><span class="hint" style="font-size:10px;">WR / W·L</span></th>`;
-      }
-      header += `<th>⭐ Лучшая</th></tr></thead>`;
-
-      // Summary row — average WR per expiry across all pairs
-      let summaryRow = `<tr style="background:rgba(255,200,0,0.07); font-weight:600;">
-        <td colspan="2">📊 Среднее по всем парам</td>
-        <td class="hint">—</td>`;
-      for (const exp of expiries) {
-        const a = overall[exp];
-        if (!a || a.pairs_with_data === 0) {
-          summaryRow += `<td class="hint">—</td>`;
-        } else {
-          const cls = a.avg_wr >= 70 ? 'cell-good' : a.avg_wr >= 55 ? '' : 'cell-bad';
-          const star = (exp === overallBest) ? ' ⭐' : '';
-          summaryRow += `<td class="${cls}">${a.avg_wr.toFixed(1)}%${star}<br/>
-            <span class="hint" style="font-size:10px;">${a.pairs_with_data} пар · ${a.total_signals} сигн.</span></td>`;
-        }
-      }
-      if (overallBest !== null && overallBest !== undefined) {
-        const bestAvg = overall[overallBest]?.avg_wr ?? 0;
-        const cls = bestAvg >= 70 ? 'cell-good' : bestAvg >= 55 ? '' : '';
-        summaryRow += `<td class="${cls}"><b>exp=${overallBest}</b><br/>${bestAvg.toFixed(1)}%</td>`;
-      } else {
-        summaryRow += `<td class="hint">мало<br/>данных</td>`;
-      }
-      summaryRow += `</tr>`;
-
-      const body = pairs.map(p => {
-        const dataCellInner = isTrades
-          ? `${p.completed_1000 || 0} <span class="hint" style="font-size:10px;">сделок</span>`
-          : `${p.candles_used}<br/><span class="hint" style="font-size:10px;">${p.completed_1000} сделок</span>`;
-        let row = `<tr>
-          <td><b>${p.symbol}</b></td>
-          <td>${p.payout}%</td>
-          <td>${dataCellInner}</td>`;
-        for (const exp of expiries) {
-          const d = p.expiries[exp];
-          if (!d || d.signals === 0) {
-            row += `<td class="hint">—</td>`;
-          } else {
-            const isBest = (exp === p.best_expiry);
-            const wrCls = d.wr >= 70 ? 'cell-good' : d.wr >= 55 ? '' : 'cell-bad';
-            const star = isBest ? ' ⭐' : '';
-            const dim = (d.signals < (r.min_signals_for_score || 5)) ? 'opacity:0.5;' : '';
-            row += `<td class="${wrCls}" style="${dim}">${d.wr.toFixed(1)}%${star}<br/>
-                    <span class="hint" style="font-size:10px;">✓${d.wins} ✗${d.losses}</span></td>`;
-          }
-        }
-        if (p.best_expiry !== null) {
-          const bestCls = p.best_wr >= 70 ? 'cell-good' : p.best_wr >= 55 ? '' : '';
-          row += `<td class="${bestCls}"><b>exp=${p.best_expiry}</b><br/>${p.best_wr.toFixed(1)}%</td>`;
-        } else {
-          row += `<td class="hint">мало<br/>сигналов</td>`;
-        }
-        row += "</tr>";
-        return row;
-      }).join("");
-
-      tbl.innerHTML = header + `<tbody>${summaryRow}${body}</tbody>`;
-    } catch (e) {
-      info.className = "action-msg err";
-      info.textContent = `❌ Ошибка: ${e.message || e}`;
-    } finally {
-      if (loadBtn) loadBtn.disabled = false;
-    }
-  }
-
-  // Кнопки
-  const expLoadBtn = document.getElementById("btn-expiry-load");
-  if (expLoadBtn) expLoadBtn.addEventListener("click", loadExpiry);
-
-  const expExportBtn = document.getElementById("btn-expiry-export");
-  if (expExportBtn) expExportBtn.addEventListener("click", () => {
-    if (!_lastExpiryData) {
-      alert("Запусти анализ сначала");
-      return;
-    }
-    const expiries = _lastExpiryData.expiries;
-    const headers = ["symbol", "payout", "candles_used", "completed_1000"];
-    for (const e of expiries) {
-      headers.push(`exp${e}_signals`, `exp${e}_wins`, `exp${e}_losses`,
-                   `exp${e}_wr`, `exp${e}_wr1`);
-    }
-    headers.push("best_expiry", "best_wr");
-
-    const rows = (_lastExpiryData.pairs || []).map(p => {
-      const r = [p.symbol, p.payout, p.candles_used, p.completed_1000];
-      for (const e of expiries) {
-        const d = p.expiries[e] || {};
-        r.push(d.signals ?? "", d.wins ?? "", d.losses ?? "",
-               d.wr ?? "", d.wr1 ?? "");
-      }
-      r.push(p.best_expiry ?? "", p.best_wr ?? "");
-      return r;
-    });
-
-    // Append summary row
-    const overall = _lastExpiryData.overall || {};
-    const sumRow = ["__OVERALL__", "", "", ""];
-    for (const e of expiries) {
-      const a = overall[e] || {};
-      sumRow.push(a.total_signals ?? "", a.total_wins ?? "", a.total_losses ?? "",
-                  a.avg_wr ?? "", "");
-    }
-    sumRow.push(_lastExpiryData.overall_best ?? "", "");
-    rows.push(sumRow);
-
-    const ts = new Date().toISOString().slice(0, 10);
-    downloadCSV(`expiry_analysis_${_lastExpiryData.scope || "tracked"}_${ts}.csv`, headers, rows);
-  });
-
-  // initial load
+  // ═════════════════════ INITIAL LOAD + AUTO-POLL ═══════════════════════
   loadStatus();
   setInterval(() => {
     const active = document.querySelector(".tab.active")?.dataset.tab;

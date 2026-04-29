@@ -68,17 +68,21 @@
 
 ## ЭТАП 1 — УДАЛЕНИЕ (готов к старту)
 
-### 1.1 Mini App (HTML + JS)
+### 1.1 Mini App (HTML + JS) — ✅ DONE
 
-- [ ] `miniapp/index.html`: удалить вкладки `tab-analytics`, `tab-hourly`, `tab-expiry` + соответствующие `<button class="tab">` в `<header>`
-- [ ] `miniapp/app.js`: удалить функции и обработчики:
-  - `loadAnalytics()`, `loadHourly()`, `loadExpiry()`
-  - `_lastHourlyData`, `_lastExpiryData`, `hourlyState`
-  - Все `.range-btn`, `.hour-range-btn`, `.exp-scope-btn`, `.exp-source-btn`, `.exp-window-btn` обработчики
-  - `btn-hourly-export`, `btn-hourly-apply`, `btn-hourly-clear`, `btn-hourly-backfill`, `btn-hourly-reset`
-  - `btn-expiry-load`, `btn-expiry-export`
-  - `refreshHourlyFilterStatus()` если есть
-- [ ] `miniapp/style.css`: удалить стили `.analytics`, `.range-selector`, `.exp-scope-btn` etc.
+- [x] `miniapp/index.html`: удалены вкладки `tab-analytics`, `tab-hourly`, `tab-expiry` + кнопки в `<header>`
+- [x] `miniapp/index.html`: построена новая структура — 3 топ-таба (Главная / Настройки бота / Стратегия) с подвкладками внутри Стратегии (Список / Настройки / Аналитика-placeholder)
+- [x] `miniapp/app.js`: удалены функции и обработчики (~700 строк):
+  - `loadAnalytics()`, `loadHourly()`, `loadExpiry()`, `renderAnalyticsTable()`
+  - `_lastHourlyData`, `_lastExpiryData`, `hourlyState`, `analyticsState`
+  - Все `.range-btn`, `.hour-range-btn`, `.exp-*-btn` обработчики
+  - `btn-hourly-*` (export, apply, clear, backfill, reset)
+  - `btn-expiry-*` (load, export)
+  - `refreshHourlyFilterStatus()`, `downloadCSV()`, `fmt()`, `pctClass()`, `streakClass()`
+- [x] `miniapp/app.js`: разделён `loadSettings` на `loadGlobalSettings` (общие) + `loadStrategyParams` (indicator params)
+- [x] `miniapp/app.js`: добавлена sub-tab навигация для Стратегии
+- [x] `miniapp/style.css`: удалены стили `.analytics`, `.range-selector`, `.range-btn`, `.btn-tiny` (analytics-only)
+- [x] `miniapp/style.css`: добавлены стили `.subtabs`, `.subtab`, `.subtab-panel`
 
 ### 1.2 Backend (api/server.py)
 

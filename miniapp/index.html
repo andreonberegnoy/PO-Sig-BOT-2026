@@ -5,22 +5,19 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <title>PO-Sig Bot</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
-<link rel="stylesheet" href="/miniapp/style.css?v=20260507" />
+<link rel="stylesheet" href="/miniapp/style.css?v=20260508" />
 </head>
 <body>
 <header>
   <div class="tabs">
-    <button class="tab active" data-tab="status">Статус</button>
-    <button class="tab" data-tab="settings">Настройки</button>
-    <button class="tab" data-tab="strategies">Стратегии</button>
-    <button class="tab" data-tab="analytics">Аналитика</button>
-    <button class="tab" data-tab="hourly">По часам</button>
-    <button class="tab" data-tab="expiry">Экспирация</button>
+    <button class="tab active" data-tab="status">🏠 Главная</button>
+    <button class="tab" data-tab="settings">⚙️ Настройки бота</button>
+    <button class="tab" data-tab="strategy">🧠 Стратегия</button>
   </div>
 </header>
 
 <main>
-  <!-- ─── STATUS ─── -->
+  <!-- ═══════════ ГЛАВНАЯ (STATUS) ═══════════ -->
   <section id="tab-status" class="tab-panel active">
     <div class="card">
       <h2>📊 Состояние</h2>
@@ -49,146 +46,34 @@
       </div>
       <div id="action-msg" class="action-msg" style="margin-top:8px"></div>
     </div>
+
+    <!-- Здесь в этапе 2 появится виджет «Активные пары что торгуются сейчас» -->
+    <!-- Здесь в этапе 2 появится «Profit за день» (только реально вошедшие WIN) -->
   </section>
 
-  <!-- ─── SETTINGS ─── -->
+  <!-- ═══════════ НАСТРОЙКИ БОТА (общие) ═══════════ -->
   <section id="tab-settings" class="tab-panel">
     <div id="settings-list">Загрузка…</div>
   </section>
 
-  <!-- ─── ANALYTICS ─── -->
-  <section id="tab-analytics" class="tab-panel">
-    <div class="card">
-      <h2>📈 Аналитика по парам</h2>
-      <p class="hint">
-        Бот логирует выплаты каждые 5 мин и прогоняет твою стратегию по буферу свечей раз в час.
-        За 1-2 месяца накапливается история — выбирай пары с высоким <b>1-я WR</b>, низким <b>max_streak</b>
-        и стабильной выплатой выше min_payout.
-      </p>
-      <div class="range-selector">
-        Период:
-        <button class="range-btn" data-range="24h">24ч</button>
-        <button class="range-btn active" data-range="7d">7д</button>
-        <button class="range-btn" data-range="30d">30д</button>
-        <button class="range-btn" data-range="60d">60д</button>
-        <button class="range-btn" data-range="all">всё</button>
-      </div>
-      <label class="setting-row" style="padding: 8px 0; border: 0;">
-        <span style="flex:1; color:var(--fg); font-size:14px;">Только рабочие часы (по расписанию)</span>
-        <input type="checkbox" id="analytics-workhours" />
-      </label>
-      <div id="analytics-table">Загрузка…</div>
+  <!-- ═══════════ СТРАТЕГИЯ (с подвкладками) ═══════════ -->
+  <section id="tab-strategy" class="tab-panel">
+    <div class="subtabs">
+      <button class="subtab active" data-subtab="list">📋 Список стратегий</button>
+      <button class="subtab" data-subtab="strategy-settings">⚙️ Настройки стратегии</button>
+      <button class="subtab" data-subtab="analytics">📊 Аналитика</button>
     </div>
-  </section>
 
-  <!-- ─── HOURLY ─── -->
-  <section id="tab-hourly" class="tab-panel">
-    <div class="card">
-      <h2>🕐 По часам</h2>
-      <p class="hint">
-        Все РЕАЛЬНЫЕ сделки за период, сгруппированные по часу открытия (локальное
-        время). Помогает найти "лучшие часы" для каждой пары — например EURUSD_otc
-        может давать 78% WR в 09:00-10:00 и 45% после 22:00. Сначала собирается
-        статистика, потом её можно использовать для уточнения стратегии.
-      </p>
-      <div class="range-selector">
-        Период:
-        <button class="hour-range-btn" data-range="24h">24ч</button>
-        <button class="hour-range-btn active" data-range="7d">7д</button>
-        <button class="hour-range-btn" data-range="14d">14д</button>
-        <button class="hour-range-btn" data-range="30d">30д</button>
-        <button class="hour-range-btn" data-range="60d">60д</button>
-        <button class="hour-range-btn" data-range="all">всё</button>
+    <!-- ─── Подвкладка: Список стратегий ─── -->
+    <div id="sub-list" class="subtab-panel active">
+      <div class="card">
+        <h2>📋 Список стратегий</h2>
+        <ul id="strategies-list" class="strategies"></ul>
       </div>
-      <div class="actions" style="margin-top:8px; flex-wrap:wrap; gap:6px;">
-        <button id="btn-hourly-export" class="btn">📥 Экспорт CSV</button>
-        <button id="btn-hourly-backfill" class="btn" title="Прогнать CONSENSUS по cached свечам всех tracked пар и заполнить virtual_signals задним числом">⚡ Backfill истории</button>
-        <button id="btn-hourly-apply" class="btn primary">⭐ Применить как фильтр</button>
-        <button id="btn-hourly-clear" class="btn" style="display:none;">🔓 Снять фильтр</button>
-      </div>
-      <div id="hourly-filter-status" class="action-msg" style="margin-top:6px; min-height:0;"></div>
-      <h3 style="margin-top:14px; font-size:15px;">Сводка по часам (все пары)</h3>
-      <div class="analytics-wrap">
-        <table id="hourly-summary" class="analytics"></table>
-      </div>
-      <h3 style="margin-top:18px; font-size:15px;">По парам и часам (топ по сделкам)</h3>
-      <p class="hint" style="margin-bottom:6px;">
-        Кликни на колонку для сортировки. Жёлтым ⭐ — пары/часы с WR ≥ 70% и ≥ 5 сделок
-        (статистически значимо).
-      </p>
-      <div class="analytics-wrap">
-        <table id="hourly-pairs" class="analytics"></table>
-      </div>
-      <!-- Hidden reset button — small, low-emphasis, with double-confirm.
-           Use only when changing strategy and want a clean stats baseline. -->
-      <div style="margin-top:24px; text-align:right;">
-        <button id="btn-hourly-reset" class="btn-tiny"
-                title="Сбросить статистику для аналитики (старые сделки в БД остаются)">
-          ⤺ reset stats
-        </button>
-      </div>
-    </div>
-  </section>
-
-  <!-- ─── EXPIRY ANALYSIS ─── -->
-  <section id="tab-expiry" class="tab-panel">
-    <div class="card">
-      <h2>⏱ Анализ экспирации</h2>
-      <p class="hint">
-        Бот прогоняет ТВОЮ стратегию (CONSENSUS из config) на накопленных свечах
-        с разными экспирациями: <b>1, 2, 3, 4, 5 баров</b> (1 бар = 1 минута).
-        Показывает какая бы отработала лучше для каждой пары. Используй для подбора
-        оптимального <code>trading.expiry_seconds</code>.
-      </p>
-      <p class="hint" style="font-size:11px;">
-        ⭐ — лучшая экспирация для пары (≥5 сигналов в окне). В строке
-        «Среднее по всем парам» — средний WR на каждой экспирации.
-        В колонке «Свечей / Сигналов» — сколько свечей просмотрел и сколько
-        виртуальных сделок CONSENSUS совершил на 1000-свечном окне.
-      </p>
-      <div class="range-selector" style="margin-top:6px;">
-        Охват:
-        <button class="range-btn exp-scope-btn active" data-scope="tracked">Только tracked</button>
-        <button class="range-btn exp-scope-btn" data-scope="all">Все OTC пары (медленнее)</button>
-      </div>
-      <div class="range-selector" style="margin-top:6px;">
-        Источник:
-        <button class="range-btn exp-source-btn active" data-source="backtest">По свечам (CONSENSUS)</button>
-        <button class="range-btn exp-source-btn" data-source="trades">Только реальные сделки</button>
-        <button class="range-btn exp-source-btn" data-source="virtual">Все сигналы стратегии (вкл. пропущенные)</button>
-      </div>
-      <div class="range-selector" id="exp-window-row" style="margin-top:6px; display:none;">
-        Окно последних сигналов:
-        <button class="range-btn exp-window-btn" data-window="10">10</button>
-        <button class="range-btn exp-window-btn active" data-window="30">30</button>
-        <button class="range-btn exp-window-btn" data-window="100">100</button>
-        <button class="range-btn exp-window-btn" data-window="0">Все</button>
-      </div>
-      <label class="setting-row" style="padding: 6px 0; border: 0;">
-        <span style="flex:1; color:var(--fg); font-size:14px;">🎯 Компактный режим (только рекомендация)</span>
-        <input type="checkbox" id="exp-compact" />
-      </label>
-      <div class="actions" style="margin-top:8px;">
-        <button id="btn-expiry-load" class="btn primary">🔄 Запустить анализ</button>
-        <button id="btn-expiry-export" class="btn" style="display:none;">📥 Экспорт CSV</button>
-      </div>
-      <div id="expiry-info" class="action-msg" style="margin-top:6px; min-height:0;"></div>
-      <div class="analytics-wrap" style="margin-top:14px;">
-        <table id="expiry-table" class="analytics"></table>
-      </div>
-    </div>
-  </section>
-
-  <!-- ─── STRATEGIES ─── -->
-  <section id="tab-strategies" class="tab-panel">
-    <div class="card">
-      <h2>🧠 Стратегии</h2>
-      <ul id="strategies-list" class="strategies"></ul>
-    </div>
-    <div class="card">
-      <h3>📤 Загрузить новую стратегию</h3>
-      <input id="new-strat-name" type="text" placeholder="имя_файла (буквы/цифры/_)" />
-      <textarea id="new-strat-code" rows="20" placeholder="# Вставь Python-код своей стратегии. Минимальный интерфейс:
+      <div class="card">
+        <h3>📤 Загрузить новую стратегию</h3>
+        <input id="new-strat-name" type="text" placeholder="имя_файла (буквы/цифры/_)" />
+        <textarea id="new-strat-code" rows="20" placeholder="# Вставь Python-код своей стратегии. Минимальный интерфейс:
 #
 # from dataclasses import dataclass
 # NAME = 'My Strategy'
@@ -207,17 +92,57 @@
 #     return [], {}
 #
 # Полный шаблон — strategy/_template.py в репозитории."></textarea>
-      <div class="actions">
-        <button id="btn-load-template" class="btn">📋 Загрузить шаблон</button>
-        <button id="btn-upload-strat" class="btn primary">💾 Сохранить и активировать</button>
+        <div class="actions">
+          <button id="btn-load-template" class="btn">📋 Загрузить шаблон</button>
+          <button id="btn-upload-strat" class="btn primary">💾 Сохранить и активировать</button>
+        </div>
+        <div id="strat-status" class="status-line"></div>
       </div>
-      <div id="strat-status" class="status-line"></div>
+    </div>
+
+    <!-- ─── Подвкладка: Настройки стратегии (indicator params) ─── -->
+    <div id="sub-strategy-settings" class="subtab-panel">
+      <div class="card">
+        <h2>⚙️ Настройки активной стратегии</h2>
+        <p class="hint">
+          Параметры индикаторов: RSI, EMA, BB, ATR, QQE, HTF — относятся
+          ТОЛЬКО к выбранной стратегии. Общие настройки бота (базовая ставка,
+          мартингейл, расписание) — во вкладке «⚙️ Настройки бота».
+        </p>
+        <div id="strategy-params-list">Загрузка…</div>
+      </div>
+    </div>
+
+    <!-- ─── Подвкладка: Аналитика (placeholder) ─── -->
+    <div id="sub-analytics" class="subtab-panel">
+      <div class="card">
+        <h2>📊 Аналитика стратегии</h2>
+        <p class="hint" style="font-size: 14px; line-height: 1.6;">
+          Будет наполнено в этапе 2 рефакторинга. Согласно плану:
+        </p>
+        <ul style="color: var(--fg-muted); font-size: 13px; line-height: 1.7;">
+          <li>Главная таблица: <b>пары × 24h-средние</b></li>
+          <li>Фильтры периода: <b>1д / 7д / 14д / 30д / 60д / по дате</b></li>
+          <li>Сортировка по любому столбцу</li>
+          <li>Клик на пару → раскрытие 24-часовой детализации</li>
+          <li>Плашка «<b>Рабочие часы</b>» (визуальный индикатор активного фильтра)</li>
+          <li>Плашка фильтр по времени (<code>13:00-19:00</code> — суммарно за период)</li>
+          <li>Колонка «<b>Best exp за последние N сделок</b>» (фильтруемое окно)</li>
+          <li>Кнопка «<b>Применить как фильтр</b>» к стратегии</li>
+          <li>Кнопка «<b>Экспорт данных</b>» (CSV)</li>
+          <li>Цветовая подсветка: 🟢/🟡/🟠/🔴 по WR</li>
+        </ul>
+        <p class="hint" style="margin-top: 14px; padding: 10px; background: rgba(96, 165, 250, 0.08); border-left: 3px solid var(--primary); border-radius: 4px;">
+          📍 Все CONSENSUS-сигналы будут писаться в БД <b>signals</b> с флагом
+          <code>entered=True/False</code>. БД хранится 6 месяцев минимум
+          (configurable до 12). Profit-метрики считают только <code>entered=True AND WIN</code>.
+        </p>
+      </div>
     </div>
   </section>
 </main>
 
-<!-- Cache-bust: bump v=YYYYMMDD when app.js changes. Telegram кеширует
-     sub-resources отдельно от index.html, поэтому нужен отдельный bump. -->
-<script src="/miniapp/app.js?v=20260507"></script>
+<!-- Cache-bust: bump v=YYYYMMDD when app.js changes. -->
+<script src="/miniapp/app.js?v=20260508"></script>
 </body>
 </html>

@@ -13,6 +13,45 @@
   const initData = tg?.initData || "";
   if (tg) { tg.ready(); tg.expand(); }
 
+  // ─── Fullscreen toggle (на весь экран в TG Mini App) ────────────────
+  // Telegram WebApp API: requestFullscreen / exitFullscreen (BotAPI 8.0+).
+  // Для старых клиентов — фолбэк на tg.expand() (на максимальную высоту).
+  const fsBtn = document.getElementById("btn-fullscreen");
+  if (fsBtn && tg) {
+    const updateFsButton = () => {
+      const isFs = tg.isFullscreen === true;
+      fsBtn.textContent = isFs ? "⛗" : "⛶";
+      fsBtn.setAttribute("aria-label",
+        isFs ? "Свернуть из полного экрана" : "Развернуть на весь экран");
+    };
+    fsBtn.addEventListener("click", () => {
+      try {
+        if (tg.isFullscreen) {
+          if (typeof tg.exitFullscreen === "function") tg.exitFullscreen();
+          else tg.expand();   // fallback для старых клиентов
+        } else {
+          if (typeof tg.requestFullscreen === "function") tg.requestFullscreen();
+          else tg.expand();
+        }
+      } catch (e) {
+        // На случай если client не поддерживает API — просто expand
+        try { tg.expand(); } catch (_) {}
+      }
+      // updateFsButton будет вызвана автоматически через event,
+      // но дублируем на случай отсутствия события
+      setTimeout(updateFsButton, 100);
+    });
+    // Подписываемся на события смены полноэкранного режима
+    if (typeof tg.onEvent === "function") {
+      tg.onEvent("fullscreenChanged", updateFsButton);
+      tg.onEvent("fullscreenFailed", updateFsButton);
+    }
+    updateFsButton();
+  } else if (fsBtn && !tg) {
+    // Открыто не через Telegram (dev-режим в браузере) — кнопка скрыта
+    fsBtn.style.display = "none";
+  }
+
   // ─── Auto-dismiss keyboard on tap outside input ───────────────────────
   document.addEventListener("pointerdown", (e) => {
     const t = e.target;

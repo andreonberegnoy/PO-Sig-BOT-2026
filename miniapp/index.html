@@ -5,14 +5,17 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <title>PO-Sig Bot</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
-<link rel="stylesheet" href="/miniapp/style.css?v=20260511" />
+<link rel="stylesheet" href="/miniapp/style.css?v=20260512" />
 </head>
 <body>
 <header>
-  <div class="tabs">
-    <button class="tab active" data-tab="status">🏠 Главная</button>
-    <button class="tab" data-tab="settings">⚙️ Настройки бота</button>
-    <button class="tab" data-tab="strategy">🧠 Стратегия</button>
+  <div class="header-bar">
+    <div class="tabs">
+      <button class="tab active" data-tab="status">🏠 Главная</button>
+      <button class="tab" data-tab="settings">⚙️ Настройки бота</button>
+      <button class="tab" data-tab="strategy">🧠 Стратегия</button>
+    </div>
+    <button id="btn-fullscreen" class="btn-fullscreen" title="На весь экран / свернуть" aria-label="Развернуть на весь экран">⛶</button>
   </div>
 </header>
 
@@ -148,6 +151,6 @@
 </main>
 
 <!-- Cache-bust: bump v=YYYYMMDD when app.js changes. -->
-<script src="/miniapp/app.js?v=20260511"></script>
+<script src="/miniapp/app.js?v=20260512"></script>
 </body>
 </html>

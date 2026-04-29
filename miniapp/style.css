@@ -16,7 +16,16 @@ html, body { margin: 0; padding: 0; background: var(--bg); color: var(--fg);
 
 header { position: sticky; top: 0; background: var(--bg); z-index: 10;
          border-bottom: 1px solid rgba(255,255,255,0.08); }
-.tabs { display: flex; }
+.header-bar { display: flex; align-items: stretch; gap: 4px; padding-right: 4px; }
+.tabs { display: flex; flex: 1; min-width: 0; }
+.btn-fullscreen {
+  background: transparent; border: 0; color: var(--hint);
+  font-size: 18px; padding: 0 12px; cursor: pointer;
+  border-bottom: 2px solid transparent; flex-shrink: 0;
+  transition: color 0.15s, background 0.15s;
+}
+.btn-fullscreen:hover { color: var(--fg); background: rgba(255,255,255,0.05); }
+.btn-fullscreen:active { transform: scale(0.95); }
 .tab { flex: 1; background: transparent; border: 0; padding: 14px 8px;
        color: var(--hint); font-size: 14px; cursor: pointer;
        border-bottom: 2px solid transparent; }

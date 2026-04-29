@@ -37,8 +37,8 @@
 1. **БД signals пишется всегда** — каждый CONSENSUS-сигнал на tracked-паре, независимо вошёл бот или нет
 2. **Retention** — 6 месяцев default (configurable 6-12), удаление по 1-месячным бакетам
 3. **Profit-метрики** считают только `entered=True AND result=WIN`
-4. **Аналитика** считает все signals (entered + не-entered)
-5. **Market snapshots НЕ собираем** — ATR/EMA/RSI на момент сигнала не сохраняем (отказались)
+4. **Аналитика** считает все signals (entered + не-entered) — никакого разделения на virtual/real, флаг `entered` нужен только для расчёта Profit
+5. **Market snapshots собираем** — для **каждого** сигнала записываем параметры рынка на момент входа: ATR(14) 1m, ATR(14) 5m, EMA20 1m, EMA50 5m, RSI14, QQE Factor, размер свечи / ATR ratio. Это нужно чтобы потом можно было фильтровать «торговать только при ATR в диапазоне X-Y» и подбирать оптимальные условия рынка
 6. **Постоянная пере-фильтрация** — `filter_1000` критерии (WR1-1000, WR1-200, payout) проверяются на каждой сделке, не только при первичном scan
 
 ## ❌ НЕ ТРОГАТЬ (критично)
@@ -206,16 +206,20 @@
 
 **| РАЗДЕЛИТЕЛЬ |**
 
-**Второстепенные показатели** (если будет market snapshots — пока НЕ собираем, отказались):
-- ATR на момент входа (плюсовых vs минусовых)
-- ATR(14) старший ТФ 5M
-- Размер последней свечи / ATR
-- Направление 5min EMA50
-- EMA20 1m
-- RSI на момент входа
-- QQE Factor
+**Второстепенные показатели — market snapshots на момент сигнала** (собираются для ВСЕХ signals):
+12. ATR(14) 1m на плюсовых сделках (среднее)
+13. ATR(14) 1m на минусовых сделках (среднее) — позволит фильтровать «торговать только при ATR в диапазоне X-Y»
+14. ATR(14) старший ТФ 5M
+15. Размер последней свечи / ATR (импульсность входа)
+16. Направление 5min EMA50 (тренд старшего ТФ)
+17. EMA20 1m на момент входа
+18. RSI(14) на момент входа
+19. QQE Factor
 
-> Эти колонки требуют market snapshots при сигнале. **Пока решили НЕ собирать** — таблица будет тоньше.
+Эти данные собираются `_persist_market_snapshot()` в момент закрытия каждого CONSENSUS-сигнала и сохраняются в таблицу `signals`. Источники:
+- Из cached candles (`sm._candles`) — последние N баров до signal_ts
+- Расчёты те же что в `strategy/indicators.py` (RSI, ATR, EMA, QQE)
+- Без переписывания логики индикаторов — переиспользуем существующие функции
 
 ### 2.3 Новая таблица signals (заменяет virtual_signals)
 
@@ -230,14 +234,28 @@ CREATE TABLE signals (
     trade_id        TEXT,                    -- если entered, FK к trades.trade_id
     exp_wins        TEXT,                    -- JSON [w1..w5]
     settled_at      INTEGER,
+
+    -- Market snapshot на момент сигнала (для аналитики/фильтрации)
+    payout_at_signal INTEGER,                -- payout % в момент сигнала
+    atr14_1m        REAL,                    -- ATR(14) на 1m TF
+    atr14_5m        REAL,                    -- ATR(14) на старшем 5m TF
+    ema20_1m        REAL,                    -- EMA(20) 1m
+    ema50_5m        REAL,                    -- EMA(50) 5m (направление тренда)
+    rsi14           REAL,                    -- RSI(14) текущий
+    qqe_factor      REAL,                    -- QQE значение
+    candle_size_ratio REAL,                  -- abs(close-open) / atr14 (импульсность)
+    -- Производные (можно вычислять при выборке, но индексировать удобнее так):
+    htf_trend       INTEGER,                 -- 1=up (close>ema50_5m), -1=down, 0=flat
+
     UNIQUE(symbol, signal_ts)
 );
 CREATE INDEX idx_signals_symts ON signals(symbol, signal_ts);
 CREATE INDEX idx_signals_pending ON signals(settled_at, signal_ts);
 CREATE INDEX idx_signals_entered ON signals(entered);
+CREATE INDEX idx_signals_atr ON signals(atr14_1m);   -- для фильтрации «при ATR ∈ [X,Y]»
 ```
 
-Чистая семантика, никакого «virtual».
+Чистая семантика, никакого «virtual». Все market params снимаются из cached candles на момент signal_ts через переиспользуемые функции из `strategy/indicators.py`.
 
 ### 2.4 Гибкий Martingale (общие настройки)
 

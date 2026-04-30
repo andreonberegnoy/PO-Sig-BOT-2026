@@ -164,10 +164,11 @@ class Journal:
 
     # ---------- signals (Stage 2) ----------
 
-    def insert_signal(self, snap: dict) -> bool:
+    def insert_signal(self, snap: dict) -> int:
         """INSERT OR IGNORE — UNIQUE(symbol, signal_ts, strategy_name) защищает
         от дублей при повторных проходах по тому же закрытому бару.
-        Returns True если вставлено, False если уже было."""
+        Returns rowid вставленной строки, либо 0 если был дубликат.
+        Падает на 0 = falsy для совместимости с прежними `if inserted:` проверками."""
         row = tuple(snap.get(c) for c in _SIGNAL_COLS)
         placeholders = ",".join("?" * len(_SIGNAL_COLS))
         cur = self.conn.execute(
@@ -175,7 +176,7 @@ class Journal:
             row,
         )
         self.conn.commit()
-        return cur.rowcount > 0
+        return cur.lastrowid if cur.rowcount > 0 else 0
 
     def mark_signal_entered(self, symbol: str, signal_ts: int, strategy_name: str,
                              trade_id: str):

@@ -385,6 +385,23 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
             headers={"Content-Disposition": f"attachment; filename=analytics_{period_days}d.csv"},
         )
 
+    @app.post("/api/analytics/backfill")
+    async def analytics_backfill(request: Request, payload: dict = None):
+        """Прогнать активную стратегию по всем cached candles и вписать
+        исторические signals + market snapshots + exp_wins.
+        Идемпотентно — можно жать многократно."""
+        _auth(request)
+        if not sm:
+            raise HTTPException(503, "state machine not ready")
+        p = payload or {}
+        payout = int(p.get("payout_default", 92))
+        limit = p.get("limit_pairs")
+        result = await sm.backfill_history(
+            payout_default=payout,
+            limit_pairs=int(limit) if limit else None,
+        )
+        return result
+
     @app.get("/api/analytics/db_info")
     async def analytics_db_info(request: Request):
         _auth(request)

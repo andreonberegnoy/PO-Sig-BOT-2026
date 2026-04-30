@@ -561,10 +561,18 @@ class PoDirectFeed:
         attempt = 0
         relogin_round = 0   # how many phase-2 rounds since last relogin
 
+        # При работе через residential-proxy (PO_PROXY) — НЕ долбить.
+        # Жёсткий минимум 60s между попытками, чтобы не флажить IP перед PO.
+        proxy_active = bool(os.environ.get("PO_PROXY", "").strip())
         while self._running:
             attempt += 1
             if attempt <= max_fast_attempts:
-                wait = min(60, 2 ** attempt + random.uniform(0, 1))
+                base = 2 ** attempt + random.uniform(0, 1)
+                if proxy_active:
+                    # Через прокси: жёсткий floor 60s, ceiling 120s
+                    wait = max(60, min(120, base))
+                else:
+                    wait = min(60, base)
             else:
                 # Phase 2: slow persistent retry
                 wait = 120 + random.uniform(0, 10)

@@ -120,11 +120,7 @@
       : name === "analytics" ? "sub-analytics" : null;
     if (panelId) document.getElementById(panelId)?.classList.add("active");
     if (name === "strategy-settings") loadStrategyParams();
-    if (name === "analytics") {
-      loadAnalytics();
-      // Этап 3: показать фильтр-блок если уже сохранён активный фильтр
-      if (typeof loadActiveFilter === "function") loadActiveFilter();
-    }
+    if (name === "analytics") loadAnalytics();
   }
   document.querySelectorAll(".subtab").forEach((sub) => {
     sub.addEventListener("click", () => gotoSubtab(sub.dataset.subtab));
@@ -292,8 +288,8 @@
       { k: "filter.asset_categories", t: "multi",
         options: ["forex", "crypto", "stocks", "indices", "commodities", "other"],
         label: "Категории активов (пусто = все)" },
-      { k: "filter.min_payout", t: "int", min: 50, max: 95, label: "Минимум payout (%)" },
-      { k: "filter.payout_floor", t: "int", min: 50, max: 90, label: "Порог смены пары (%)" },
+      { k: "filter.min_payout", t: "int", min: 50, max: 95, label: "Мин. payout для первой сделки (%)" },
+      { k: "filter.payout_floor", t: "int", min: 50, max: 90, label: "Порог смены пары при падении payout (%)" },
       { k: "filter.max_losses_in_row", t: "int", min: 1, max: 10, label: "Макс. минусов до бана" },
       { k: "filter.min_wr1", t: "int", min: 0, max: 100, step: 5, label: "Мин. % 1-й сделки за 1000 свечей" },
       { k: "filter.min_wr1_recent", t: "int", min: 0, max: 100, step: 5, label: "Мин. % 1-й сделки за 200 свечей" },
@@ -818,154 +814,8 @@
     }
   }
 
-  // ─── filter UI (этап 3) ───────────────────────────────────────────────
-  // Поля фильтра: тип, label, описание. Числовые показываются парами min/max.
-  const FILTER_FIELDS = [
-    { k: "atr_ratio_min",         t: "float", label: "ATR ratio мин"      },
-    { k: "atr_ratio_max",         t: "float", label: "ATR ratio макс"     },
-    { k: "bb_position_min",       t: "float", label: "BB позиция мин"      },
-    { k: "bb_position_max",       t: "float", label: "BB позиция макс"     },
-    { k: "candle_atr_ratio_max",  t: "float", label: "Candle / ATR макс"   },
-    { k: "rsi_ma_min",            t: "float", label: "RSI MA мин"          },
-    { k: "rsi_ma_max",            t: "float", label: "RSI MA макс"         },
-    { k: "payout_min",            t: "int",   label: "Payout мин (%)"      },
-    { k: "votes_total_min",       t: "int",   label: "Votes total мин"     },
-    { k: "hours_allowed",         t: "hours", label: "Разрешённые часы"    },
-    { k: "dow_allowed",           t: "dow",   label: "Разрешённые дни"     },
-  ];
-  const DOW_NAMES = ["Пн","Вт","Ср","Чт","Пт","Сб","Вс"];
-
-  let _filterDraft = null; // {key: value} — редактируемое состояние
-
-  function _activeStrategyName() {
-    return document.getElementById("m-strategy")?.textContent?.split(" ")[0] || "consensus";
-  }
-
-  function renderFilterForm(spec) {
-    _filterDraft = {...spec};
-    const f = document.getElementById("filter-form");
-    document.getElementById("filter-enabled").checked = !!spec.enabled;
-    const meta = document.getElementById("filter-meta");
-    if (spec.based_on) {
-      const b = spec.based_on;
-      meta.textContent = `Построен по ${b.winning_signals || 0} winning из ${b.total_signals || 0} сигналов · экспирация ${b.expiry_bars || "?"} бар(а)` +
-        (spec.warning ? ` · ⚠️ ${spec.warning}` : "");
-    } else {
-      meta.textContent = "Фильтр сохранён вручную.";
-    }
-    f.innerHTML = FILTER_FIELDS.map((it) => {
-      const v = spec[it.k];
-      if (it.t === "hours") {
-        const arr = Array.isArray(v) ? v : [];
-        const opts = Array.from({length: 24}, (_, h) =>
-          `<label class="dow-opt"><input type="checkbox" data-fk="${it.k}" data-h="${h}" ${arr.includes(h) ? "checked" : ""}/> ${String(h).padStart(2,"0")}</label>`
-        ).join("");
-        return `<div class="setting-row"><label>${it.label}</label><div class="multi-row">${opts}</div></div>`;
-      }
-      if (it.t === "dow") {
-        const arr = Array.isArray(v) ? v : [];
-        const opts = DOW_NAMES.map((n, i) =>
-          `<label class="dow-opt"><input type="checkbox" data-fk="${it.k}" data-d="${i}" ${arr.includes(i) ? "checked" : ""}/> ${n}</label>`
-        ).join("");
-        return `<div class="setting-row"><label>${it.label}</label><div class="multi-row">${opts}</div></div>`;
-      }
-      const step = it.t === "int" ? 1 : 0.001;
-      return `<div class="setting-row">
-        <label>${it.label}<span class="hint">${it.k}</span></label>
-        <input type="number" step="${step}" data-fk="${it.k}" data-ft="${it.t}" value="${v ?? ""}"/>
-      </div>`;
-    }).join("");
-    // bind change handlers
-    f.querySelectorAll("[data-fk]").forEach((el) => {
-      el.addEventListener("change", () => {
-        const k = el.dataset.fk;
-        if (el.dataset.h !== undefined) {
-          // hours collect
-          const arr = [];
-          f.querySelectorAll(`[data-fk="${k}"]:checked`).forEach((c) => arr.push(parseInt(c.dataset.h)));
-          _filterDraft[k] = arr.sort((a,b)=>a-b);
-        } else if (el.dataset.d !== undefined) {
-          const arr = [];
-          f.querySelectorAll(`[data-fk="${k}"]:checked`).forEach((c) => arr.push(parseInt(c.dataset.d)));
-          _filterDraft[k] = arr.sort((a,b)=>a-b);
-        } else {
-          const t = el.dataset.ft;
-          const raw = el.value;
-          _filterDraft[k] = raw === "" ? null : (t === "int" ? parseInt(raw) : parseFloat(raw));
-        }
-      });
-    });
-    document.getElementById("filter-enabled").addEventListener("change", (e) => {
-      _filterDraft.enabled = e.target.checked;
-    });
-  }
-
-  async function buildFilterPreview() {
-    const strat = _activeStrategyName();
-    const { params } = getAnFilters();
-    const days = parseInt(params.get("period_days"));
-    const hf = params.get("hour_from"); const ht = params.get("hour_to");
-    const dow = params.get("dow");
-    const payload = {
-      period_days: days,
-      hour_from: hf ? parseInt(hf) : null,
-      hour_to: ht ? parseInt(ht) : null,
-      dow: dow ? dow.split(",").map(Number) : null,
-      use_best_exp: false,
-    };
-    try {
-      const spec = await api(`/api/strategies/${encodeURIComponent(strat)}/filter/preview`, {
-        method: "POST", body: JSON.stringify(payload),
-      });
-      document.getElementById("filter-block").style.display = "";
-      renderFilterForm(spec);
-    } catch (e) {
-      alert("Не удалось построить фильтр: " + e.message);
-    }
-  }
-
-  async function loadActiveFilter() {
-    const strat = _activeStrategyName();
-    try {
-      const spec = await api(`/api/strategies/${encodeURIComponent(strat)}/filter`);
-      if (spec && Object.keys(spec).length > 0) {
-        document.getElementById("filter-block").style.display = "";
-        renderFilterForm(spec);
-      } else {
-        document.getElementById("filter-block").style.display = "none";
-      }
-    } catch (e) { /* silent */ }
-  }
-
-  document.getElementById("btn-an-build-filter")?.addEventListener("click", buildFilterPreview);
-  document.getElementById("btn-filter-collapse")?.addEventListener("click", () => {
-    document.getElementById("filter-block").style.display = "none";
-  });
-  document.getElementById("btn-filter-rebuild")?.addEventListener("click", buildFilterPreview);
-  document.getElementById("btn-filter-save")?.addEventListener("click", async () => {
-    const strat = _activeStrategyName();
-    if (!_filterDraft) return;
-    try {
-      await api(`/api/strategies/${encodeURIComponent(strat)}/filter`, {
-        method: "PUT", body: JSON.stringify(_filterDraft),
-      });
-      alert("✓ Фильтр сохранён" + (_filterDraft.enabled ? " и активен" : " (выключен)"));
-      loadStatus();
-    } catch (e) {
-      alert("Ошибка: " + e.message);
-    }
-  });
-  document.getElementById("btn-filter-delete")?.addEventListener("click", async () => {
-    if (!confirm("Удалить активный фильтр?")) return;
-    const strat = _activeStrategyName();
-    try {
-      await api(`/api/strategies/${encodeURIComponent(strat)}/filter`, { method: "DELETE" });
-      document.getElementById("filter-block").style.display = "none";
-      loadStatus();
-    } catch (e) {
-      alert("Ошибка: " + e.message);
-    }
-  });
+  // NOTE: per-strategy signal filter UI убран до накопления истории.
+  // Backend /api/strategies/{name}/filter/* остаётся — вернём UI позже.
 
   // period buttons
   document.querySelectorAll(".period-btn").forEach((b) => {

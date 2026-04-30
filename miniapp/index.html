@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <title>PO-Sig Bot</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
-<link rel="stylesheet" href="/miniapp/style.css?v=20260520" />
+<link rel="stylesheet" href="/miniapp/style.css?v=20260521" />
 </head>
 <body>
 <header>
@@ -179,25 +179,12 @@
             <div class="actions">
               <button id="btn-an-apply" class="btn primary">🔄 Применить</button>
               <button id="btn-an-csv" class="btn">⬇️ CSV</button>
-              <button id="btn-an-build-filter" class="btn">🎯 Построить фильтр</button>
             </div>
           </div>
 
-          <!-- Block: editable filter (этап 3) -->
-          <div id="filter-block" style="display:none; margin-top: 14px; padding: 12px; background: rgba(96, 165, 250, 0.05); border-radius: 8px; border-left: 3px solid var(--button);">
-            <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom: 8px">
-              <h3 style="margin:0; flex:1">🎯 Фильтр сигналов</h3>
-              <label class="dow-opt"><input type="checkbox" id="filter-enabled"/> Включить</label>
-              <button id="btn-filter-delete" class="btn-mini">🗑</button>
-            </div>
-            <p class="hint" id="filter-meta">—</p>
-            <div id="filter-form"></div>
-            <div class="actions" style="margin-top:8px">
-              <button id="btn-filter-save" class="btn primary">💾 Сохранить</button>
-              <button id="btn-filter-rebuild" class="btn">🔄 Пересоздать из текущей выборки</button>
-              <button id="btn-filter-collapse" class="btn">✕ Свернуть</button>
-            </div>
-          </div>
+          <!-- Filter UI убран до накопления истории. Backend endpoints
+               /api/strategies/{name}/filter/* остаются для будущего возврата. -->
+
           <div id="an-meta" class="hint" style="margin: 6px 0 10px"></div>
           <div class="analytics-table-wrap">
             <table id="an-table" class="analytics-table">
@@ -218,6 +205,6 @@
 </main>
 
 <!-- Cache-bust: bump v=YYYYMMDD when app.js changes. -->
-<script src="/miniapp/app.js?v=20260520"></script>
+<script src="/miniapp/app.js?v=20260521"></script>
 </body>
 </html>

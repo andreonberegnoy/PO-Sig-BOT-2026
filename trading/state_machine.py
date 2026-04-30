@@ -1121,6 +1121,17 @@ class StateMachine:
                     logger.exception("stall watchdog: ws.close() failed")
                 continue
 
+            # ── АНАЛИТИКА 24/7 ──
+            # Запись signals + market snapshots должна идти НЕЗАВИСИМО от
+            # paused/auto-pause/day-off — даже когда бот не торгует (выходные,
+            # вне рабочих часов, ручная пауза), мы продолжаем собирать данные
+            # для аналитики. Иначе пропадает критичная история на которой
+            # юзер потом строит фильтры и принимает решения.
+            try:
+                await self._record_signals_phase()
+            except Exception:
+                logger.exception("record_signals_phase failed (always-on)")
+
             if self.state.paused or self.state.waiting_resume:
                 # Auto-resume if pause was triggered by schedule and working
                 # hours have started again.
@@ -1223,13 +1234,8 @@ class StateMachine:
                     # Between boundaries keep a loose refresh (fallback if tick stream lagged)
                     await self._maybe_refresh_all(min_interval_sec=15)
 
-                # Этап 2: запись CONSENSUS-сигналов на ВСЕХ tracked парах
-                # (independent of trading branch) — пишем market snapshots.
-                # Не блокирует ни одной решающей ветки; падение — лог и дальше.
-                try:
-                    await self._record_signals_phase()
-                except Exception:
-                    logger.exception("record_signals_phase failed")
+                # NOTE: _record_signals_phase вызывается выше до skip-чеков,
+                # чтобы аналитика работала 24/7 даже когда бот не торгует.
 
                 # Branch: three modes
                 #  • FREE: no active cycle → scan all pairs for first signal

@@ -318,7 +318,6 @@
       { k: "martingale.carry_unused", t: "bool", label: "Переносить неиспользованные перекрытия в резерв", parent: "martingale.enabled" },
       { k: "martingale.last_pair_until_stop_sum", t: "bool", label: "На последней паре цикла торговать до stop-sum", parent: "martingale.enabled" },
       { k: "martingale.manual_switch_counts", t: "bool", label: "Ручная смена пары засчитывается в счётчик", parent: "martingale.enabled" },
-      { k: "martingale.reset_on_win", t: "bool", label: "После плюса вернуть базовую сумму", parent: "martingale.enabled" },
     ],
     "⏰ Расписание работы": [
       { k: "schedule.enabled", t: "bool", label: "Работать по расписанию (снять = 24/7 круглосуточно)" },

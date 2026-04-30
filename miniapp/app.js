@@ -936,32 +936,6 @@
     });
   });
   document.getElementById("btn-an-apply")?.addEventListener("click", loadAnalytics);
-  document.getElementById("btn-an-backfill")?.addEventListener("click", async () => {
-    if (!confirm("Прогнать стратегию по всей кэшированной истории всех пар? " +
-                 "Идемпотентно (повтор безопасен). Может занять до минуты.\n\n" +
-                 "Payout стампится = 92% (PO не отдаёт исторические выплаты).\n" +
-                 "Пары в 12ч-бане исключаются.")) return;
-    const btn = document.getElementById("btn-an-backfill");
-    btn.disabled = true; btn.textContent = "📥 Идёт прогон…";
-    try {
-      const r = await api("/api/analytics/backfill", {
-        method: "POST", body: JSON.stringify({ payout_default: 92 }),
-      });
-      alert(
-        `✓ Backfill готов\n\n` +
-        `Стратегия: ${r.strategy}\n` +
-        `Пар обработано: ${r.pairs_processed} (пропущено в бане: ${r.pairs_skipped_banned || 0})\n` +
-        `Сигналов найдено: ${r.total_signals}\n` +
-        `Вписано в БД: ${r.total_inserted} (остальные были дубликатами)\n` +
-        `С exp_wins: ${r.total_settled}`
-      );
-      loadAnalytics();
-    } catch (e) {
-      alert("Ошибка: " + e.message);
-    } finally {
-      btn.disabled = false; btn.textContent = "📥 Backfill";
-    }
-  });
   document.getElementById("btn-an-csv")?.addEventListener("click", () => {
     const { params } = getAnFilters();
     // download via plain anchor (CSV is a non-JSON response, нужен auth header

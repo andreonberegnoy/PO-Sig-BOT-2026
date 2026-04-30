@@ -6,7 +6,7 @@ Rules from spec:
   > max_losses_in_row → пара в БАН на ban_hours (длительный бан, дефолт 12ч)
   WR1 long (% первой плюсовой сделки за 1000 свечей) < min_wr1 → SKIP
   WR1 recent (% за последние 200 свечей) < min_wr1_recent → ПАУЗА на
-    pause_hours (короткая пауза, дефолт 1ч). После истечения пара авто-
+    pause_minutes (короткая пауза, дефолт 60 мин). После истечения пара авто-
     переоценивается на следующем _rescan_pairs.
     (требует ≥3 сделок в окне, иначе нет данных — просто SKIP)
 
@@ -98,7 +98,7 @@ class PairScore:
     wr_recent: float = 0.0            # общий WR в recent окне
     wr1_recent: float = 0.0           # WR первой сделки в recent окне
     reason: str = ""
-    # Short pause (pause_hours, дефолт 1ч): для пар которые провалили recent
+    # Short pause (pause_minutes, дефолт 60 мин): для пар которые провалили recent
     # WR1 фильтр. После истечения автоматически переоцениваются на следующем
     # _rescan_pairs (раз в час). Если снова не пройдут — снова на паузу.
     pause: bool = False

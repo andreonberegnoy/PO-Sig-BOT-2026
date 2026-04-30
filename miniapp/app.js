@@ -300,7 +300,7 @@
       { k: "filter.recent_lookback_bars", t: "int", min: 50, max: 500, step: 50, label: "Окно recent (свечей)" },
       { k: "filter.history_candles", t: "int", min: 200, max: 2000, label: "Размер истории" },
       { k: "filter.ban_hours", t: "int", min: 1, max: 72, label: "Бан пары (часов)" },
-      { k: "filter.pause_hours", t: "int", min: 1, max: 24, label: "Пауза за низкий recent WR1 (часов)" },
+      { k: "filter.pause_minutes", t: "int", min: 5, max: 1440, step: 5, label: "Пауза за низкий recent WR1 (мин.)" },
       { k: "filter.day_off_hours", t: "int", min: 1, max: 24, label: "День-офф (часов)" },
     ],
     "💰 Торговля": [

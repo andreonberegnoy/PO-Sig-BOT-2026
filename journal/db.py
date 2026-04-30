@@ -600,9 +600,13 @@ class Journal:
 
     # ---------- bans ----------
 
-    def ban(self, symbol: str, hours: int, reason: str = ""):
+    def ban(self, symbol: str, hours: int = 0, reason: str = "", minutes: int = 0):
+        """Зафиксировать пару в бане. Длительность можно задавать
+        часами (hours) ИЛИ минутами (minutes) ИЛИ обоими (суммируются).
+        Используется и для длительных банов (`ban_hours`, дефолт 12ч),
+        и для коротких пауз (`pause_minutes`, дефолт 60 мин)."""
         now = int(time.time())
-        expires = now + hours * 3600
+        expires = now + int(hours) * 3600 + int(minutes) * 60
         self.conn.execute(
             "INSERT OR REPLACE INTO bans (symbol, banned_at, expires_at, reason) VALUES (?,?,?,?)",
             (symbol, now, expires, reason))

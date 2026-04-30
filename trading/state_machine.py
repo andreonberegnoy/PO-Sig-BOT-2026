@@ -901,22 +901,25 @@ class StateMachine:
             return
 
         self._pair_scores = scores
-        # Apply bans + pauses silently. Pause uses same bans table but with
-        # shorter expiry (filter.pause_hours) — reused journal.is_banned() check
-        # naturally hides paused pairs from trading until they expire. After
-        # expiry the pair is auto-rechecked on next _rescan_pairs (hourly).
+        # Apply bans + pauses silently. Pause uses same bans table но с
+        # коротким сроком (`filter.pause_minutes`, default 60 мин) —
+        # journal.is_banned() прячет такие пары из торговли до истечения,
+        # после чего на следующем _rescan_pairs пара авто-переоценивается.
         new_bans = 0
         new_pauses = 0
         ban_hours = int(self.cfg["filter"].get("ban_hours", 12))
-        pause_hours = int(self.cfg["filter"].get("pause_hours", 1))
+        # Backward-compat: если в state_kv остался старый ключ pause_hours,
+        # используем его как fallback (1ч = 60мин).
+        pause_minutes = int(self.cfg["filter"].get("pause_minutes",
+                            int(self.cfg["filter"].get("pause_hours", 1)) * 60))
         for sym, s in scores.items():
             if s.ban and not self.journal.is_banned(sym):
-                self.journal.ban(sym, ban_hours, s.reason)
+                self.journal.ban(sym, hours=ban_hours, reason=s.reason)
                 logger.info("BAN %s (%dh) — %s", sym, ban_hours, s.reason)
                 new_bans += 1
             elif s.pause and not self.journal.is_banned(sym):
-                self.journal.ban(sym, pause_hours, s.reason)
-                logger.info("PAUSE %s (%dh) — %s", sym, pause_hours, s.reason)
+                self.journal.ban(sym, minutes=pause_minutes, reason=s.reason)
+                logger.info("PAUSE %s (%dmin) — %s", sym, pause_minutes, s.reason)
                 new_pauses += 1
         if new_bans or new_pauses:
             logger.info("applied %d bans + %d pauses this scan", new_bans, new_pauses)

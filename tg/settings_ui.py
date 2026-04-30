@@ -81,7 +81,7 @@ CATEGORIES: dict[str, list[Setting]] = {
         Setting("filter.recent_lookback_bars", "Окно recent (свечей)", "int", 50, 500, 50),
         Setting("filter.history_candles", "Размер истории (бары)", "int", 200, 2000, 50),
         Setting("filter.ban_hours", "Бан пары (часов)", "int", 1, 72, 1),
-        Setting("filter.pause_hours", "Пауза за низкий recent WR1 (часов)", "int", 1, 24, 1),
+        Setting("filter.pause_minutes", "Пауза за низкий recent WR1 (мин.)", "int", 5, 1440, 5),
         Setting("filter.day_off_hours", "День-офф (часов)", "int", 1, 24, 1),
     ],
     "💰 Торговля": [

@@ -450,7 +450,6 @@ async def run(cfg: dict, config_path: str = "config.yaml"):
 
     tasks = [
         asyncio.create_task(sm.run(), name="state_machine"),
-        asyncio.create_task(sm._virtual_signals_loop(), name="virtual_signals"),
         asyncio.create_task(tg.run_polling(), name="tg_polling"),
         asyncio.create_task(tg.daily_report_loop(), name="daily_report"),
         asyncio.create_task(tg.periodic_report_loop(), name="periodic_report"),
@@ -464,7 +463,6 @@ async def run(cfg: dict, config_path: str = "config.yaml"):
     # supervisor brings them back automatically.
     _RESTARTABLE = {
         "state_machine": lambda: sm.run(),
-        "virtual_signals": lambda: sm._virtual_signals_loop(),
         "daily_report":  lambda: tg.daily_report_loop(),
         "periodic_report": lambda: tg.periodic_report_loop(),
         "health_watchdog": lambda: tg.health_watchdog_loop(),

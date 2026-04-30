@@ -584,44 +584,9 @@ class TelegramBot:
                                                    reply_markup=_build_control_keyboard())
 
             if action == "hourly":
-                await cb.answer("Hourly stats…")
-                if not self.journal:
-                    return await cb.message.edit_text("Журнал не подключён.",
-                                                       reply_markup=_build_control_keyboard())
-                try:
-                    import datetime as _dt
-                    tz_name = self.cfg.get("telegram", {}).get("daily_report_timezone") or "Europe/Kyiv"
-                    tz = pytz.timezone(tz_name)
-                    tz_offset_sec = int(tz.utcoffset(_dt.datetime.now()).total_seconds())
-                    since = int(time.time()) - 7 * 86400
-                    rows = self.journal.hourly_stats(since, mode=self.cfg["mode"], tz_offset_sec=tz_offset_sec)
-                except Exception as e:
-                    return await cb.message.edit_text(f"Ошибка: {e}",
-                                                       reply_markup=_build_control_keyboard())
-                # Aggregate per hour across all pairs
-                by_hour: dict = {}
-                for r in rows:
-                    h = r["hour"]
-                    a = by_hour.setdefault(h, {"total": 0, "wins": 0, "losses": 0, "profit": 0.0})
-                    a["total"] += r["total"]; a["wins"] += r["wins"]
-                    a["losses"] += r["losses"]; a["profit"] += r["profit"]
-                if not by_hour:
-                    text = "📈 <b>Hourly (7д)</b>\n\nПока нет сделок за неделю."
-                else:
-                    lines = ["📈 <b>Hourly (7д, по часам)</b>\n"]
-                    for h in sorted(by_hour.keys()):
-                        a = by_hour[h]
-                        completed = a["wins"] + a["losses"]
-                        wr = (a["wins"] / completed * 100) if completed else 0
-                        emoji = "🟢" if wr >= 70 else "🟡" if wr >= 55 else "🔴"
-                        lines.append(
-                            f"{emoji} <code>{h:02d}:00</code> — {a['total']} сд, "
-                            f"WR {wr:.0f}%, ${a['profit']:+.2f}"
-                        )
-                    lines.append(f"\nДетали — Mini App → таб <b>По часам</b>")
-                    text = "\n".join(lines)
-                return await cb.message.edit_text(text, parse_mode="HTML",
-                                                   reply_markup=_build_control_keyboard())
+                # Hourly stats удалены в этапе 1 рефакторинга. Будут переработаны
+                # как часть новой Аналитики per-strategy в этапе 2.
+                return await cb.answer("Hourly stats удалены (рефакторинг). Скоро вернётся.", show_alert=True)
 
             if action == "tracked":
                 await cb.answer("Tracked пары…")

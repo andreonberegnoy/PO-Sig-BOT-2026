@@ -110,201 +110,6 @@ class StateMachine:
     def _persist(self):
         self.journal.set("runtime_state", self.state.to_dict())
 
-    # ---------- virtual signals collector (всегда пишет, даже когда LOCKED) ----------
-    async def _virtual_signals_loop(self):
-        """Independent loop that records every CONSENSUS-fired signal on each
-        tracked pair to journal.virtual_signals — regardless of whether the
-        bot itself entered a trade. Runs even in LOCKED / paused states.
-
-        Settles signals (computes exp_wins) once 5+ bars have elapsed since
-        the entry, using cached candles. Combined with /api/expiry_stats and
-        /api/hourly_stats virtual sources, this gives full strategy coverage
-        for analytics — not just the few trades the bot actually took.
-        """
-        import json as _json
-        from strategy.consensus import generate_signals as _gen_v, DEFAULT_PARAMS as _DEFV
-        last_eval: dict[str, int] = {}
-        backfilled: set[str] = set()   # пары, уже прогнанные по истории один раз
-        await asyncio.sleep(15)   # let initial scan + tracked-set populate
-        while self._running:
-            try:
-                # Scan for new signals
-                tf = int(self.cfg["filter"].get("tf", 60))
-                now_ts = int(time.time())
-                MAX_STALENESS = 25
-                for sym in list(self._tracked):
-                    buf = self._candles.get(sym)
-                    if not buf or len(buf) < 200:
-                        continue
-                    # ── ПЕРВАЯ встреча tracked-пары: авто-backfill всей
-                    # cached истории. Прогоняем CONSENSUS на ~1060 свечах,
-                    # вставляем все исторические сигналы + сразу считаем
-                    # exp_wins по следующим 5 барам в том же буфере. Делается
-                    # один раз на пару. INSERT OR IGNORE предотвращает дубли
-                    # если бот уже видел эти сигналы в предыдущем сеансе.
-                    if sym not in backfilled:
-                        backfilled.add(sym)
-                        try:
-                            params = {**_DEFV, **(self.cfg.get("indicator") or {})}
-                            f_cfg2 = self.cfg.get("filter") or {}
-                            if "stats_lookback_bars" in f_cfg2:
-                                params["statsLookbackBars"] = f_cfg2["stats_lookback_bars"]
-                            if "recent_lookback_bars" in f_cfg2:
-                                params["recentLookbackBars"] = f_cfg2["recent_lookback_bars"]
-                            closed_hist = buf[:-1]
-                            sigs, _ = _gen_v(closed_hist, params)
-                            inserted = 0
-                            for s in sigs:
-                                idx = int(s.i)
-                                if idx < 0 or idx >= len(closed_hist):
-                                    continue
-                                bar = closed_hist[idx]
-                                ent_ts = int(bar["time"]) + tf
-                                ent_close = float(bar.get("close") or 0)
-                                if ent_close == 0:
-                                    continue
-                                side = "call" if s.side == "buy" else "put"
-                                self.journal.insert_virtual_signal(sym, side, ent_ts, ent_close)
-                                inserted += 1
-                                # Compute exp_wins from following 5 bars
-                                results = []
-                                for n in (1, 2, 3, 4, 5):
-                                    ei = idx + n
-                                    if ei >= len(closed_hist):
-                                        results.append(None); continue
-                                    ex_close = float(closed_hist[ei].get("close") or 0)
-                                    if ex_close == 0:
-                                        results.append(None); continue
-                                    if side == "call":
-                                        results.append(1 if ex_close > ent_close else 0)
-                                    else:
-                                        results.append(1 if ex_close < ent_close else 0)
-                                if not all(r is None for r in results):
-                                    cur = self.journal.conn.execute(
-                                        "SELECT id, settled_at FROM virtual_signals "
-                                        "WHERE symbol=? AND signal_ts=?",
-                                        (sym, ent_ts),
-                                    ).fetchone()
-                                    if cur and cur[1] is None:
-                                        self.journal.settle_virtual_signal(
-                                            int(cur[0]), _json.dumps(results))
-                            if inserted:
-                                logger.info(
-                                    "virtual backfill %s: %d signals from %d cached candles",
-                                    sym, inserted, len(closed_hist),
-                                )
-                            # Mark last_eval to skip current bar in normal loop
-                            last_eval[sym] = int(buf[-2]["time"])
-                            continue   # не обрабатывать в этой же итерации
-                        except Exception:
-                            logger.exception("auto-backfill failed for %s", sym)
-                    # Normal incremental processing
-                    last_closed_t = int(buf[-2]["time"])
-                    if last_closed_t <= last_eval.get(sym, 0):
-                        continue
-                    last_eval[sym] = last_closed_t
-                    age = now_ts - (last_closed_t + tf)
-                    if age > MAX_STALENESS:
-                        continue
-                    # _check_signal is pure (no side-effects on other state)
-                    action = self._check_signal(sym)
-                    if action:
-                        entry_ts = last_closed_t + tf
-                        entry_close = float(buf[-2].get("close") or 0)
-                        if entry_close > 0:
-                            self.journal.insert_virtual_signal(
-                                sym, action, entry_ts, entry_close,
-                            )
-                # Settle older virtual signals (those with 5+ bars after entry)
-                older_than = now_ts - 5 * tf - 10
-                pending = self.journal.pending_virtual_signals(older_than, limit=50)
-                for vs in pending:
-                    sym = vs["symbol"]
-                    candles = self._candles.get(sym) or []
-                    entry_ts = int(vs["signal_ts"])
-                    entry_close = float(vs["entry_close"])
-                    side = vs["side"]
-                    # Find entry candle by time
-                    entry_idx = None
-                    for i, c in enumerate(candles):
-                        if int(c["time"]) == entry_ts:
-                            entry_idx = i
-                            break
-                    if entry_idx is None:
-                        # Candle may have been pruned. Mark settled with empty data
-                        # so we stop reprocessing forever.
-                        self.journal.settle_virtual_signal(int(vs["id"]), _json.dumps([None]*5))
-                        continue
-                    results = []
-                    for n in (1, 2, 3, 4, 5):
-                        ei = entry_idx + n
-                        if ei >= len(candles):
-                            results.append(None)
-                            continue
-                        exit_close = float(candles[ei].get("close") or 0)
-                        if exit_close == 0 or entry_close == 0:
-                            results.append(None)
-                            continue
-                        if side == "call":
-                            results.append(1 if exit_close > entry_close else 0)
-                        elif side == "put":
-                            results.append(1 if exit_close < entry_close else 0)
-                        else:
-                            results.append(None)
-                    self.journal.settle_virtual_signal(int(vs["id"]), _json.dumps(results))
-            except Exception:
-                logger.exception("virtual_signals_loop iteration failed")
-            await asyncio.sleep(2)
-
-    # ---------- exp_wins backtest ----------
-    def _persist_exp_wins(self, symbol: str, action: str, open_ts: int, trade_id: str):
-        """Compute & save which expiries (1..5 M1 bars) would have closed the
-        trade in profit. Persists as JSON `[1,0,1,1,0]` in trades.exp_wins.
-
-        Approximation: entry price = open of bar containing open_ts, exit
-        price = close of bar at open_ts + N*60. For call: WIN if exit > entry.
-        For put: WIN if exit < entry. None if candle missing.
-
-        Aggregated over time by /api/hourly_stats to show avg min winning
-        expiry per (sym, hour) — helps tune trading.expiry_seconds.
-        """
-        import json as _json
-        candles = (self._candles or {}).get(symbol) or []
-        if not candles:
-            return
-        entry_minute = (open_ts // 60) * 60
-        # Find entry candle by time (binary search would be nicer; linear is fine)
-        entry_idx = None
-        for i, c in enumerate(candles):
-            if c["time"] == entry_minute:
-                entry_idx = i
-                break
-        if entry_idx is None:
-            return
-        entry_price = float(candles[entry_idx].get("open", 0) or 0)
-        if entry_price == 0:
-            return
-        results: list = []
-        for n in (1, 2, 3, 4, 5):
-            exit_idx = entry_idx + n
-            if exit_idx >= len(candles):
-                results.append(None)
-                continue
-            exit_price = float(candles[exit_idx].get("close", 0) or 0)
-            if exit_price == 0:
-                results.append(None)
-                continue
-            if action == "call":
-                results.append(1 if exit_price > entry_price else 0)
-            elif action == "put":
-                results.append(1 if exit_price < entry_price else 0)
-            else:
-                results.append(None)
-        # Skip persisting if all None (no data) — avoids polluting query agg
-        if all(r is None for r in results):
-            return
-        self.journal.update_exp_wins(trade_id, _json.dumps(results))
-
     # ---------- working hours ----------
     def _within_working_hours(self) -> bool:
         """Returns True if NOW is within the configured trading window. If
@@ -333,49 +138,8 @@ class StateMachine:
             logger.exception("working-hours check failed, defaulting to True")
             return True
 
-    # ---------- analytics: hourly backtest snapshot per pair ----------
-    async def _pair_stats_logger_loop(self):
-        """Run consensus.analyze on every tracked pair's buffer once per hour
-        and persist the result to journal.pair_stats_log. Two months of these
-        accumulate into a useful per-pair performance history (~720 hourly
-        snapshots × ~30 pairs = manageable size)."""
-        # First snapshot ~10 min after start so buffers have time to fill.
-        await asyncio.sleep(600)
-        from strategy.consensus import analyze as _analyze, DEFAULT_PARAMS as _DP
-        params = {**_DP, **(self.cfg.get("indicator") or {})}
-        while self._running:
-            try:
-                pairs = list(self._tracked) or list(self._candles.keys())
-                wrote = 0
-                for sym in pairs:
-                    buf = self._candles.get(sym) or []
-                    if len(buf) < 300:
-                        continue
-                    try:
-                        a = _analyze(buf[:-1], params)
-                    except Exception:
-                        logger.exception("analyze failed for %s", sym)
-                        continue
-                    snap = {
-                        "bars": len(buf) - 1,
-                        "signals_total": int(a.completed),
-                        "wins": int(a.wins),
-                        "losses": int(a.losses),
-                        "wr": float(a.wr),
-                        "wr1": float(a.wr1),
-                        "max_streak": int(a.max_loss_streak_before_win),
-                        "max_streak_overall": int(a.max_loss_streak_overall),
-                    }
-                    try:
-                        self.journal.log_pair_stats(sym, snap)
-                        wrote += 1
-                    except Exception:
-                        logger.exception("log_pair_stats failed for %s", sym)
-                if wrote:
-                    logger.info("pair_stats logger: wrote %d snapshots", wrote)
-            except Exception:
-                logger.exception("pair_stats logger crashed (will retry next hour)")
-            await asyncio.sleep(3600)
+    # NOTE: _pair_stats_logger_loop был удалён в этапе 1 рефакторинга.
+    # В этапе 2 будет переработан как часть нового signals collector.
 
     # ---------- control ----------
     async def stop(self):
@@ -726,8 +490,8 @@ class StateMachine:
         if allowed_cats:
             if categorize_symbol(symbol, self.feed.assets.get(symbol)) not in allowed_cats:
                 return False
-        # User-applied hour-of-day whitelist (filter.hour_whitelist)
-        if not self._hour_allowed(symbol): return False
+        # NOTE: hour-whitelist filter был удалён в этапе 1 рефакторинга.
+        # В этапе 2 будет переработан как часть новой Аналитики per-strategy.
         return True
 
     def _pick_switch_pair(self, exclude: set[str]) -> Optional[PairScore]:
@@ -735,31 +499,6 @@ class StateMachine:
                 if sc.allowed and sym not in exclude and not self.journal.is_banned(sym)
                 and int(self.feed.assets.get(sym, {}).get("payout", 0)) >= self.cfg["filter"]["min_payout"]}
         return pick_best(pool, exclude)
-
-    def _hour_allowed(self, sym: str) -> bool:
-        """User-applied hour-whitelist gate. When `filter.hour_whitelist` is
-        non-empty, only trade (sym, current_hour_local) combos that are in
-        the whitelist. Empty whitelist = filter disabled = all hours allowed.
-
-        Built via Mini App "По часам" → "Применить как фильтр" button which
-        scans historical trades, picks pair×hour cells with high WR, and
-        saves the list. Bot then refuses to enter trades outside these
-        windows — implements time-of-day strategy refinement.
-        """
-        wl = (self.cfg.get("filter") or {}).get("hour_whitelist") or {}
-        if not wl:
-            return True   # filter inactive
-        hours = wl.get(sym)
-        if not hours:
-            return False  # pair not whitelisted
-        try:
-            tz_name = (self.cfg.get("telegram") or {}).get("daily_report_timezone") or "Europe/Kyiv"
-            tz = pytz.timezone(tz_name)
-            current_hour = datetime.now(tz).hour
-            return int(current_hour) in [int(h) for h in hours]
-        except Exception:
-            logger.exception("hour_allowed check failed for %s — defaulting to allow", sym)
-            return True
 
     # ---------- main loop ----------
     async def _resume_pending_trade(self):
@@ -839,8 +578,7 @@ class StateMachine:
     async def run(self):
         self._running = True
         await self._notify(f"🤖 Бот запущен ({self.cfg['mode']})")
-        # Background analytics — pair backtest snapshots once an hour.
-        asyncio.create_task(self._pair_stats_logger_loop(), name="pair_stats_logger")
+        # NOTE: pair_stats_logger удалён в этапе 1; signals collector будет в этапе 2.
         # Resume any in-flight trade interrupted by the previous restart
         await self._resume_pending_trade()
 
@@ -1284,9 +1022,7 @@ class StateMachine:
             payout = int(self.feed.assets.get(sym, {}).get("payout", 0))
             if payout < min_payout:
                 continue
-            # Skip if user's hour-whitelist excludes this pair at this hour
-            if not self._hour_allowed(sym):
-                continue
+            # NOTE: hour-whitelist gate был удалён в этапе 1 рефакторинга.
             buf = self._candles.get(sym)
             if not buf or len(buf) < 200:
                 continue
@@ -1334,33 +1070,9 @@ class StateMachine:
     # ---------- trade open / close flow ----------
     async def _open_and_track(self, sym: str, action: str, amount: float):
         expiry = int(self.cfg["trading"]["expiry_seconds"])
-        # Per-(symbol, current_hour) expiry override — set by Mini App
-        # «По часам» → ⭐ Применить как фильтр. Picks expiry that virtual
-        # signals showed best WR for this exact pair-hour combo.
-        try:
-            overrides = (self.cfg.get("filter") or {}).get("hour_expiry_overrides") or {}
-            if overrides and sym in overrides:
-                # Convert UTC time → user's TZ (same logic as _hour_allowed)
-                import datetime as _dt
-                tz_name = (self.cfg.get("telegram") or {}).get("daily_report_timezone") or "Europe/Kyiv"
-                try:
-                    import pytz
-                    tz = pytz.timezone(tz_name)
-                    cur_hour = _dt.datetime.now(tz).hour
-                except Exception:
-                    cur_hour = _dt.datetime.utcnow().hour
-                pref = overrides[sym].get(str(cur_hour))
-                if pref:
-                    pref = int(pref)
-                    if pref != expiry:
-                        logger.info(
-                            "expiry override applied for %s @ %02d:00 — using %ds "
-                            "(default was %ds) per virtual stats",
-                            sym, cur_hour, pref, expiry,
-                        )
-                        expiry = pref
-        except Exception:
-            logger.exception("hour_expiry_overrides lookup failed — using default")
+        # NOTE: hour_expiry_overrides был удалён в этапе 1 рефакторинга.
+        # В этапе 2 будет переработан как часть новой Аналитики
+        # (применяется per-strategy через filter в Аналитике).
         # Clear any stale pending_trade from a prior aborted attempt (otherwise
         # a restart could resume the wrong trade).
         if self.state.pending_trade:
@@ -1497,14 +1209,9 @@ class StateMachine:
             "balance_after": self.feed.balance(),
             "mode": self.cfg["mode"],
         })
-        # Backtest 1..5 bar expiries against cached candles around entry —
-        # persist as JSON in trades.exp_wins so /api/hourly_stats can show
-        # accumulated "min winning expiry per (sym, hour)" over time.
-        try:
-            self._persist_exp_wins(opened.asset, opened.action,
-                                   open_ts_actual, closed.trade_id)
-        except Exception:
-            logger.exception("exp_wins backtest failed for %s", closed.trade_id)
+        # NOTE: exp_wins backtest collector был удалён в этапе 1 рефакторинга.
+        # В этапе 2 будет реализован per-strategy в составе нового signals
+        # collector с market snapshots на момент сигнала.
 
         if closed.result == "WIN":
             gained = closed.profit - opened.amount

@@ -101,9 +101,9 @@ class PoDirectFeed:
         self._relogin_pending_reason: Optional[str] = None
         self._scheduled_relogin_task: Optional[asyncio.Task] = None
         self._buffer_keeper_task: Optional[asyncio.Task] = None
-        self._payout_logger_task: Optional[asyncio.Task] = None
+        # NOTE: _payout_logger_task удалён в этапе 1 рефакторинга
         self._heartbeat_task: Optional[asyncio.Task] = None
-        self._journal_for_logging = None     # set externally for analytics
+        self._journal_for_logging = None     # legacy, не используется (этап 1)
         self._last_logged_payout: dict[str, int] = {}
         self._pending_event: Optional[str] = None   # for 451- / binary pair
         self._ws: Optional[websockets.ClientConnection] = None
@@ -237,11 +237,8 @@ class PoDirectFeed:
             self._buffer_keeper_task = asyncio.create_task(
                 self._buffer_keeper_loop(), name="po_buffer_keeper",
             )
-        # Start payout logger if a journal was attached (analytics).
-        if self._journal_for_logging is not None and self._payout_logger_task is None:
-            self._payout_logger_task = asyncio.create_task(
-                self._payout_logger_loop(), name="po_payout_logger",
-            )
+        # NOTE: payout_logger task удалён в этапе 1 рефакторинга
+        # (вместе с payout_log таблицей).
         # Start WS heartbeat watchdog (survives reconnects, started once).
         if self._heartbeat_task is None or self._heartbeat_task.done():
             self._heartbeat_task = asyncio.create_task(
@@ -263,8 +260,6 @@ class PoDirectFeed:
             self._scheduled_relogin_task.cancel()
         if self._buffer_keeper_task and not self._buffer_keeper_task.done():
             self._buffer_keeper_task.cancel()
-        if self._payout_logger_task and not self._payout_logger_task.done():
-            self._payout_logger_task.cancel()
         if self._heartbeat_task and not self._heartbeat_task.done():
             self._heartbeat_task.cancel()
 
@@ -942,32 +937,9 @@ class PoDirectFeed:
         expected = max(1, (last_t - first_t) // period + 1)
         return min(1.0, len(bars) / expected)
 
-    async def _payout_logger_loop(self):
-        """Every 5 minutes, snapshot payout for each known asset to journal.
-        Throttled: skip a symbol whose payout hasn't changed since last write."""
-        try:
-            while self._running:
-                await asyncio.sleep(300)
-                if not self._journal_for_logging:
-                    continue
-                wrote = 0
-                for sym, info in list(self.assets.items()):
-                    try:
-                        payout = int(info.get("payout") or 0)
-                        if payout <= 0:
-                            continue
-                        prev = self._last_logged_payout.get(sym)
-                        if prev == payout:
-                            continue
-                        self._journal_for_logging.log_payout(sym, payout)
-                        self._last_logged_payout[sym] = payout
-                        wrote += 1
-                    except Exception:
-                        logger.exception("payout log failed for %s", sym)
-                if wrote:
-                    logger.info("payout logger: wrote %d snapshots", wrote)
-        except asyncio.CancelledError:
-            pass
+    # NOTE: _payout_logger_loop удалён в этапе 1 рефакторинга
+    # (писал в payout_log таблицу которая удалена). Будет переработан
+    # в этапе 2 как часть нового signals collector с market snapshots.
 
     async def _buffer_keeper_loop(self):
         """Every 60s, scan each subscribed pair's recent buffer for gaps and

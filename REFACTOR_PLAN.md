@@ -84,53 +84,51 @@
 - [x] `miniapp/style.css`: удалены стили `.analytics`, `.range-selector`, `.range-btn`, `.btn-tiny` (analytics-only)
 - [x] `miniapp/style.css`: добавлены стили `.subtabs`, `.subtab`, `.subtab-panel`
 
-### 1.2 Backend (api/server.py)
+### 1.2 Backend (api/server.py) — ✅ DONE
 
-- [ ] Удалить endpoints:
-  - `GET /api/pair_stats`
-  - `GET /api/hourly_stats`
-  - `GET /api/hour_whitelist`
-  - `POST /api/apply_hour_whitelist`
-  - `POST /api/clear_hour_whitelist`
-  - `POST /api/reset_hourly_stats`
-  - `GET /api/expiry_stats`
-  - `POST /api/backfill_virtual_signals`
+- [x] Удалены endpoints (~870 строк):
+  - `GET /api/pair_stats`, `GET /api/hourly_stats`, `GET /api/expiry_stats`
+  - `GET /api/hour_whitelist`, `POST /api/apply_hour_whitelist`, `POST /api/clear_hour_whitelist`
+  - `POST /api/reset_hourly_stats`, `POST /api/backfill_virtual_signals`
+- [x] Удалён неиспользуемый `import asyncio` из server.py
 
-### 1.3 State machine (trading/state_machine.py)
+### 1.3 State machine (trading/state_machine.py) — ✅ DONE
 
-- [ ] Удалить методы:
-  - `_virtual_signals_loop` (фоновая задача целиком)
-  - `_persist_exp_wins`
-  - `_hour_allowed`
-- [ ] Убрать вызов `_hour_allowed` в `_eligible_for_new_cycle`
-- [ ] Убрать чтение `hour_expiry_overrides` в `_open_and_track`
-- [ ] Убрать обращение к `_persist_exp_wins` в `_on_trade_closed`
+- [x] Удалены методы:
+  - `_virtual_signals_loop` (фоновая задача целиком, ~140 строк)
+  - `_persist_exp_wins` (~50 строк)
+  - `_hour_allowed` (~25 строк)
+  - `_pair_stats_logger_loop` (фоновая задача, ~45 строк)
+- [x] Убран вызов `_hour_allowed` в `_eligible_for_new_cycle` и в scan loop
+- [x] Убрано чтение `hour_expiry_overrides` в `_open_and_track`
+- [x] Убрано обращение к `_persist_exp_wins` в `_on_trade_closed`
+- [x] Убран `asyncio.create_task(self._pair_stats_logger_loop())` из `run()`
 
-### 1.4 main.py
+### 1.4 main.py — ✅ DONE
 
-- [ ] Убрать регистрацию задачи `virtual_signals` в `tasks` и `_RESTARTABLE`
+- [x] Убрана регистрация задачи `virtual_signals` в `tasks` и `_RESTARTABLE`
 
-### 1.5 Журнал (journal/db.py)
+### 1.5 Журнал (journal/db.py) — ✅ DONE
 
-- [ ] Удалить из SCHEMA:
-  - `CREATE TABLE virtual_signals`
-  - `CREATE TABLE pair_stats_log`
-  - `CREATE TABLE payout_log`
-  - индексы для них
-- [ ] Удалить методы:
+- [x] Удалены из SCHEMA:
+  - `CREATE TABLE virtual_signals` + индексы
+  - `CREATE TABLE pair_stats_log` + индексы
+  - `CREATE TABLE payout_log` + индексы
+- [x] Удалены методы (db.py сократился с ~720 до 236 строк):
   - `update_exp_wins`
-  - `insert_virtual_signal`
-  - `pending_virtual_signals`
-  - `settle_virtual_signal`
-  - `hourly_stats` (старый — будет переписан в этапе 2 под новую модель)
-  - `log_pair_stats` (если есть)
-- [ ] В `_migrate_columns`: удалить добавление `exp_wins` колонки + добавить миграцию `ALTER TABLE trades DROP COLUMN exp_wins`
-- [ ] Миграция времени запуска: `DROP TABLE IF EXISTS virtual_signals/pair_stats_log/payout_log`
+  - `insert_virtual_signal`, `pending_virtual_signals`, `settle_virtual_signal`
+  - `hourly_stats` (старый — будет переписан в этапе 2)
+  - `log_payout`, `last_payout`, `payout_log_since`, `winning_trade_payouts`, etc.
+  - `log_pair_stats`, `pair_stats_since`
+- [x] `_migrate_columns` теперь делает `DROP TABLE IF EXISTS virtual_signals/pair_stats_log/payout_log` при запуске (миграция старых БД)
+- [x] Бонус: удалён `_payout_logger_loop` из `feed/po_direct.py` (писал в удалённую таблицу)
+- [x] Бонус: TG-команда `hourly` в bot.py теперь возвращает alert «удалена в рефакторинге»
 
-### 1.6 Документация
+### 1.6 Документация — ✅ DONE (в коммитах 030a88b/2dc79b4)
 
-- [ ] `README.md`: удалить упоминания вкладок Аналитика/По часам/Экспирация
-- [ ] `CLAUDE.md`: убрать ссылки на virtual_signals, hourly_stats и пр. (если есть)
+- [x] `README.md`: убраны упоминания вкладок Аналитика/По часам/Экспирация, описана новая структура
+- [x] `CLAUDE.md`: добавлен warning блок про активный рефакторинг + ссылка на REFACTOR_PLAN.md
+- [x] `REFACTOR_PLAN.md`: live document с прогрессом по этапам
 
 ### Критерии готовности этапа 1
 

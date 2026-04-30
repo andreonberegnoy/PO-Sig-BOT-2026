@@ -56,6 +56,11 @@ class RuntimeState:
     # Trade in-flight at the moment of crash/restart. Resolved on startup.
     pending_trade: Optional[dict] = None
     # ↑ {asset, action, amount, pre_balance, open_ts, expiry_sec}
+    # Гибкий MG (этап 2): резерв неиспользованных перекрытий с предыдущих пар
+    # цикла. Когда current_pair достигла per_pair_max — карри переносится на
+    # следующую пару. На последней паре (cycle_switches >= max_pair_switch_per_cycle)
+    # отдаётся целиком.
+    cycle_unused_carry: int = 0
 
     def to_dict(self): return asdict(self)
 
@@ -67,7 +72,8 @@ class RuntimeState:
         if not d: return cls()
         s = cls()
         for k, v in d.items():
-            if hasattr(s, k): setattr(s, k, v)
+            if hasattr(s, k):
+                setattr(s, k, v)
         return s
 
 
@@ -133,6 +139,10 @@ class StateMachine:
                 now = _dt.datetime.now(tz)
             except Exception:
                 now = _dt.datetime.now()
+            # weekends: если no_weekends включён — sat/sun считаем не-рабочими.
+            if sched.get("no_weekends"):
+                if now.weekday() >= 5:   # 5=Sat, 6=Sun
+                    return False
             start = int(sched.get("start_hour", 0))
             end = int(sched.get("end_hour", 24))
             h = now.hour
@@ -172,6 +182,7 @@ class StateMachine:
         self.state.trades_on_pair = 0
         self.state.cycle_switches = 0
         self.state.switched_pairs = []
+        self.state.cycle_unused_carry = 0
         self._persist()
         logger.info("RESUMED after stop-sum — fresh cycle")
 
@@ -206,7 +217,17 @@ class StateMachine:
         old_pair = self.state.current_pair
         if old_pair and old_pair not in (self.state.switched_pairs or []):
             self.state.switched_pairs.append(old_pair)
-        self.state.cycle_switches += 1
+        # Этап 2: гибкий MG — учёт ручной смены и перенос неиспользованных
+        # перекрытий. cfg.martingale.manual_switch_counts (default true)
+        # контролирует засчитывается ли это в cycle_switches.
+        mg_cfg = self.cfg.get("martingale") or {}
+        if bool(mg_cfg.get("manual_switch_counts", True)):
+            self.state.cycle_switches += 1
+        if bool(mg_cfg.get("carry_unused", True)):
+            per_pair = int(mg_cfg.get("per_pair_max", 0) or 0)
+            if per_pair > 0:
+                unused = max(0, per_pair - self.state.trades_on_pair)
+                self.state.cycle_unused_carry += unused
         self.state.current_pair = None   # ← SEARCH режим
         self.state.trades_on_pair = 0
         self._persist()
@@ -416,6 +437,43 @@ class StateMachine:
             return None
         return "call" if last.side == "buy" else "put"
 
+    # ---------- TG notifications (Stage 2 — enriched) ----------
+
+    def _notify_open_async(self, sym: str, action: str, amt: float,
+                            mg_step: int, payout: int, pre_balance: float):
+        """Формирует подробное TG-уведомление об открытии + шлёт график PNG.
+        Вызывается fire-and-forget (asyncio.create_task), чтобы PNG render
+        не задерживал реальный вход в сделку."""
+        async def _bg():
+            stage = "первая сделка" if mg_step == 0 else f"МГ{mg_step}"
+            msg = (
+                f"📡 <b>{sym} → {action.upper()}</b> ({stage})\n"
+                f"💰 Ставка: ${amt:.2f}   📊 Payout: {payout}%\n"
+                f"💼 Баланс до: ${pre_balance:.2f}"
+            )
+            try:
+                await self._notify(msg)
+            except Exception:
+                logger.exception("notify_open failed")
+            # Chart на каждой ступени (этап 2 — раньше слался только на 1-й)
+            if self.send_chart:
+                try:
+                    from tg.chart import render_chart
+                    params = {**self.cfg["indicator"]}
+                    candles = self._candles.get(sym) or []
+                    png = render_chart(candles, params, sym)
+                    cap = f"📊 {sym} — {action.upper()} ({stage})"
+                    await self.send_chart(png, caption=cap)
+                except Exception as e:
+                    logger.exception("send_chart failed for %s", sym)
+                    try:
+                        await self._notify(
+                            f"⚠️ График {sym} не построился: {type(e).__name__}: {e}"
+                        )
+                    except Exception:
+                        pass
+        asyncio.create_task(_bg(), name=f"notify_open_{sym}_{mg_step}")
+
     # ---------- signals collector (Stage 2) ----------
 
     def _check_signal_with_meta(self, symbol: str):
@@ -602,6 +660,23 @@ class StateMachine:
                                  sym, snap["side"], snap["signal_ts"], snap.get("votes_total"))
             except Exception:
                 logger.exception("insert_signal failed for %s", sym)
+
+    async def _signals_retention_loop(self):
+        """Раз в 24ч удаляет signals старше cfg.retention.signals_days."""
+        while self._running:
+            try:
+                await asyncio.sleep(24 * 3600)
+                days = int((self.cfg.get("retention") or {}).get("signals_days", 180))
+                if days <= 0:
+                    continue
+                deleted = self.journal.signals_retention_cleanup(days)
+                if deleted:
+                    logger.info("retention: deleted %d signals older than %d days",
+                                deleted, days)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("retention loop crashed")
 
     async def _signals_settle_loop(self):
         """Background task: каждые 30 сек ищет неосёдланные signals у которых
@@ -813,6 +888,7 @@ class StateMachine:
         await self._notify(f"🤖 Бот запущен ({self.cfg['mode']})")
         # Этап 2: settlement loop для exp_wins по записанным signals.
         asyncio.create_task(self._signals_settle_loop(), name="signals_settle")
+        asyncio.create_task(self._signals_retention_loop(), name="signals_retention")
         # Resume any in-flight trade interrupted by the previous restart
         await self._resume_pending_trade()
 
@@ -1082,34 +1158,11 @@ class StateMachine:
         self.state.mg_step = 0
         self.state.cycle_switches = 0
         self.state.switched_pairs = []
+        self.state.cycle_unused_carry = 0
         self._persist()
 
-        # Fire-and-forget notification + chart (don't await, don't block trade)
-        async def _notify_bg():
-            try:
-                await self._notify(
-                    f"📡 Сигнал {sym} → {action.upper()} (payout {payout}%). Захожу в сделку ${amt}."
-                )
-            except Exception:
-                logger.exception("notify failed")
-            if self.send_chart:
-                try:
-                    from tg.chart import render_chart
-                    params = {**self.cfg["indicator"]}
-                    candles = self._candles.get(sym) or []
-                    png = render_chart(candles, params, sym)
-                    await self.send_chart(png, caption=f"📊 {sym} — сигнал {action.upper()}")
-                except Exception as e:
-                    logger.exception("send_chart failed for %s", sym)
-                    # Best-effort: tell user via TG so they know charts are
-                    # broken (silent failures are the worst).
-                    try:
-                        await self._notify(
-                            f"⚠️ Не удалось построить график для {sym}: {type(e).__name__}: {e}"
-                        )
-                    except Exception:
-                        pass
-        asyncio.create_task(_notify_bg(), name=f"notify_{sym}")
+        pre_balance_now = float(self.feed.balance() or 0.0)
+        self._notify_open_async(sym, action, amt, 0, payout, pre_balance_now)
 
         await self._open_and_track(sym, action, amt)
 
@@ -1117,38 +1170,54 @@ class StateMachine:
     async def _in_cycle_step(self):
         sym = self.state.current_pair
 
-        # ── Hard cap: max trades per pair within this cycle ──
-        # User-configured via two settings:
-        #   trading.limit_trades_per_pair_enabled (bool toggle, default false)
-        #   trading.max_trades_on_pair (int count, used when toggle is true)
-        # Setting count to 0 also disables it (legacy compat).
-        limit_enabled = bool(self.cfg["trading"].get("limit_trades_per_pair_enabled", False))
-        max_trades = int(self.cfg["trading"].get("max_trades_on_pair", 0) or 0)
-        if limit_enabled and max_trades > 0 and self.state.trades_on_pair >= max_trades:
-            self.state.switched_pairs.append(sym)
-            self.state.cycle_switches += 1
-            self.state.current_pair = None   # enter SEARCHING mode
-            self.state.trades_on_pair = 0
-            self._persist()
-            await self._notify(
-                f"🔀 Лимит {max_trades} сделок на паре {sym} достигнут — "
-                f"ищу сигнал на других допустимых парах. МГ-шаг {self.state.mg_step} сохранён."
-            )
-            return  # next loop tick → _in_cycle_search_step
+        # ── Гибкий MG (этап 2) ──
+        # cfg.martingale.per_pair_max + carry_unused + last_pair_until_stop_sum
+        # На последней паре цикла торгуем до stop_sum, игнорируя per_pair_max
+        # и payout drop. На предыдущих — стандартные перекрытия с переносом
+        # неиспользованного резерва.
+        mg_cfg = self.cfg.get("martingale") or {}
+        per_pair_max = int(mg_cfg.get("per_pair_max", 0) or 0)
+        max_switches = int(self.cfg["trading"].get("max_pair_switch_per_cycle", 1))
+        is_last_pair = self.state.cycle_switches >= max_switches
+        last_until_stop = bool(mg_cfg.get("last_pair_until_stop_sum", True))
+        carry_unused = bool(mg_cfg.get("carry_unused", True))
+        # На последней паре + last_until_stop — лимит перекрытий не действует
+        skip_per_pair_limit = is_last_pair and last_until_stop
 
-        # Check payout drop → switch to SEARCHING mode (don't pick one specific pair)
-        payout = int(self.feed.assets.get(sym, {}).get("payout", 0))
-        floor = self.cfg["filter"]["payout_floor"]
-        if payout < floor and self.state.cycle_switches < self.cfg["trading"]["max_pair_switch_per_cycle"]:
-            self.state.switched_pairs.append(sym)
-            self.state.cycle_switches += 1
-            self.state.current_pair = None   # enter SEARCHING mode
-            self._persist()
-            await self._notify(
-                f"🔄 Payout {payout}% < {floor}% на {sym} — "
-                f"ищу сигнал на других допустимых парах. МГ-шаг {self.state.mg_step} сохранён."
-            )
-            return  # next loop tick → _in_cycle_search_step
+        if per_pair_max > 0 and not skip_per_pair_limit:
+            allowed = per_pair_max + (self.state.cycle_unused_carry if is_last_pair and carry_unused else 0)
+            if self.state.trades_on_pair >= allowed:
+                self.state.switched_pairs.append(sym)
+                self.state.cycle_switches += 1
+                self.state.current_pair = None
+                self.state.trades_on_pair = 0
+                # перешли на максимуме — резерва от этой пары не остаётся
+                self._persist()
+                await self._notify(
+                    f"🔀 Лимит {allowed} перекрытий на {sym} исчерпан — "
+                    f"перехожу на следующую пару. МГ-шаг {self.state.mg_step} сохранён."
+                )
+                return  # next loop tick → _in_cycle_search_step
+
+        # Payout drop → switch (с переносом резерва). На последней паре игнор.
+        if not skip_per_pair_limit:
+            payout = int(self.feed.assets.get(sym, {}).get("payout", 0))
+            floor = self.cfg["filter"]["payout_floor"]
+            if payout < floor and self.state.cycle_switches < max_switches:
+                if carry_unused and per_pair_max > 0:
+                    unused = max(0, per_pair_max - self.state.trades_on_pair)
+                    self.state.cycle_unused_carry += unused
+                self.state.switched_pairs.append(sym)
+                self.state.cycle_switches += 1
+                self.state.current_pair = None
+                self.state.trades_on_pair = 0
+                self._persist()
+                await self._notify(
+                    f"🔄 Payout {payout}% < {floor}% на {sym} — переход (резерв: "
+                    f"{self.state.cycle_unused_carry} перекрытий). "
+                    f"МГ-шаг {self.state.mg_step} сохранён."
+                )
+                return  # next loop tick → _in_cycle_search_step
 
         # Stop-sum guardrail
         next_amt = self._amount_for_step(self.state.mg_step)
@@ -1199,9 +1268,10 @@ class StateMachine:
             self.state.direction = action
             self._persist()
 
-        # Fire-and-forget notify; never block trade entry on TG latency
-        msg = f"📡 Новый сигнал {sym} → {action.upper()}. МГ-шаг {self.state.mg_step}, ставка ${next_amt}."
-        asyncio.create_task(self._notify(msg), name=f"notify_mg_{sym}")
+        payout_in = int(self.feed.assets.get(sym, {}).get("payout", 0))
+        pre_balance_now = float(self.feed.balance() or 0.0)
+        self._notify_open_async(sym, action, next_amt, self.state.mg_step,
+                                payout_in, pre_balance_now)
         await self._open_and_track(sym, action, next_amt)
 
     # ---------- in-cycle SEARCH (no pair locked, scan all eligible) ----------
@@ -1302,11 +1372,9 @@ class StateMachine:
         self.state.trades_on_pair = 0
         self._persist()
 
-        msg = (
-            f"🎯 Найден сигнал на {sym} → {action.upper()} "
-            f"(payout {payout}%). МГ-шаг {self.state.mg_step}, ставка ${next_amt:.2f}."
-        )
-        asyncio.create_task(self._notify(msg), name=f"notify_search_{sym}")
+        pre_balance_now = float(self.feed.balance() or 0.0)
+        self._notify_open_async(sym, action, next_amt, self.state.mg_step,
+                                payout, pre_balance_now)
         await self._open_and_track(sym, action, next_amt)
 
     # ---------- trade open / close flow ----------
@@ -1468,28 +1536,28 @@ class StateMachine:
         # В этапе 2 будет реализован per-strategy в составе нового signals
         # collector с market snapshots на момент сигнала.
 
+        bal_after = float(self.feed.balance() or 0.0)
+        prev_step = self.state.mg_step
         if closed.result == "WIN":
             gained = closed.profit - opened.amount
             self.state.session_loss = max(0.0, self.state.session_loss - gained)
             self._reset_cycle()
             self._persist()
-            # If we just finished a cycle outside working hours — pause and say
-            # goodnight. We let the cycle finish even after hours (mandatory),
-            # then rest until next start_hour.
+            base_msg = (
+                f"✅ <b>WIN {opened.asset}</b>  +${gained:.2f}\n"
+                f"💼 Баланс: ${bal_after:.2f}   📉 Потери сессии: ${self.state.session_loss:.2f}\n"
+                f"🔄 МГ сброшен (был шаг {prev_step})"
+            )
             if not self._within_working_hours():
                 self.state.paused = True
                 self.state.auto_paused_schedule = True
                 self._persist()
                 await self._notify(
-                    f"✅ WIN {opened.asset}  +${gained:.2f}  (баланс ${self.feed.balance()}).\n\n"
-                    f"🌙 Закрыл цикл — пора отдыхать. Хороший день был. "
-                    f"Жду пока наступит рабочее окно (или /resume чтобы возобновить раньше)."
+                    base_msg + "\n\n🌙 Закрыл цикл — пора отдыхать. "
+                    "Жду рабочее окно (или /resume)."
                 )
             else:
-                await self._notify(
-                    f"✅ WIN {opened.asset}  +${gained:.2f}  (баланс ${self.feed.balance()}). "
-                    f"Сбрасываю мартингейл, возвращаюсь в поиск."
-                )
+                await self._notify(base_msg + "\n🔍 Возвращаюсь в поиск.")
         elif closed.result == "LOSS":
             self.state.session_loss += opened.amount
             mg_enabled = bool(self.cfg["martingale"].get("enabled", True))
@@ -1497,23 +1565,25 @@ class StateMachine:
                 self.state.mg_step += 1
                 self._persist()
                 await self._notify(
-                    f"❌ LOSS {opened.asset}  -${opened.amount:.2f}  "
-                    f"(шаг → MG{self.state.mg_step}, потери ${self.state.session_loss:.2f})"
+                    f"❌ <b>LOSS {opened.asset}</b>  -${opened.amount:.2f}\n"
+                    f"💼 Баланс: ${bal_after:.2f}   📉 Потери сессии: ${self.state.session_loss:.2f}\n"
+                    f"📈 МГ-шаг → MG{self.state.mg_step}"
                 )
             else:
-                # No-MG mode: don't double down. Reset cycle and look for next
-                # signal on best available pair.
                 self._reset_cycle()
                 self._persist()
                 await self._notify(
-                    f"❌ LOSS {opened.asset}  -${opened.amount:.2f}  "
-                    f"(МГ выкл — ищу новый сигнал, потери ${self.state.session_loss:.2f})"
+                    f"❌ <b>LOSS {opened.asset}</b>  -${opened.amount:.2f}\n"
+                    f"💼 Баланс: ${bal_after:.2f}   📉 Потери сессии: ${self.state.session_loss:.2f}\n"
+                    f"🚫 МГ выключен — ищу новый сигнал."
                 )
-            # Loop will immediately trigger next iteration
             self._tick_event.set()
         else:  # DRAW
             self._persist()
-            await self._notify(f"➖ DRAW {opened.asset} — повторяю тот же шаг.")
+            await self._notify(
+                f"➖ <b>DRAW {opened.asset}</b>\n"
+                f"💼 Баланс: ${bal_after:.2f}   ↻ Повторяю тот же шаг (MG{self.state.mg_step})."
+            )
             self._tick_event.set()
 
     def _reset_cycle(self):
@@ -1524,3 +1594,4 @@ class StateMachine:
         self.state.mg_step = 0
         self.state.cycle_switches = 0
         self.state.switched_pairs = []
+        self.state.cycle_unused_carry = 0

@@ -60,6 +60,7 @@ schedule:
   enabled: false
   start_hour: 9
   end_hour: 22
+  no_weekends: false           # пропускать сб/вс (TG-уведомление в начале weekend)
   # timezone берётся из telegram.daily_report_timezone
 
 # ---- мартингейл ----
@@ -69,9 +70,23 @@ martingale:
                              # без удвоений: каждая сделка base_amount, после
                              # любого LOSS сразу новый поиск сигнала
   coefficient: 2.1           # множитель ставки после минуса (если enabled)
-  max_steps: 10              # максимум догонов (если enabled)
+  max_steps: 10              # максимум догонов (если enabled, общий лимит цикла)
   stop_sum: 1000             # стоп-сумма потерь ($): ждём /resume в Telegram
   reset_on_win: true         # после плюса возвращаем базовую сумму
+  # ---- гибкий MG (этап 2) ----
+  per_pair_max: 3            # макс. перекрытий на одной паре в цикле (после
+                             # этого — смена пары)
+  carry_unused: true         # неиспользованные перекрытия (per_pair_max - использовано)
+                             # переносить в резерв и отдавать последней паре цикла
+  last_pair_until_stop_sum: true  # на последней паре цикла торговать до stop_sum
+                                  # независимо от per_pair_max (пока есть резерв)
+  manual_switch_counts: true # ручная смена пары через UI/TG засчитывается в
+                             # лимит cycle_switches
+
+# ---- retention аналитики ----
+retention:
+  signals_days: 180          # сколько дней хранить signals (default 6 месяцев,
+                             # configurable до 365). Cleanup еженедельно.
 
 # ---- CONSENSUS 4/5 (параметры индикатора) ----
 # 1:1 с meta.defaultParams из твоего JS

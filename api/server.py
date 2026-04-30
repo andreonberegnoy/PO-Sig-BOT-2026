@@ -260,6 +260,149 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
             return {"ok": True, "old": old_pair, "new": result, "mode": result}
         raise HTTPException(400, f"unknown action: {action}")
 
+    # ─── analytics (Stage 2) ───
+    @app.get("/api/analytics/pairs")
+    async def analytics_pairs(request: Request,
+                               period_days: int = 7,
+                               strategy: Optional[str] = None,
+                               hour_from: Optional[int] = None,
+                               hour_to: Optional[int] = None,
+                               dow: Optional[str] = None):
+        """Главная аналитическая таблица: per-symbol агрегаты по фильтрам.
+        period_days: 1/7/14/30/60. dow: '0,1,2'-формат (Mon=0..Sun=6) или null.
+        """
+        _auth(request)
+        if not journal:
+            raise HTTPException(503, "journal not ready")
+        import time as _t
+        since = int(_t.time()) - max(1, period_days) * 86400
+        strat = strategy or (registry.active_name if registry else None)
+        dow_list = None
+        if dow:
+            try:
+                dow_list = [int(x) for x in dow.split(",") if x.strip() != ""]
+            except Exception:
+                dow_list = None
+        ind_cfg = (cfg.get("indicator") or {})
+        eb = int(ind_cfg.get("expiryBars", 2))
+        rows = journal.analytics_aggregate(
+            since_ts=since, strategy_name=strat,
+            hour_from=hour_from, hour_to=hour_to, dow=dow_list,
+            expiry_bars_default=eb,
+        )
+        return {
+            "period_days": period_days,
+            "strategy": strat,
+            "hour_from": hour_from, "hour_to": hour_to,
+            "dow": dow_list,
+            "expiry_bars": eb,
+            "rows": rows,
+        }
+
+    @app.get("/api/analytics/hourly")
+    async def analytics_hourly(request: Request,
+                                symbol: str,
+                                period_days: int = 30,
+                                strategy: Optional[str] = None):
+        """Drill-down: 24-часовая разбивка для одной пары."""
+        _auth(request)
+        if not journal:
+            raise HTTPException(503, "journal not ready")
+        import time as _t
+        since = int(_t.time()) - max(1, period_days) * 86400
+        strat = strategy or (registry.active_name if registry else None)
+        ind_cfg = (cfg.get("indicator") or {})
+        eb = int(ind_cfg.get("expiryBars", 2))
+        rows = journal.analytics_aggregate(
+            since_ts=since, strategy_name=strat,
+            expiry_bars_default=eb, group_by_hour=True, only_symbol=symbol,
+        )
+        return {"symbol": symbol, "period_days": period_days,
+                "strategy": strat, "rows": rows}
+
+    @app.get("/api/analytics/csv")
+    async def analytics_csv(request: Request,
+                             period_days: int = 7,
+                             strategy: Optional[str] = None,
+                             hour_from: Optional[int] = None,
+                             hour_to: Optional[int] = None,
+                             dow: Optional[str] = None):
+        _auth(request)
+        if not journal:
+            raise HTTPException(503, "journal not ready")
+        import time as _t, io, csv
+        since = int(_t.time()) - max(1, period_days) * 86400
+        strat = strategy or (registry.active_name if registry else None)
+        dow_list = None
+        if dow:
+            try:
+                dow_list = [int(x) for x in dow.split(",") if x.strip() != ""]
+            except Exception:
+                dow_list = None
+        ind_cfg = (cfg.get("indicator") or {})
+        eb = int(ind_cfg.get("expiryBars", 2))
+        rows = journal.analytics_aggregate(
+            since_ts=since, strategy_name=strat,
+            hour_from=hour_from, hour_to=hour_to, dow=dow_list,
+            expiry_bars_default=eb,
+        )
+        cols = ["symbol", "signals", "entered", "settled",
+                "wr_first", "wr_chosen", "wr_best",
+                "pluses", "minuses", "max_loss_streak_to_win",
+                "avg_payout", "pct_payout_optimal",
+                "avg_votes_total", "avg_atr_ratio", "avg_bb_position",
+                "avg_candle_atr_ratio", "avg_rsi_ma", "avg_qqe_trailing",
+                "avg_wr1_long", "avg_wr1_recent",
+                "wins_real", "losses_real", "wr_real", "profit_real"]
+        buf = io.StringIO()
+        w = csv.writer(buf)
+        w.writerow(cols)
+        for r in rows:
+            w.writerow([r.get(c, "") if r.get(c) is not None else "" for c in cols])
+        from fastapi.responses import PlainTextResponse
+        return PlainTextResponse(
+            buf.getvalue(),
+            media_type="text/csv",
+            headers={"Content-Disposition": f"attachment; filename=analytics_{period_days}d.csv"},
+        )
+
+    @app.get("/api/analytics/db_info")
+    async def analytics_db_info(request: Request):
+        _auth(request)
+        if not journal:
+            raise HTTPException(503, "journal not ready")
+        cur = journal.conn.execute("SELECT COUNT(*) FROM signals")
+        n = cur.fetchone()[0]
+        cur = journal.conn.execute(
+            "SELECT MIN(signal_ts), MAX(signal_ts) FROM signals"
+        )
+        mn, mx = cur.fetchone()
+        return {
+            "signals_total": n,
+            "oldest_ts": mn,
+            "newest_ts": mx,
+            "db_size_bytes": journal.signals_db_size_bytes(),
+            "retention_days": int((cfg.get("retention") or {}).get("signals_days", 180)),
+        }
+
+    @app.get("/api/profit_today")
+    async def get_profit_today(request: Request):
+        _auth(request)
+        if not journal:
+            return {"profit": 0, "trades": 0, "wins": 0, "losses": 0}
+        import time as _t
+        # начало суток в TZ из telegram.daily_report_timezone
+        tz_name = (cfg.get("telegram") or {}).get("daily_report_timezone") or "Europe/Kyiv"
+        try:
+            import pytz, datetime as _dt
+            tz = pytz.timezone(tz_name)
+            now_local = _dt.datetime.now(tz)
+            start_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+            since = int(start_local.timestamp())
+        except Exception:
+            since = int(_t.time()) - 86400
+        return journal.profit_today(since, cfg.get("mode", "paper"))
+
     # ─── miniapp static ───
     miniapp_dir = Path("miniapp")
     if miniapp_dir.exists():

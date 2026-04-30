@@ -120,6 +120,7 @@
       : name === "analytics" ? "sub-analytics" : null;
     if (panelId) document.getElementById(panelId)?.classList.add("active");
     if (name === "strategy-settings") loadStrategyParams();
+    if (name === "analytics") loadAnalytics();
   }
   document.querySelectorAll(".subtab").forEach((sub) => {
     sub.addEventListener("click", () => gotoSubtab(sub.dataset.subtab));
@@ -180,6 +181,27 @@
       console.error(e);
     }
   }
+  async function loadProfitToday() {
+    try {
+      const p = await api("/api/profit_today");
+      const amt = Number(p.profit || 0);
+      const el = document.getElementById("profit-amt");
+      if (el) {
+        el.textContent = `${amt >= 0 ? "+" : ""}$${amt.toFixed(2)}`;
+        el.className = `profit-amt ${amt > 0 ? "ok" : amt < 0 ? "err" : ""}`;
+      }
+      const tEl = document.getElementById("profit-trades");
+      if (tEl) tEl.textContent = p.trades ?? 0;
+      const wEl = document.getElementById("profit-wins");
+      if (wEl) wEl.textContent = p.wins ?? 0;
+      const lEl = document.getElementById("profit-losses");
+      if (lEl) lEl.textContent = p.losses ?? 0;
+    } catch (e) { /* silent */ }
+  }
+  // Зов loadStatus также обновит profit-today
+  const _origLoadStatus = loadStatus;
+  loadStatus = async function () { await _origLoadStatus(); loadProfitToday(); };
+
   document.getElementById("btn-refresh").onclick = loadStatus;
   document.getElementById("btn-pause").onclick = async () => {
     try { await api("/api/control/pause", { method: "POST" }); showActionMsg("⏸ Пауза включена", "ok"); }
@@ -247,13 +269,22 @@
     "🎰 Мартингейл": [
       { k: "martingale.enabled", t: "bool", label: "Включить мартингейл" },
       { k: "martingale.coefficient", t: "float", min: 1.5, max: 5, step: 0.1, label: "Множитель" },
-      { k: "martingale.max_steps", t: "int", min: 1, max: 20, label: "Макс. шагов" },
+      { k: "martingale.max_steps", t: "int", min: 1, max: 20, label: "Общий лимит шагов в цикле" },
       { k: "martingale.stop_sum", t: "float", min: 10, max: 10000, step: 50, label: "Стоп-сумма ($)" },
+      { k: "martingale.per_pair_max", t: "int", min: 0, max: 20, label: "Макс. перекрытий на одной паре" },
+      { k: "martingale.carry_unused", t: "bool", label: "Переносить неиспользованные перекрытия в резерв" },
+      { k: "martingale.last_pair_until_stop_sum", t: "bool", label: "На последней паре цикла торговать до stop-sum" },
+      { k: "martingale.manual_switch_counts", t: "bool", label: "Ручная смена пары засчитывается в счётчик" },
+      { k: "martingale.reset_on_win", t: "bool", label: "После плюса вернуть базовую сумму" },
     ],
     "⏰ Расписание работы": [
       { k: "schedule.enabled", t: "bool", label: "Работать по расписанию (снять = 24/7 круглосуточно)" },
       { k: "schedule.start_hour", t: "int", min: 0, max: 23, label: "Час начала (0-23)" },
       { k: "schedule.end_hour", t: "int", min: 0, max: 24, label: "Час конца (0-24)" },
+      { k: "schedule.no_weekends", t: "bool", label: "📅 Не торговать на выходных (Сб/Вс)" },
+    ],
+    "🗄 Хранение аналитики": [
+      { k: "retention.signals_days", t: "int", min: 30, max: 365, step: 30, label: "Хранить signals (дней, 30-365)" },
     ],
     "📋 Периодический отчёт": [
       { k: "periodic_report.enabled", t: "bool", label: "Присылать сводку (по окончании торгов или утром при 24/7)" },
@@ -522,6 +553,198 @@
       status.className = "status-line err";
     }
   };
+
+  // ═════════════════════ АНАЛИТИКА (этап 2) ═══════════════════════════
+  // Колонки таблицы: ключ → заголовок + опциональная функция форматирования
+  const AN_COLS = [
+    { k: "symbol",                  h: "Пара",          fmt: (v) => `<b>${v}</b>` },
+    { k: "signals",                 h: "Сигналов" },
+    { k: "entered",                 h: "Вошёл" },
+    { k: "wr_first",                h: "WR 1 бар %",    cls: wrClass },
+    { k: "wr_chosen",               h: "WR exp %",      cls: wrClass },
+    { k: "wr_best",                 h: "Best exp %",    cls: wrClass },
+    { k: "pluses",                  h: "+" },
+    { k: "minuses",                 h: "-" },
+    { k: "max_loss_streak_to_win",  h: "Макс minus→plus" },
+    { k: "avg_payout",              h: "Avg payout %" },
+    { k: "pct_payout_optimal",      h: "% 85-92" },
+    { k: "wr_real",                 h: "WR real %",     cls: wrClass },
+    { k: "wins_real",               h: "WIN" },
+    { k: "losses_real",             h: "LOSS" },
+    { k: "profit_real",             h: "Profit $",      cls: profitClass },
+    // ─── разделитель ─── market snapshots
+    { k: "_sep_",                   h: "│" },
+    { k: "avg_votes_total",         h: "Avg votes" },
+    { k: "avg_atr_ratio",           h: "Avg ATR ratio" },
+    { k: "avg_bb_position",         h: "Avg BB pos" },
+    { k: "avg_candle_atr_ratio",    h: "Avg candle/ATR" },
+    { k: "avg_rsi_ma",              h: "Avg RSI MA" },
+    { k: "avg_qqe_trailing",        h: "Avg QQE" },
+    { k: "avg_wr1_long",            h: "WR1-1000 %" },
+    { k: "avg_wr1_recent",          h: "WR1-200 %" },
+  ];
+
+  function wrClass(v) {
+    if (v == null) return "";
+    if (v >= 70) return "wr-green";
+    if (v >= 60) return "wr-yellow";
+    if (v >= 50) return "wr-orange";
+    return "wr-red";
+  }
+  function profitClass(v) {
+    if (v == null || v === 0) return "";
+    return v > 0 ? "profit-pos" : "profit-neg";
+  }
+  function fmtCell(v, k) {
+    if (v == null) return "—";
+    if (k === "profit_real") return `${v >= 0 ? "+" : ""}${(+v).toFixed(2)}`;
+    if (typeof v === "number" && !Number.isInteger(v)) return v.toFixed(2);
+    return v;
+  }
+
+  let _anSortKey = "signals";
+  let _anSortDir = "desc";
+
+  function getAnFilters() {
+    const days = parseInt(document.querySelector(".period-btn.active")?.dataset.days || "7");
+    const hf = document.getElementById("an-hour-from").value;
+    const ht = document.getElementById("an-hour-to").value;
+    const dows = [];
+    document.querySelectorAll('.dow-filter input[type="checkbox"]:checked').forEach((c) =>
+      dows.push(c.dataset.dow)
+    );
+    const params = new URLSearchParams({ period_days: days });
+    if (hf !== "" && ht !== "") {
+      params.set("hour_from", hf);
+      params.set("hour_to", ht);
+    }
+    if (dows.length > 0 && dows.length < 7) params.set("dow", dows.join(","));
+    return { params, days, hf, ht, dows };
+  }
+
+  async function loadAnalytics() {
+    const tbody = document.querySelector("#an-table tbody");
+    const thead = document.querySelector("#an-table thead");
+    const meta = document.getElementById("an-meta");
+    tbody.innerHTML = `<tr><td colspan="${AN_COLS.length}">Загрузка…</td></tr>`;
+    try {
+      const { params, days, hf, ht } = getAnFilters();
+      const data = await api(`/api/analytics/pairs?${params.toString()}`);
+      meta.textContent = `Период: ${days}д · Стратегия: ${data.strategy || "—"} · Экспирация по умолчанию: ${data.expiry_bars} бар(а)` +
+        (hf !== "" && ht !== "" ? ` · Часы: ${hf}-${ht}` : "");
+      // header
+      thead.innerHTML = "<tr>" + AN_COLS.map((c) =>
+        c.k === "_sep_"
+          ? `<th class="sep">${c.h}</th>`
+          : `<th data-sort="${c.k}" class="sortable ${_anSortKey === c.k ? "sorted-" + _anSortDir : ""}">${c.h}</th>`
+      ).join("") + "</tr>";
+      thead.querySelectorAll("[data-sort]").forEach((th) => {
+        th.addEventListener("click", () => {
+          const k = th.dataset.sort;
+          if (_anSortKey === k) _anSortDir = _anSortDir === "asc" ? "desc" : "asc";
+          else { _anSortKey = k; _anSortDir = "desc"; }
+          loadAnalytics();
+        });
+      });
+      // sort
+      const rows = (data.rows || []).slice().sort((a, b) => {
+        const av = a[_anSortKey], bv = b[_anSortKey];
+        if (av == null && bv == null) return 0;
+        if (av == null) return 1;
+        if (bv == null) return -1;
+        if (typeof av === "string") return _anSortDir === "asc" ? av.localeCompare(bv) : bv.localeCompare(av);
+        return _anSortDir === "asc" ? av - bv : bv - av;
+      });
+      if (!rows.length) {
+        tbody.innerHTML = `<tr><td colspan="${AN_COLS.length}" class="hint" style="padding:20px;text-align:center">Нет данных за выбранный период. Сигналы пишутся в реальном времени — подожди пока бот наберёт историю.</td></tr>`;
+        return;
+      }
+      tbody.innerHTML = rows.map((r) => {
+        return `<tr data-symbol="${r.symbol}">` + AN_COLS.map((c) => {
+          if (c.k === "_sep_") return `<td class="sep">│</td>`;
+          const v = r[c.k];
+          const cls = c.cls ? c.cls(v) : "";
+          return `<td class="${cls}">${fmtCell(v, c.k)}</td>`;
+        }).join("") + "</tr>";
+      }).join("");
+      // click row → drill-down 24h
+      tbody.querySelectorAll("tr[data-symbol]").forEach((tr) => {
+        tr.addEventListener("click", () => loadHourly(tr.dataset.symbol));
+      });
+    } catch (e) {
+      tbody.innerHTML = `<tr><td colspan="${AN_COLS.length}" class="err">Ошибка: ${e.message}</td></tr>`;
+    }
+  }
+
+  async function loadHourly(symbol) {
+    const wrap = document.getElementById("an-hourly");
+    wrap.style.display = "";
+    wrap.innerHTML = `<div class="card"><h3>📊 ${symbol} — 24ч разбивка</h3><div>Загрузка…</div></div>`;
+    try {
+      const { params } = getAnFilters();
+      params.set("symbol", symbol);
+      const data = await api(`/api/analytics/hourly?${params.toString()}`);
+      const rows = data.rows || [];
+      // build 24-row table indexed by hour (fill missing with —)
+      const byHour = {};
+      rows.forEach((r) => { byHour[r.hour] = r; });
+      let html = `<div class="card"><h3>📊 ${symbol} — 24ч разбивка (${data.period_days}д)</h3>`;
+      html += `<table class="analytics-table"><thead><tr>
+        <th>Час</th><th>Сигналов</th><th>WR exp %</th><th>Best exp %</th>
+        <th>+</th><th>-</th><th>Avg payout</th><th>WR real %</th>
+      </tr></thead><tbody>`;
+      for (let h = 0; h < 24; h++) {
+        const r = byHour[h];
+        if (!r) {
+          html += `<tr class="hint"><td>${String(h).padStart(2, "0")}:00</td><td colspan="7">—</td></tr>`;
+          continue;
+        }
+        html += `<tr><td>${String(h).padStart(2, "0")}:00</td>
+          <td>${r.signals}</td>
+          <td class="${wrClass(r.wr_chosen)}">${fmtCell(r.wr_chosen, "wr_chosen")}</td>
+          <td class="${wrClass(r.wr_best)}">${fmtCell(r.wr_best, "wr_best")}</td>
+          <td>${r.pluses}</td>
+          <td>${r.minuses}</td>
+          <td>${fmtCell(r.avg_payout)}</td>
+          <td class="${wrClass(r.wr_real)}">${fmtCell(r.wr_real, "wr_real")}</td>
+        </tr>`;
+      }
+      html += `</tbody></table>
+        <div class="actions" style="margin-top:8px"><button id="btn-hourly-close" class="btn">✕ Закрыть</button></div>
+      </div>`;
+      wrap.innerHTML = html;
+      document.getElementById("btn-hourly-close").addEventListener("click", () => {
+        wrap.style.display = "none";
+        wrap.innerHTML = "";
+      });
+    } catch (e) {
+      wrap.innerHTML = `<div class="card err">Ошибка: ${e.message}</div>`;
+    }
+  }
+
+  // period buttons
+  document.querySelectorAll(".period-btn").forEach((b) => {
+    b.addEventListener("click", () => {
+      document.querySelectorAll(".period-btn").forEach((x) => x.classList.remove("active"));
+      b.classList.add("active");
+      loadAnalytics();
+    });
+  });
+  document.getElementById("btn-an-apply")?.addEventListener("click", loadAnalytics);
+  document.getElementById("btn-an-csv")?.addEventListener("click", () => {
+    const { params } = getAnFilters();
+    // download via plain anchor (CSV is a non-JSON response, нужен auth header
+    // — но FastAPI игнорирует X-Init-Data в plain GET если auth выкл; в TG
+    // окружении токен передаётся, и initData есть в location). Используем
+    // initData как query param.
+    const qs = params.toString() + (initData ? `&initData=${encodeURIComponent(initData)}` : "");
+    const a = document.createElement("a");
+    a.href = `/api/analytics/csv?${qs}`;
+    a.download = `analytics_${getAnFilters().days}d.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  });
 
   // ═════════════════════ INITIAL LOAD + AUTO-POLL ═══════════════════════
   loadStatus();

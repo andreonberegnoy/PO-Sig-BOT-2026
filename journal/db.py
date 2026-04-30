@@ -225,6 +225,253 @@ class Journal:
         self.conn.commit()
         return cur.rowcount or 0
 
+    def signals_db_size_bytes(self) -> int:
+        """Грубая оценка размера signals — page_count × page_size. Для UI."""
+        try:
+            import os
+            return os.path.getsize(self.path)
+        except Exception:
+            return 0
+
+    # ---------- analytics aggregations (Stage 2) ----------
+
+    def _signals_filtered(self, since_ts: int, strategy_name: Optional[str],
+                          hour_from: Optional[int], hour_to: Optional[int],
+                          dow: Optional[list]) -> list[sqlite3.Row]:
+        """Загружает signals с фильтрами. hour_from/to inclusive (0..23)."""
+        self.conn.row_factory = sqlite3.Row
+        sql = ["SELECT * FROM signals WHERE signal_ts >= ?"]
+        args: list = [since_ts]
+        if strategy_name:
+            sql.append("AND strategy_name = ?")
+            args.append(strategy_name)
+        if hour_from is not None and hour_to is not None:
+            if hour_from <= hour_to:
+                sql.append("AND hour_local BETWEEN ? AND ?")
+                args.extend([hour_from, hour_to])
+            else:
+                # окно через полночь: [from..23] ∪ [0..to]
+                sql.append("AND (hour_local >= ? OR hour_local <= ?)")
+                args.extend([hour_from, hour_to])
+        if dow:
+            placeholders = ",".join("?" * len(dow))
+            sql.append(f"AND day_of_week IN ({placeholders})")
+            args.extend(dow)
+        sql.append("ORDER BY signal_ts")
+        cur = self.conn.execute(" ".join(sql), tuple(args))
+        return cur.fetchall()
+
+    def _trades_for_signals(self, trade_ids: list[str]) -> dict[str, sqlite3.Row]:
+        """Подтягивает trades по списку trade_id (для entered-сигналов)."""
+        if not trade_ids:
+            return {}
+        self.conn.row_factory = sqlite3.Row
+        out: dict[str, sqlite3.Row] = {}
+        # batched IN
+        BATCH = 500
+        for i in range(0, len(trade_ids), BATCH):
+            chunk = trade_ids[i:i + BATCH]
+            placeholders = ",".join("?" * len(chunk))
+            cur = self.conn.execute(
+                f"SELECT * FROM trades WHERE trade_id IN ({placeholders})", chunk)
+            for r in cur.fetchall():
+                out[r["trade_id"]] = r
+        return out
+
+    def analytics_aggregate(self,
+                             since_ts: int,
+                             strategy_name: Optional[str] = None,
+                             hour_from: Optional[int] = None,
+                             hour_to: Optional[int] = None,
+                             dow: Optional[list] = None,
+                             expiry_bars_default: int = 2,
+                             group_by_hour: bool = False,
+                             only_symbol: Optional[str] = None) -> list[dict]:
+        """Главная агрегационная функция аналитики. Возвращает список dict
+        per symbol (или per (symbol, hour) если group_by_hour=True).
+        Все WR-метрики используют exp_wins (post-settlement); profit — trades.
+
+        Колонки результата соответствуют плану рефакторинга.
+        """
+        rows = self._signals_filtered(since_ts, strategy_name, hour_from, hour_to, dow)
+        if only_symbol:
+            rows = [r for r in rows if r["symbol"] == only_symbol]
+        # подтягиваем trades для entered-сигналов
+        trade_ids = [r["trade_id"] for r in rows if r["trade_id"]]
+        trades_by_id = self._trades_for_signals(trade_ids)
+
+        # группировка
+        groups: dict = {}
+        for r in rows:
+            key = (r["symbol"], r["hour_local"]) if group_by_hour else r["symbol"]
+            groups.setdefault(key, []).append(r)
+
+        ebd = max(1, min(5, int(expiry_bars_default or 2)))
+        out: list[dict] = []
+        for key, items in groups.items():
+            symbol = key[0] if group_by_hour else key
+            hour = key[1] if group_by_hour else None
+
+            n_total = len(items)
+            n_entered = sum(1 for r in items if r["entered"])
+
+            # exp_wins-based аналитика (settled-only)
+            settled = [r for r in items if r["exp_wins"]]
+            import json as _json
+            ew = []
+            for r in settled:
+                try:
+                    ew.append(_json.loads(r["exp_wins"]))
+                except Exception:
+                    pass
+
+            def _wr(arr_idx: int):
+                total = wins = 0
+                for w in ew:
+                    if arr_idx >= len(w):
+                        continue
+                    v = w[arr_idx]
+                    if v is None:
+                        continue
+                    total += 1
+                    if v == 1:
+                        wins += 1
+                return (wins / total * 100.0) if total else None
+
+            wr_first  = _wr(0)
+            wr_chosen = _wr(ebd - 1)
+
+            # best-exp WR: signal считается plus если ХОТЯ БЫ один w==1
+            best_wins = 0
+            best_total = 0
+            pluses = 0
+            minuses = 0
+            for w in ew:
+                non_null = [x for x in w if x is not None]
+                if not non_null:
+                    continue
+                best_total += 1
+                if any(x == 1 for x in non_null):
+                    best_wins += 1
+                    pluses += 1
+                else:
+                    minuses += 1
+            wr_best = (best_wins / best_total * 100.0) if best_total else None
+
+            # max loss streak до плюса (по экспирации ebd-1 — пользовательской)
+            cur_streak = 0
+            max_streak = 0
+            for w in ew:
+                if (ebd - 1) >= len(w):
+                    continue
+                v = w[ebd - 1]
+                if v == 0:
+                    cur_streak += 1
+                    if cur_streak > max_streak:
+                        max_streak = cur_streak
+                elif v == 1:
+                    cur_streak = 0
+
+            # payout — оптимальное окно 85..92
+            payouts = [r["payout_at_signal"] for r in items if r["payout_at_signal"] is not None]
+            avg_payout = sum(payouts) / len(payouts) if payouts else None
+            in_optimal = sum(1 for p in payouts if 85 <= p <= 92)
+            pct_payout_optimal = (in_optimal / len(payouts) * 100.0) if payouts else None
+
+            # market metrics — средние
+            def _avg(field):
+                vals = [r[field] for r in items if r[field] is not None]
+                return (sum(vals) / len(vals)) if vals else None
+
+            avg_atr_ratio       = _avg("atr_ratio")
+            avg_bb_position     = _avg("bb_position")
+            avg_candle_atr      = _avg("candle_atr_ratio")
+            avg_votes_total     = _avg("votes_total")
+            avg_rsi_ma          = _avg("rsi_ma")
+            avg_qqe_trail       = _avg("qqe_trailing")
+            avg_wr1_long        = _avg("wr1_long_at_signal")
+            avg_wr1_recent      = _avg("wr1_recent_at_signal")
+
+            # profit — только entered AND WIN
+            wins_real = 0
+            losses_real = 0
+            profit_real = 0.0
+            for r in items:
+                tid = r["trade_id"]
+                if not tid:
+                    continue
+                t = trades_by_id.get(tid)
+                if not t:
+                    continue
+                if t["result"] == "WIN":
+                    wins_real += 1
+                    profit_real += float(t["profit"]) - float(t["amount"])
+                elif t["result"] == "LOSS":
+                    losses_real += 1
+                    profit_real -= float(t["amount"])
+            wr_real = (wins_real / (wins_real + losses_real) * 100.0) if (wins_real + losses_real) else None
+
+            row = {
+                "symbol": symbol,
+                "hour": hour,
+                "signals": n_total,
+                "entered": n_entered,
+                "settled": len(ew),
+                "wr_first":  None if wr_first is None else round(wr_first, 1),
+                "wr_chosen": None if wr_chosen is None else round(wr_chosen, 1),
+                "wr_best":   None if wr_best is None else round(wr_best, 1),
+                "pluses": pluses,
+                "minuses": minuses,
+                "max_loss_streak_to_win": max_streak,
+                "avg_payout": None if avg_payout is None else round(avg_payout, 1),
+                "pct_payout_optimal": None if pct_payout_optimal is None else round(pct_payout_optimal, 1),
+                "avg_votes_total": None if avg_votes_total is None else round(avg_votes_total, 2),
+                "avg_atr_ratio": None if avg_atr_ratio is None else round(avg_atr_ratio, 3),
+                "avg_bb_position": None if avg_bb_position is None else round(avg_bb_position, 3),
+                "avg_candle_atr_ratio": None if avg_candle_atr is None else round(avg_candle_atr, 3),
+                "avg_rsi_ma": None if avg_rsi_ma is None else round(avg_rsi_ma, 2),
+                "avg_qqe_trailing": None if avg_qqe_trail is None else round(avg_qqe_trail, 2),
+                "avg_wr1_long": None if avg_wr1_long is None else round(avg_wr1_long, 1),
+                "avg_wr1_recent": None if avg_wr1_recent is None else round(avg_wr1_recent, 1),
+                "wins_real": wins_real,
+                "losses_real": losses_real,
+                "wr_real": None if wr_real is None else round(wr_real, 1),
+                "profit_real": round(profit_real, 2),
+            }
+            out.append(row)
+
+        # сортировка
+        if group_by_hour:
+            out.sort(key=lambda r: (r["symbol"], r["hour"] if r["hour"] is not None else -1))
+        else:
+            out.sort(key=lambda r: (-r["signals"], r["symbol"]))
+        return out
+
+    def profit_today(self, since_ts: int, mode: str) -> dict:
+        """Сумма реального profit за сутки (только entered=1 трейды).
+        Возвращает {"profit": float, "trades": int, "wins": int, "losses": int}."""
+        self.conn.row_factory = sqlite3.Row
+        cur = self.conn.execute(
+            "SELECT result, amount, profit FROM trades "
+            "WHERE close_ts >= ? AND mode = ?",
+            (since_ts, mode),
+        )
+        wins = losses = 0
+        prof = 0.0
+        for r in cur.fetchall():
+            if r["result"] == "WIN":
+                wins += 1
+                prof += float(r["profit"]) - float(r["amount"])
+            elif r["result"] == "LOSS":
+                losses += 1
+                prof -= float(r["amount"])
+        return {
+            "profit": round(prof, 2),
+            "trades": wins + losses,
+            "wins": wins,
+            "losses": losses,
+        }
+
     def trades_since(self, ts: int) -> list[sqlite3.Row]:
         self.conn.row_factory = sqlite3.Row
         cur = self.conn.execute(

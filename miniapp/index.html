@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <title>PO-Sig Bot</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
-<link rel="stylesheet" href="/miniapp/style.css?v=20260512" />
+<link rel="stylesheet" href="/miniapp/style.css?v=20260513" />
 </head>
 <body>
 <header>
@@ -50,8 +50,17 @@
       <div id="action-msg" class="action-msg" style="margin-top:8px"></div>
     </div>
 
-    <!-- Здесь в этапе 2 появится виджет «Активные пары что торгуются сейчас» -->
-    <!-- Здесь в этапе 2 появится «Profit за день» (только реально вошедшие WIN) -->
+    <div class="card">
+      <h3>💰 Profit за день</h3>
+      <div id="profit-today" class="profit-today">
+        <div class="profit-amt" id="profit-amt">—</div>
+        <div class="profit-meta">
+          <span>Сделок: <b id="profit-trades">—</b></span>
+          <span>WIN: <b id="profit-wins">—</b></span>
+          <span>LOSS: <b id="profit-losses">—</b></span>
+        </div>
+      </div>
+    </div>
   </section>
 
   <!-- ═══════════ НАСТРОЙКИ БОТА (общие) ═══════════ -->
@@ -121,29 +130,51 @@
         </div>
       </div>
 
-      <!-- Подвкладка: Аналитика (placeholder для этапа 2) -->
+      <!-- Подвкладка: Аналитика (этап 2) -->
       <div id="sub-analytics" class="subtab-panel">
         <div class="card">
-          <p class="hint" style="font-size: 14px; line-height: 1.6;">
-            Будет наполнено в этапе 2 рефакторинга. Согласно плану:
+          <div class="analytics-toolbar">
+            <div class="period-selector">
+              <span class="hint">Период:</span>
+              <button class="period-btn" data-days="1">1д</button>
+              <button class="period-btn active" data-days="7">7д</button>
+              <button class="period-btn" data-days="14">14д</button>
+              <button class="period-btn" data-days="30">30д</button>
+              <button class="period-btn" data-days="60">60д</button>
+            </div>
+            <div class="hour-filter">
+              <span class="hint">Часы:</span>
+              <input type="number" id="an-hour-from" min="0" max="23" placeholder="от" />
+              <input type="number" id="an-hour-to" min="0" max="23" placeholder="до" />
+            </div>
+            <div class="dow-filter">
+              <span class="hint">Дни:</span>
+              <label class="dow-opt"><input type="checkbox" data-dow="0" checked/> Пн</label>
+              <label class="dow-opt"><input type="checkbox" data-dow="1" checked/> Вт</label>
+              <label class="dow-opt"><input type="checkbox" data-dow="2" checked/> Ср</label>
+              <label class="dow-opt"><input type="checkbox" data-dow="3" checked/> Чт</label>
+              <label class="dow-opt"><input type="checkbox" data-dow="4" checked/> Пт</label>
+              <label class="dow-opt"><input type="checkbox" data-dow="5"/> Сб</label>
+              <label class="dow-opt"><input type="checkbox" data-dow="6"/> Вс</label>
+            </div>
+            <div class="actions">
+              <button id="btn-an-apply" class="btn primary">🔄 Применить</button>
+              <button id="btn-an-csv" class="btn">⬇️ CSV</button>
+            </div>
+          </div>
+          <div id="an-meta" class="hint" style="margin: 6px 0 10px"></div>
+          <div class="analytics-table-wrap">
+            <table id="an-table" class="analytics-table">
+              <thead></thead>
+              <tbody><tr><td>Загрузка…</td></tr></tbody>
+            </table>
+          </div>
+          <p class="hint" style="margin-top: 10px; font-size: 11px;">
+            WR-колонки считаются по <b>exp_wins</b> (post-settlement) — что было бы
+            при экспирации 1/2/3/4/5 баров. Profit и WR-real — только реально
+            вошедшие сделки (entered=true). Клик по строке — drill-down 24ч.
           </p>
-          <ul style="color: var(--fg-muted); font-size: 13px; line-height: 1.7;">
-            <li>Главная таблица: <b>пары × 24h-средние</b></li>
-            <li>Фильтры периода: <b>1д / 7д / 14д / 30д / 60д / по дате</b></li>
-            <li>Сортировка по любому столбцу</li>
-            <li>Клик на пару → раскрытие 24-часовой детализации</li>
-            <li>Плашка «<b>Рабочие часы</b>» (визуальный индикатор активного фильтра)</li>
-            <li>Плашка фильтр по времени (<code>13:00-19:00</code> — суммарно за период)</li>
-            <li>Колонка «<b>Best exp за последние N сделок</b>» (фильтруемое окно)</li>
-            <li>Кнопка «<b>Применить как фильтр</b>» к стратегии</li>
-            <li>Кнопка «<b>Экспорт данных</b>» (CSV)</li>
-            <li>Цветовая подсветка: 🟢/🟡/🟠/🔴 по WR</li>
-          </ul>
-          <p class="hint" style="margin-top: 14px; padding: 10px; background: rgba(96, 165, 250, 0.08); border-left: 3px solid var(--primary); border-radius: 4px;">
-            📍 Все CONSENSUS-сигналы будут писаться в БД <b>signals</b> с флагом
-            <code>entered=True/False</code>. БД хранится 6 месяцев минимум
-            (configurable до 12). Profit-метрики считают только <code>entered=True AND WIN</code>.
-          </p>
+          <div id="an-hourly" style="display:none; margin-top: 12px;"></div>
         </div>
       </div>
     </div>
@@ -151,6 +182,6 @@
 </main>
 
 <!-- Cache-bust: bump v=YYYYMMDD when app.js changes. -->
-<script src="/miniapp/app.js?v=20260512"></script>
+<script src="/miniapp/app.js?v=20260513"></script>
 </body>
 </html>

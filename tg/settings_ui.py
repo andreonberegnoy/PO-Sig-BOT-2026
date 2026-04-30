@@ -87,15 +87,25 @@ CATEGORIES: dict[str, list[Setting]] = {
     "💰 Торговля": [
         Setting("trading.base_amount", "Базовая ставка ($)", "float", 0.5, 100.0, 0.5),
         Setting("trading.expiry_seconds", "Экспирация сделки (сек)", "int", 30, 600, 30),
-        Setting("trading.limit_trades_per_pair_enabled", "Лимит сделок на паре (вкл/выкл)", "bool"),
-        Setting("trading.max_trades_on_pair", "Макс. сделок на паре", "int", 1, 10, 1),
         Setting("trading.max_pair_switch_per_cycle", "Смен пары за цикл", "int", 0, 5, 1),
     ],
     "🎰 Мартингейл": [
         Setting("martingale.enabled", "Включить мартингейл", "bool"),
         Setting("martingale.coefficient", "Множитель", "float", 1.5, 5.0, 0.1),
-        Setting("martingale.max_steps", "Макс. шагов", "int", 1, 20, 1),
+        Setting("martingale.max_steps", "Общий лимит шагов в цикле", "int", 1, 20, 1),
         Setting("martingale.stop_sum", "Стоп-сумма ($)", "float", 10.0, 10000.0, 50.0),
+        Setting("martingale.per_pair_max", "Макс. перекрытий на одной паре", "int", 0, 20, 1),
+        Setting("martingale.carry_unused", "Переносить неиспользованные перекрытия", "bool"),
+        Setting("martingale.last_pair_until_stop_sum", "На последней паре до stop_sum", "bool"),
+    ],
+    "⏰ Расписание": [
+        Setting("schedule.enabled", "Расписание включено", "bool"),
+        Setting("schedule.start_hour", "Час начала (0-23)", "int", 0, 23, 1),
+        Setting("schedule.end_hour", "Час конца (0-24)", "int", 0, 24, 1),
+        Setting("schedule.no_weekends", "Пропускать выходные", "bool"),
+    ],
+    "🗄 Хранение аналитики": [
+        Setting("retention.signals_days", "Хранить signals (дней)", "int", 30, 365, 30),
     ],
 }
 

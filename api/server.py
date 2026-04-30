@@ -414,6 +414,8 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
         _auth(request)
         if not journal:
             raise HTTPException(503, "journal not ready")
+        if registry and name not in (registry.strategies or {}):
+            raise HTTPException(404, f"strategy '{name}' not found")
         import time as _t
         p = payload or {}
         period_days = int(p.get("period_days") or 30)

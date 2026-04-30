@@ -120,7 +120,11 @@
       : name === "analytics" ? "sub-analytics" : null;
     if (panelId) document.getElementById(panelId)?.classList.add("active");
     if (name === "strategy-settings") loadStrategyParams();
-    if (name === "analytics") loadAnalytics();
+    if (name === "analytics") {
+      loadAnalytics();
+      // Этап 3: показать фильтр-блок если уже сохранён активный фильтр
+      if (typeof loadActiveFilter === "function") loadActiveFilter();
+    }
   }
   document.querySelectorAll(".subtab").forEach((sub) => {
     sub.addEventListener("click", () => gotoSubtab(sub.dataset.subtab));
@@ -154,7 +158,17 @@
       const s = await api("/api/status");
       document.getElementById("m-mode").textContent = s.mode || "—";
       document.getElementById("m-balance").textContent = s.balance != null ? `$${(+s.balance).toFixed(2)}` : "—";
-      document.getElementById("m-strategy").textContent = s.active_strategy || "—";
+      // m-strategy: текст + бейдж 🎯 если активен фильтр (этап 3)
+      const sBadge = document.getElementById("m-strategy");
+      if (sBadge && s.active_strategy) {
+        sBadge.innerHTML = `${s.active_strategy} ${s.filter_active ? '<span class="badge active" style="font-size:10px">🎯 фильтр</span>' : ''}`;
+      } else if (sBadge) {
+        sBadge.textContent = "—";
+      }
+      // Этап 3 виджеты — пишем сразу, без второго запроса /api/status
+      loadActiveCycle(s);
+      loadDayOff(s);
+      loadProfitToday();
       // Tracked пары: показать count + список имён (compact comma-separated)
       const tList = Array.isArray(s.tracked_pairs_list) ? s.tracked_pairs_list : [];
       const tCount = s.tracked_pairs ?? tList.length;
@@ -232,23 +246,6 @@
       if (lEl) lEl.textContent = p.losses ?? 0;
     } catch (e) { /* silent */ }
   }
-  // Зов loadStatus также обновит profit-today + active cycle + day-off
-  const _origLoadStatus = loadStatus;
-  loadStatus = async function () {
-    await _origLoadStatus();
-    loadProfitToday();
-    try {
-      const s = await api("/api/status");
-      loadActiveCycle(s);
-      loadDayOff(s);
-      const fActive = !!s.filter_active;
-      const sBadge = document.getElementById("m-strategy");
-      if (sBadge && s.active_strategy) {
-        sBadge.innerHTML = `${s.active_strategy} ${fActive ? '<span class="badge active" style="font-size:10px">🎯 фильтр</span>' : ''}`;
-      }
-    } catch (e) { /* silent */ }
-  };
-
   document.getElementById("btn-refresh").onclick = loadStatus;
   document.getElementById("btn-pause").onclick = async () => {
     try { await api("/api/control/pause", { method: "POST" }); showActionMsg("⏸ Пауза включена", "ok"); }

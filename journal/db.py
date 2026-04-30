@@ -519,7 +519,12 @@ class Journal:
             vals = [r[field] for r in wins if r[field] is not None]
             if len(vals) < 3:
                 return None, None
-            lo, hi = _q(vals, qlow), _q(vals, qhigh)
+            # Для маленьких выборок (< 10) quantile 10/90 даёт чисто
+            # min/max — берём их явно. Для больших — обрезаем outliers.
+            if len(vals) < 10:
+                lo, hi = min(vals), max(vals)
+            else:
+                lo, hi = _q(vals, qlow), _q(vals, qhigh)
             if isinstance(lo, float):
                 lo = round(lo, 4)
             if isinstance(hi, float):

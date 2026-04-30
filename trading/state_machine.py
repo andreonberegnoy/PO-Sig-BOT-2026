@@ -101,9 +101,6 @@ class StateMachine:
         # (по close-time бара). Используется для дедупа `_record_signals_phase`,
         # чтобы не пересчитывать CONSENSUS на одном баре дважды.
         self._last_signal_record_bar: dict[str, int] = {}
-        # Информация о последнем записанном сигнале по символу — нужна
-        # `_open_and_track` чтобы пометить запись в `signals` как entered=True.
-        self._last_signal_info: dict[str, dict] = {}
 
         self._running = False
         self._tick_event = asyncio.Event()
@@ -449,10 +446,18 @@ class StateMachine:
                     pass
             f = self.journal.signal_filter_get(strat_for_filter)
             if f and f.get("enabled"):
-                params_for_snap = (f.get("__params_cache__")
-                                   or self.cfg.get("indicator") or {})
+                # Snapshot для filter check — берём params активной стратегии
+                # из registry (если доступна), иначе global cfg.indicator.
+                # _market_snapshot использует только CONSENSUS-специфичные
+                # ключи; для кастомных стратегий он мирится с пропуском.
+                snap_params = self.cfg.get("indicator") or {}
+                if self.registry:
+                    try:
+                        snap_params = self.registry.get_active().merged_params()
+                    except Exception:
+                        pass
                 snap = self._market_snapshot(symbol, last,
-                                             {**DEFAULT_PARAMS, **params_for_snap},
+                                             {**DEFAULT_PARAMS, **snap_params},
                                              closed, strat_for_filter)
                 if not self._signal_passes_user_filter(snap, f):
                     logger.info("user_filter: %s %s rejected by active filter",
@@ -744,10 +749,6 @@ class StateMachine:
             try:
                 inserted = self.journal.insert_signal(snap)
                 if inserted:
-                    self._last_signal_info[sym] = {
-                        "signal_ts": snap["signal_ts"],
-                        "strategy_name": strat_name,
-                    }
                     logger.debug("signal recorded: %s %s @%d total=%s",
                                  sym, snap["side"], snap["signal_ts"], snap.get("votes_total"))
             except Exception:
@@ -773,14 +774,22 @@ class StateMachine:
     async def _signals_settle_loop(self):
         """Background task: каждые 30 сек ищет неосёдланные signals у которых
         signal_ts + 5*tf уже прошло, и считает exp_wins[w1..w5] по next 5 close.
-        Использует уже закэшированные свечи в self._candles (если есть);
-        иначе пропускает — на следующей итерации свечи догрузятся."""
+
+        Источники свечей (по приоритету):
+          1) self._candles[sym] — live cache, покрывает только последние ~N
+             баров; работает для свежих сигналов (~до часа назад).
+          2) feed.history.fetch_candles — REST fallback для старых сигналов
+             (например после restart кэш пуст для давно прошедших сигналов).
+          3) Если signal_ts > 24ч и оба источника дали < 5 баров — settle с
+             пустым exp_wins=[null]*5, чтобы перестать пытаться (иначе они
+             вечно висят в очереди и тормозят аналитику).
+        """
         tf = int(self.cfg.get("filter", {}).get("tf", 60))
+        from feed.history import fetch_candles as _fetch_candles
         while self._running:
             try:
                 await asyncio.sleep(30)
                 now = int(time.time())
-                # барам нужно успеть закрыться → сигналы старше 6*tf
                 cutoff = now - 6 * tf
                 rows = self.journal.pending_signals_to_settle(cutoff, limit=200)
                 for r in rows:
@@ -789,16 +798,28 @@ class StateMachine:
                     sig_ts = int(r["signal_ts"])
                     entry_close = float(r["entry_close"])
                     candles = self._candles.get(sym) or []
-                    # подбираем 5 баров после signal_ts
                     after = [c for c in candles if int(c["time"]) > sig_ts][:5]
                     if len(after) < 5:
-                        # свечи ещё не догружены — попробуем позже
+                        # Fallback REST — пробуем для сигналов старше 5 минут
+                        # (live cache обычно покрывает последние минут 20-30).
+                        if sig_ts < now - 300:
+                            try:
+                                rest = await _fetch_candles(self.feed, sym, tf, limit=20)
+                                if rest:
+                                    after = [c for c in rest if int(c["time"]) > sig_ts][:5]
+                            except Exception:
+                                pass
+                    if len(after) < 5:
+                        # Старше 24ч — закрываем с пустым результатом, чтобы
+                        # очередь pending не росла бесконечно.
+                        if sig_ts < now - 86400:
+                            self.journal.settle_signal(int(r["id"]), [None]*5)
                         continue
                     exp_wins = []
                     for c in after:
                         cl = float(c["close"])
                         if cl == entry_close:
-                            exp_wins.append(None)  # draw
+                            exp_wins.append(None)
                         elif side == "call":
                             exp_wins.append(1 if cl > entry_close else 0)
                         else:
@@ -1520,14 +1541,19 @@ class StateMachine:
         logger.info("OPEN %s %s $%s exp=%ss trade_id=%s", sym, action, amount, expiry, opened.trade_id)
 
         # Этап 2: связать только что открытую сделку с записью в `signals`.
-        # `_record_signals_phase` уже сохранил сигнал на этом баре до scan-а;
-        # здесь — пометить entered=1 + trade_id.
+        # `_record_signals_phase` уже сохранил сигнал на этом баре. Берём
+        # signal_ts напрямую из cached candles (а не из `_last_signal_info`),
+        # чтобы не зависеть от состояния промежуточных кэшей и любых
+        # исключений в `_record_signals_phase`. Strategy name — текущая
+        # активная (т.е. та же что использовалась в _check_signal).
         try:
-            info = self._last_signal_info.get(sym)
-            if info:
+            buf = self._candles.get(sym) or []
+            if len(buf) >= 2:
+                signal_ts = int(buf[-2]["time"])
+                strat_name = (self.registry.get_active().name
+                               if self.registry else "consensus")
                 self.journal.mark_signal_entered(
-                    sym, int(info["signal_ts"]), str(info["strategy_name"]),
-                    str(opened.trade_id),
+                    sym, signal_ts, str(strat_name), str(opened.trade_id),
                 )
         except Exception:
             logger.exception("mark_signal_entered failed for %s", sym)
@@ -1625,11 +1651,11 @@ class StateMachine:
             "mode": self.cfg["mode"],
         })
         # Этап 3: постоянная пере-фильтрация. После каждого LOSS на текущей паре
-        # перепроверяем что её WR1-1000 / WR1-200 / payout всё ещё проходят
-        # фильтры. Если уже нет — помечаем для смены и переходим в SEARCH.
-        # FREE-режим: фильтр уже учитывается в _eligible_for_new_cycle.
-        if (closed.result == "LOSS" and self.state.current_pair
-                and self.state.mg_step >= 1):
+        # перепроверяем что её WR1-1000 / WR1-200 / payout всё ещё проходят.
+        # Если уже нет — помечаем для смены и переходим в SEARCH. Запускаем
+        # на ЛЮБОМ LOSS (включая первый в цикле, mg_step ещё 0) — нет смысла
+        # ждать второго минуса если пара перестала быть валидной.
+        if closed.result == "LOSS" and self.state.current_pair:
             try:
                 self._verify_current_pair_still_passes()
             except Exception:

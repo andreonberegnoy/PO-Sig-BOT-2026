@@ -1448,14 +1448,16 @@ class StateMachine:
                 f"Жду /resume."
             )
             return
-        # 5. Общий лимит цикла (cycle_total_limit, поддержка legacy max_steps)
+        # 5. Общий лимит цикла (cycle_total_limit = РОВНО N сделок).
+        # mg_step считает сделки начиная с 0 (первая сделка = mg_step=0).
+        # После N-й LOSS → mg_step=N. Проверка `>=` останавливает (N+1)-ю.
         total_limit = int(mg_cfg.get("cycle_total_limit",
                                       mg_cfg.get("max_steps", 10)))
-        if self.state.mg_step > total_limit:
+        if self.state.mg_step >= total_limit:
             self.state.waiting_resume = True
             self._persist()
             await self._notify(
-                f"🛑 Достигнут общий лимит цикла ({total_limit} шагов). Жду /resume."
+                f"🛑 Достигнут общий лимит цикла ({total_limit} сделок). Жду /resume."
             )
             return
 
@@ -1521,11 +1523,11 @@ class StateMachine:
             return
         _mg = self.cfg.get("martingale") or {}
         total_limit = int(_mg.get("cycle_total_limit", _mg.get("max_steps", 10)))
-        if self.state.mg_step > total_limit:
+        if self.state.mg_step >= total_limit:
             self.state.waiting_resume = True
             self._persist()
             await self._notify(
-                f"🛑 Достигнут общий лимит цикла ({total_limit} шагов). Жду /resume."
+                f"🛑 Достигнут общий лимит цикла ({total_limit} сделок). Жду /resume."
             )
             return
 

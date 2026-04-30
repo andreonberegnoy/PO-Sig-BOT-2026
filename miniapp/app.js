@@ -463,14 +463,13 @@
             input = `<input type="number" data-k="${it.k}" data-t="${it.t}"
                             min="${it.min ?? ""}" max="${it.max ?? ""}" step="${step}" value="${v ?? ""}"/>`;
           }
-          // ⓘ button рядом с лейблом — клик показывает popover с it.desc.
-          // Если desc нет — ⓘ скрыта. Технический ключ (it.k) больше не
-          // показываем по умолчанию, чтобы не захламлять UI; он остаётся
-          // в data-key для отладки.
+          // ⓘ button — отдельный flex-item ВНЕ <label>, чтобы он не
+          // растягивался по ширине лейбла на мобильном. flex: 0 0 auto
+          // в CSS гарантирует фиксированный 18×18 размер.
           const infoBtn = it.desc
             ? `<button class="info-btn" type="button" data-info="${it.desc.replace(/"/g, "&quot;")}" data-key="${it.k}" title="Что это">ⓘ</button>`
             : "";
-          row.innerHTML = `<label>${it.label} ${infoBtn}</label>${input}`;
+          row.innerHTML = `<label>${it.label}</label>${infoBtn}${input}`;
 
           if (it.parent) {
             // append в child-группу parent'а

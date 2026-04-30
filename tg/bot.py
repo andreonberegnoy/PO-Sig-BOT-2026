@@ -852,12 +852,11 @@ class TelegramBot:
     # ---------- periodic report (schedule-aware) ----------
 
     async def periodic_report_loop(self):
-        """Отчёт по таймеру:
-          schedule.enabled=true  → каждый день при наступлении schedule.end_hour
-          schedule.enabled=false → каждый день в periodic_report.hour_when_24_7
-
-        Проверяет каждую минуту, отправляет один раз за календарный день.
-        Если идёт мартингейл — ждёт закрытия цикла перед отправкой."""
+        """Отчёт раз в сутки в указанный час `periodic_report.hour` локальной TZ.
+        Час задаётся пользователем явно (не зависит от schedule).
+        Если в момент отправки идёт мартингейл-цикл — ждёт закрытия (WIN или
+        выход на stop-sum), потом отправляет — чтобы сводка содержала финальный
+        результат, а не промежуточный."""
         tz = pytz.timezone(self.cfg["telegram"]["daily_report_timezone"])
         last_sent_date = None
         while True:
@@ -866,18 +865,18 @@ class TelegramBot:
                 pr = self.cfg.get("periodic_report") or {}
                 if not pr.get("enabled"):
                     continue
-                sched = self.cfg.get("schedule") or {}
-                if sched.get("enabled"):
-                    target_hour = int(sched.get("end_hour", 22)) % 24
-                else:
-                    target_hour = int(pr.get("hour_when_24_7", 9)) % 24
+                # Backwards-compat: если в overrides осталось hour_when_24_7,
+                # используем его как fallback. Новый ключ — periodic_report.hour.
+                target_hour = int(pr.get("hour",
+                                         pr.get("hour_when_24_7", 9))) % 24
                 now = datetime.now(tz)
                 if now.hour != target_hour or now.minute >= 5:
                     continue
                 today = now.date()
                 if last_sent_date == today:
                     continue
-                # Если активный мартингейл — даём ему довестись до WIN.
+                # Если активный мартингейл — даём ему довестись до WIN/stop_sum
+                # прежде чем отправлять. Иначе сводка покажет «висящий» цикл.
                 while self.sm and self.sm.state.mg_step > 0:
                     await asyncio.sleep(30)
                 await self._send_periodic_report()

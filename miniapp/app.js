@@ -324,8 +324,8 @@
       { k: "retention.signals_days", t: "int", min: 30, max: 365, step: 30, label: "Хранить signals (дней, 30-365)" },
     ],
     "📋 Периодический отчёт": [
-      { k: "periodic_report.enabled", t: "bool", label: "Присылать сводку (по окончании торгов или утром при 24/7)" },
-      { k: "periodic_report.hour_when_24_7", t: "int", min: 0, max: 23, label: "Час отправки в режиме 24/7", parent: "periodic_report.enabled" },
+      { k: "periodic_report.enabled", t: "bool", label: "Присылать сводку раз в сутки" },
+      { k: "periodic_report.hour", t: "int", min: 0, max: 23, label: "Час отправки (0–23, локальная TZ)", parent: "periodic_report.enabled" },
     ],
   };
 

@@ -135,12 +135,11 @@ telegram:
   daily_report_timezone: "Europe/Kyiv"
 
 # ---- периодический отчёт ----
-# Время отправки зависит от расписания работы:
-#   schedule.enabled=true  → по окончании торгов (schedule.end_hour)
-#   schedule.enabled=false → ежедневно в hour_when_24_7 утра
+# Раз в сутки в указанный час локального времени (TZ из telegram.daily_report_timezone).
+# Если в момент отправки активен мартингейл-цикл — ждёт его закрытия.
 periodic_report:
   enabled: false
-  hour_when_24_7: 9
+  hour: 9                    # час отправки (0..23) в локальной TZ
 
 # ---- хранилище ----
 # Railway Volume mount path: /data (changed from /app/data — earlier path didn't

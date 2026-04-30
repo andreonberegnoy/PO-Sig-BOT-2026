@@ -91,6 +91,13 @@ class StateMachine:
         self._last_refresh: dict[str, float] = {}   # ts of last REST fetch per sym
         self._pair_scores: dict[str, PairScore] = {}
         self._tracked: set[str] = set()
+        # Этап 2: signals collector — сколько сигналов уже записано на символ
+        # (по close-time бара). Используется для дедупа `_record_signals_phase`,
+        # чтобы не пересчитывать CONSENSUS на одном баре дважды.
+        self._last_signal_record_bar: dict[str, int] = {}
+        # Информация о последнем записанном сигнале по символу — нужна
+        # `_open_and_track` чтобы пометить запись в `signals` как entered=True.
+        self._last_signal_info: dict[str, dict] = {}
 
         self._running = False
         self._tick_event = asyncio.Event()
@@ -409,6 +416,232 @@ class StateMachine:
             return None
         return "call" if last.side == "buy" else "put"
 
+    # ---------- signals collector (Stage 2) ----------
+
+    def _check_signal_with_meta(self, symbol: str):
+        """Same gate as `_check_signal`, но возвращает (action, sig, params,
+        strategy_name) если сигнал есть на последнем закрытом баре. Иначе None.
+        Используется collectorom + free-scan'ом."""
+        buf = self._candles.get(symbol)
+        if not buf or len(buf) < 200:
+            return None
+        closed = buf[:-1]
+        period = int(self.cfg.get("filter", {}).get("tf", 60))
+        recent = closed[-100:]
+        if len(recent) >= 2:
+            first_t = int(recent[0]["time"])
+            last_t = int(recent[-1]["time"])
+            expected = max(1, (last_t - first_t) // period + 1)
+            density = len(recent) / expected
+            if density < 0.95:
+                return None
+        strategy_name = "consensus"
+        if self.registry:
+            try:
+                strat = self.registry.get_active()
+                params = strat.merged_params()
+                sigs, _ = strat.generate_signals(closed, params)
+                strategy_name = strat.name
+            except Exception:
+                params = {**DEFAULT_PARAMS, **self.cfg["indicator"]}
+                sigs, _ = _consensus_generate_signals(closed, params)
+        else:
+            params = {**DEFAULT_PARAMS, **self.cfg["indicator"]}
+            sigs, _ = _consensus_generate_signals(closed, params)
+        if not sigs:
+            return None
+        last = sigs[-1]
+        if last.i != len(closed) - 1:
+            return None
+        action = "call" if last.side == "buy" else "put"
+        return (action, last, params, strategy_name)
+
+    def _market_snapshot(self, symbol: str, sig, params: dict,
+                         closed: list[dict], strategy_name: str) -> dict:
+        """Снимает срез индикаторов на момент signal bar. Безопасен к падениям —
+        не-CONSENSUS стратегии могут не выдавать `sig.votes` или индикаторы;
+        отсутствующие поля попадают в БД как NULL."""
+        from strategy.indicators import qqe, htf_trend, atr, sma, bollinger
+        p = {**DEFAULT_PARAMS, **(params or {})}
+        n = len(closed)
+        i = getattr(sig, "i", n - 1)
+        if i < 0 or i >= n:
+            return {}
+        times  = [c["time"]  for c in closed]
+        opens  = [c["open"]  for c in closed]
+        highs  = [c["high"]  for c in closed]
+        lows   = [c["low"]   for c in closed]
+        closes = [c["close"] for c in closed]
+
+        snap: dict = {}
+        try:
+            rsi_ma_arr, trail_arr = qqe(closes, p["rsiPeriod"], p["rsiSmoothing"], p["qqeFactor"])
+            snap["rsi_ma"] = rsi_ma_arr[i] if i < len(rsi_ma_arr) else None
+            snap["qqe_trailing"] = trail_arr[i] if i < len(trail_arr) else None
+        except Exception:
+            snap["rsi_ma"] = snap["qqe_trailing"] = None
+        try:
+            tf_sec = 60
+            if len(times) >= 3:
+                deltas = sorted(times[k+1] - times[k] for k in range(len(times) - 1))
+                tf_sec = max(1, int(deltas[len(deltas) // 2]))
+            htf = htf_trend(opens, highs, lows, closes, p["htfMultiplier"],
+                            p["htfMaPeriod"], p["htfMaType"],
+                            times=times, tf_seconds=tf_sec)
+            snap["htf_value"] = htf[i] if i < len(htf) else None
+        except Exception:
+            snap["htf_value"] = None
+        try:
+            atr_arr = atr(highs, lows, closes, p["atrPeriod"])
+            atr_avg_arr = sma(atr_arr, p["atrAvgWindow"])
+            atr_v = atr_arr[i] if i < len(atr_arr) else None
+            atr_avg_v = atr_avg_arr[i] if i < len(atr_avg_arr) else None
+            snap["atr14_1m"] = atr_v
+            snap["atr_avg"] = atr_avg_v
+            snap["atr_ratio"] = (atr_v / atr_avg_v) if (atr_v and atr_avg_v) else None
+        except Exception:
+            snap["atr14_1m"] = snap["atr_avg"] = snap["atr_ratio"] = None
+        try:
+            bb = bollinger(closes, p["bbPeriod"], p["bbStdDev"])
+            up_i = bb["upper"][i] if i < len(bb["upper"]) else None
+            lo_i = bb["lower"][i] if i < len(bb["lower"]) else None
+            snap["bb_upper"] = up_i
+            snap["bb_lower"] = lo_i
+            if up_i is not None and lo_i is not None and (up_i - lo_i) != 0:
+                snap["bb_position"] = (closes[i] - lo_i) / (up_i - lo_i)
+            else:
+                snap["bb_position"] = None
+        except Exception:
+            snap["bb_upper"] = snap["bb_lower"] = snap["bb_position"] = None
+
+        body = abs(closes[i] - opens[i])
+        snap["candle_body"] = body
+        atr_v = snap.get("atr14_1m")
+        snap["candle_atr_ratio"] = (body / atr_v) if atr_v else None
+        snap["candle_direction"] = 1 if closes[i] > opens[i] else (-1 if closes[i] < opens[i] else 0)
+
+        # голоса (есть только у CONSENSUS-совместимых)
+        votes = getattr(sig, "votes", None) or {}
+        snap["votes_rsi"]    = votes.get("rsi")
+        snap["votes_htf"]    = votes.get("htf")
+        snap["votes_vol"]    = votes.get("vol")
+        snap["votes_bb"]     = votes.get("bb")
+        snap["votes_candle"] = votes.get("candle")
+        snap["votes_total"]  = getattr(sig, "total", None)
+
+        # контекст
+        ts = int(times[i])
+        try:
+            tz_name = (self.cfg.get("telegram") or {}).get("daily_report_timezone") or "Europe/Kyiv"
+            tz = pytz.timezone(tz_name)
+            local = datetime.fromtimestamp(ts, tz=tz)
+            snap["hour_local"] = local.hour
+            snap["day_of_week"] = local.weekday()
+        except Exception:
+            local = datetime.utcfromtimestamp(ts)
+            snap["hour_local"] = local.hour
+            snap["day_of_week"] = local.weekday()
+
+        try:
+            snap["payout_at_signal"] = int((self.feed.assets.get(symbol) or {}).get("payout") or 0) or None
+        except Exception:
+            snap["payout_at_signal"] = None
+        score = self._pair_scores.get(symbol)
+        snap["wr1_long_at_signal"] = getattr(score, "wr1", None) if score else None
+        snap["wr1_recent_at_signal"] = getattr(score, "wr1_recent", None) if score else None
+
+        side = "call" if sig.side == "buy" else "put"
+        snap.update({
+            "strategy_name": strategy_name,
+            "symbol": symbol,
+            "side": side,
+            "signal_ts": ts,
+            "entry_close": closes[i],
+            "entered": 0,
+            "trade_id": None,
+        })
+        return snap
+
+    async def _record_signals_phase(self):
+        """Iterate ALL tracked pairs, persist any new CONSENSUS signal that
+        fired on the latest closed bar. Idempotent (UNIQUE на symbol+ts+strat
+        в БД). Не блокирует торговлю — отдельная фаза до scan/cycle веток."""
+        if not self._tracked:
+            return
+        for sym in list(self._tracked):
+            buf = self._candles.get(sym)
+            if not buf or len(buf) < 200:
+                continue
+            last_closed_t = int(buf[-2]["time"])
+            if last_closed_t <= self._last_signal_record_bar.get(sym, 0):
+                continue
+            self._last_signal_record_bar[sym] = last_closed_t
+            try:
+                meta = self._check_signal_with_meta(sym)
+            except Exception:
+                logger.exception("record_signals_phase: signal check failed for %s", sym)
+                continue
+            if not meta:
+                continue
+            action, sig, params, strat_name = meta
+            try:
+                snap = self._market_snapshot(sym, sig, params, buf[:-1], strat_name)
+            except Exception:
+                logger.exception("market_snapshot failed for %s", sym)
+                continue
+            if not snap:
+                continue
+            try:
+                inserted = self.journal.insert_signal(snap)
+                if inserted:
+                    self._last_signal_info[sym] = {
+                        "signal_ts": snap["signal_ts"],
+                        "strategy_name": strat_name,
+                    }
+                    logger.debug("signal recorded: %s %s @%d total=%s",
+                                 sym, snap["side"], snap["signal_ts"], snap.get("votes_total"))
+            except Exception:
+                logger.exception("insert_signal failed for %s", sym)
+
+    async def _signals_settle_loop(self):
+        """Background task: каждые 30 сек ищет неосёдланные signals у которых
+        signal_ts + 5*tf уже прошло, и считает exp_wins[w1..w5] по next 5 close.
+        Использует уже закэшированные свечи в self._candles (если есть);
+        иначе пропускает — на следующей итерации свечи догрузятся."""
+        tf = int(self.cfg.get("filter", {}).get("tf", 60))
+        while self._running:
+            try:
+                await asyncio.sleep(30)
+                now = int(time.time())
+                # барам нужно успеть закрыться → сигналы старше 6*tf
+                cutoff = now - 6 * tf
+                rows = self.journal.pending_signals_to_settle(cutoff, limit=200)
+                for r in rows:
+                    sym = r["symbol"]
+                    side = r["side"]
+                    sig_ts = int(r["signal_ts"])
+                    entry_close = float(r["entry_close"])
+                    candles = self._candles.get(sym) or []
+                    # подбираем 5 баров после signal_ts
+                    after = [c for c in candles if int(c["time"]) > sig_ts][:5]
+                    if len(after) < 5:
+                        # свечи ещё не догружены — попробуем позже
+                        continue
+                    exp_wins = []
+                    for c in after:
+                        cl = float(c["close"])
+                        if cl == entry_close:
+                            exp_wins.append(None)  # draw
+                        elif side == "call":
+                            exp_wins.append(1 if cl > entry_close else 0)
+                        else:
+                            exp_wins.append(1 if cl < entry_close else 0)
+                    self.journal.settle_signal(int(r["id"]), exp_wins)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("signals_settle_loop tick crashed")
+
     # ---------- scan & subscribe ----------
     async def _rescan_pairs(self):
         # Guard: if WS feed isn't ready (mid-reconnect / mid-relogin), skip the
@@ -578,7 +811,8 @@ class StateMachine:
     async def run(self):
         self._running = True
         await self._notify(f"🤖 Бот запущен ({self.cfg['mode']})")
-        # NOTE: pair_stats_logger удалён в этапе 1; signals collector будет в этапе 2.
+        # Этап 2: settlement loop для exp_wins по записанным signals.
+        asyncio.create_task(self._signals_settle_loop(), name="signals_settle")
         # Resume any in-flight trade interrupted by the previous restart
         await self._resume_pending_trade()
 
@@ -750,6 +984,14 @@ class StateMachine:
                 else:
                     # Between boundaries keep a loose refresh (fallback if tick stream lagged)
                     await self._maybe_refresh_all(min_interval_sec=15)
+
+                # Этап 2: запись CONSENSUS-сигналов на ВСЕХ tracked парах
+                # (independent of trading branch) — пишем market snapshots.
+                # Не блокирует ни одной решающей ветки; падение — лог и дальше.
+                try:
+                    await self._record_signals_phase()
+                except Exception:
+                    logger.exception("record_signals_phase failed")
 
                 # Branch: three modes
                 #  • FREE: no active cycle → scan all pairs for first signal
@@ -1116,6 +1358,19 @@ class StateMachine:
             return
 
         logger.info("OPEN %s %s $%s exp=%ss trade_id=%s", sym, action, amount, expiry, opened.trade_id)
+
+        # Этап 2: связать только что открытую сделку с записью в `signals`.
+        # `_record_signals_phase` уже сохранил сигнал на этом баре до scan-а;
+        # здесь — пометить entered=1 + trade_id.
+        try:
+            info = self._last_signal_info.get(sym)
+            if info:
+                self.journal.mark_signal_entered(
+                    sym, int(info["signal_ts"]), str(info["strategy_name"]),
+                    str(opened.trade_id),
+                )
+        except Exception:
+            logger.exception("mark_signal_entered failed for %s", sym)
 
         # Wait for expiry, then check for explicit close event from PO first.
         # Direct-PO feed gets `updateClosedDeals` with a `profit` field — much

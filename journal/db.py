@@ -58,10 +58,69 @@ CREATE TABLE IF NOT EXISTS state_kv (
     updated_at INTEGER NOT NULL
 );
 
--- Этап 2 рефакторинга добавит сюда таблицу `signals` с market snapshots
--- на каждый CONSENSUS-сигнал (и других стратегий). Старые таблицы
--- payout_log, pair_stats_log, virtual_signals удалены в этапе 1.
+-- Этап 2: signals — каждый CONSENSUS (или другой стратегии) сигнал
+-- на tracked-паре. Пишется ВСЕГДА, независимо вошёл бот или нет.
+-- Если entered=1 — связан с trades через trade_id.
+CREATE TABLE IF NOT EXISTS signals (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    strategy_name   TEXT NOT NULL,
+    symbol          TEXT NOT NULL,
+    side            TEXT NOT NULL,           -- call | put
+    signal_ts       INTEGER NOT NULL,        -- close-time бара сигнала
+    entry_close     REAL NOT NULL,
+    entered         INTEGER NOT NULL DEFAULT 0,
+    trade_id        TEXT,
+    exp_wins        TEXT,                    -- JSON [w1..w5] (1=win,0=loss,null=draw)
+    settled_at      INTEGER,
+    -- голоса CONSENSUS (или эквивалент)
+    votes_rsi       INTEGER,
+    votes_htf       INTEGER,
+    votes_vol       INTEGER,
+    votes_bb        INTEGER,
+    votes_candle    INTEGER,
+    votes_total     INTEGER,
+    -- индикаторы на момент сигнала
+    rsi_ma          REAL,
+    qqe_trailing    REAL,
+    htf_value       INTEGER,
+    atr14_1m        REAL,
+    atr_avg         REAL,
+    atr_ratio       REAL,
+    bb_upper        REAL,
+    bb_lower        REAL,
+    bb_position     REAL,
+    candle_body     REAL,
+    candle_atr_ratio REAL,
+    candle_direction INTEGER,
+    -- контекст
+    hour_local      INTEGER,
+    day_of_week     INTEGER,
+    payout_at_signal INTEGER,
+    wr1_long_at_signal REAL,
+    wr1_recent_at_signal REAL,
+    UNIQUE(symbol, signal_ts, strategy_name)
+);
+CREATE INDEX IF NOT EXISTS idx_signals_strat   ON signals(strategy_name);
+CREATE INDEX IF NOT EXISTS idx_signals_symts   ON signals(symbol, signal_ts);
+CREATE INDEX IF NOT EXISTS idx_signals_pending ON signals(settled_at, signal_ts);
+CREATE INDEX IF NOT EXISTS idx_signals_entered ON signals(entered);
+CREATE INDEX IF NOT EXISTS idx_signals_hour    ON signals(hour_local);
+CREATE INDEX IF NOT EXISTS idx_signals_dow     ON signals(day_of_week);
 """
+
+
+# Колонки snapshot которые collector передаёт в insert_signal — порядок жёсткий.
+_SIGNAL_COLS = (
+    "strategy_name", "symbol", "side", "signal_ts", "entry_close",
+    "entered", "trade_id",
+    "votes_rsi", "votes_htf", "votes_vol", "votes_bb", "votes_candle", "votes_total",
+    "rsi_ma", "qqe_trailing", "htf_value",
+    "atr14_1m", "atr_avg", "atr_ratio",
+    "bb_upper", "bb_lower", "bb_position",
+    "candle_body", "candle_atr_ratio", "candle_direction",
+    "hour_local", "day_of_week", "payout_at_signal",
+    "wr1_long_at_signal", "wr1_recent_at_signal",
+)
 
 
 class Journal:
@@ -102,6 +161,69 @@ class Journal:
         self.conn.execute(
             f"INSERT OR REPLACE INTO trades ({','.join(cols)}) VALUES ({placeholders})", row)
         self.conn.commit()
+
+    # ---------- signals (Stage 2) ----------
+
+    def insert_signal(self, snap: dict) -> bool:
+        """INSERT OR IGNORE — UNIQUE(symbol, signal_ts, strategy_name) защищает
+        от дублей при повторных проходах по тому же закрытому бару.
+        Returns True если вставлено, False если уже было."""
+        row = tuple(snap.get(c) for c in _SIGNAL_COLS)
+        placeholders = ",".join("?" * len(_SIGNAL_COLS))
+        cur = self.conn.execute(
+            f"INSERT OR IGNORE INTO signals ({','.join(_SIGNAL_COLS)}) VALUES ({placeholders})",
+            row,
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def mark_signal_entered(self, symbol: str, signal_ts: int, strategy_name: str,
+                             trade_id: str):
+        """После открытия сделки — связать ту строку signals с trade_id."""
+        self.conn.execute(
+            "UPDATE signals SET entered=1, trade_id=? "
+            "WHERE symbol=? AND signal_ts=? AND strategy_name=?",
+            (trade_id, symbol, signal_ts, strategy_name),
+        )
+        self.conn.commit()
+
+    def pending_signals_to_settle(self, before_ts: int, limit: int = 200) -> list[sqlite3.Row]:
+        """Сигналы без exp_wins, у которых сигнальный бар + 5 баров уже в прошлом."""
+        self.conn.row_factory = sqlite3.Row
+        cur = self.conn.execute(
+            "SELECT id, symbol, side, signal_ts, entry_close FROM signals "
+            "WHERE settled_at IS NULL AND signal_ts <= ? "
+            "ORDER BY signal_ts LIMIT ?",
+            (before_ts, limit),
+        )
+        return cur.fetchall()
+
+    def settle_signal(self, signal_id: int, exp_wins: list):
+        import json as _json
+        self.conn.execute(
+            "UPDATE signals SET exp_wins=?, settled_at=? WHERE id=?",
+            (_json.dumps(exp_wins), int(time.time()), signal_id),
+        )
+        self.conn.commit()
+
+    def signals_since(self, ts: int, strategy_name: Optional[str] = None) -> list[sqlite3.Row]:
+        self.conn.row_factory = sqlite3.Row
+        if strategy_name:
+            cur = self.conn.execute(
+                "SELECT * FROM signals WHERE signal_ts >= ? AND strategy_name = ? ORDER BY signal_ts",
+                (ts, strategy_name),
+            )
+        else:
+            cur = self.conn.execute(
+                "SELECT * FROM signals WHERE signal_ts >= ? ORDER BY signal_ts", (ts,))
+        return cur.fetchall()
+
+    def signals_retention_cleanup(self, keep_days: int) -> int:
+        """Удаляет signals старше keep_days. Возвращает число удалённых строк."""
+        cutoff = int(time.time()) - keep_days * 86400
+        cur = self.conn.execute("DELETE FROM signals WHERE signal_ts < ?", (cutoff,))
+        self.conn.commit()
+        return cur.rowcount or 0
 
     def trades_since(self, ts: int) -> list[sqlite3.Row]:
         self.conn.row_factory = sqlite3.Row

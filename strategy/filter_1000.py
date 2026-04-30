@@ -90,6 +90,7 @@ class PairScore:
     losses: int
     completed: int
     wr: float
+    wr1: float = 0.0                  # WR первой сделки в long окне
     # Recent window (recentLookbackBars, дефолт 200 свечей) — мини-копия
     wins_recent: int = 0
     losses_recent: int = 0
@@ -123,6 +124,7 @@ def classify(
         max_loss_streak=a.max_loss_streak_overall,
         max_loss_streak_before_win=a.max_loss_streak_before_win,
         wins=a.wins, losses=a.losses, completed=a.completed, wr=a.wr,
+        wr1=round(a.wr1, 1),
         wins_recent=a.wins_recent, losses_recent=a.losses_recent,
         completed_recent=a.completed_recent,
         wr_recent=round(wr_recent, 1),

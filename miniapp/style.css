@@ -262,3 +262,18 @@ ul.strategies li.strategy-card:hover .strategy-arrow {
   .analytics-toolbar { font-size: 12px; }
   .period-btn { padding: 4px 8px; font-size: 12px; }
 }
+
+/* ─── Сворачиваемая группа настроек под toggle (этап 3) ─── */
+.setting-children {
+  margin: 0 0 0 8px;
+  padding: 4px 0 4px 12px;
+  border-left: 3px solid var(--button);
+  background: rgba(96, 165, 250, 0.05);
+  border-radius: 0 6px 6px 0;
+}
+.setting-children .setting-row {
+  /* меньше отступы, чтобы дети визуально компактнее родителя */
+  padding: 8px 10px;
+}
+.setting-children .setting-row:first-child { padding-top: 10px; }
+.setting-children .setting-row:last-child  { padding-bottom: 10px; }

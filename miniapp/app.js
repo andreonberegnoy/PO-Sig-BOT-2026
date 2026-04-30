@@ -310,27 +310,28 @@
     ],
     "🎰 Мартингейл": [
       { k: "martingale.enabled", t: "bool", label: "Включить мартингейл" },
-      { k: "martingale.coefficient", t: "float", min: 1.5, max: 5, step: 0.1, label: "Множитель" },
-      { k: "martingale.max_steps", t: "int", min: 1, max: 20, label: "Общий лимит шагов в цикле" },
-      { k: "martingale.stop_sum", t: "float", min: 10, max: 10000, step: 50, label: "Стоп-сумма ($)" },
-      { k: "martingale.per_pair_max", t: "int", min: 0, max: 20, label: "Макс. перекрытий на одной паре" },
-      { k: "martingale.carry_unused", t: "bool", label: "Переносить неиспользованные перекрытия в резерв" },
-      { k: "martingale.last_pair_until_stop_sum", t: "bool", label: "На последней паре цикла торговать до stop-sum" },
-      { k: "martingale.manual_switch_counts", t: "bool", label: "Ручная смена пары засчитывается в счётчик" },
-      { k: "martingale.reset_on_win", t: "bool", label: "После плюса вернуть базовую сумму" },
+      { k: "martingale.coefficient", t: "float", min: 1.5, max: 5, step: 0.1, label: "Множитель", parent: "martingale.enabled" },
+      { k: "martingale.cycle_total_limit", t: "int", min: 1, max: 20, label: "Общий лимит шагов в цикле", parent: "martingale.enabled" },
+      { k: "martingale.stop_sum", t: "float", min: 10, max: 10000, step: 50, label: "Стоп-сумма ($)", parent: "martingale.enabled" },
+      { k: "martingale.pair_limits", t: "intlist", label: "Лимиты перекрытий по позициям (через запятую, пример: 3,3,2)", parent: "martingale.enabled" },
+      { k: "martingale.consecutive_losses_switch", t: "int", min: 0, max: 10, label: "Минусов подряд для switch (0 = выкл)", parent: "martingale.enabled" },
+      { k: "martingale.carry_unused", t: "bool", label: "Переносить неиспользованные перекрытия в резерв", parent: "martingale.enabled" },
+      { k: "martingale.last_pair_until_stop_sum", t: "bool", label: "На последней паре цикла торговать до stop-sum", parent: "martingale.enabled" },
+      { k: "martingale.manual_switch_counts", t: "bool", label: "Ручная смена пары засчитывается в счётчик", parent: "martingale.enabled" },
+      { k: "martingale.reset_on_win", t: "bool", label: "После плюса вернуть базовую сумму", parent: "martingale.enabled" },
     ],
     "⏰ Расписание работы": [
       { k: "schedule.enabled", t: "bool", label: "Работать по расписанию (снять = 24/7 круглосуточно)" },
-      { k: "schedule.start_hour", t: "int", min: 0, max: 23, label: "Час начала (0-23)" },
-      { k: "schedule.end_hour", t: "int", min: 0, max: 24, label: "Час конца (0-24)" },
-      { k: "schedule.no_weekends", t: "bool", label: "📅 Не торговать на выходных (Сб/Вс)" },
+      { k: "schedule.start_hour", t: "int", min: 0, max: 23, label: "Час начала (0-23)", parent: "schedule.enabled" },
+      { k: "schedule.end_hour", t: "int", min: 0, max: 24, label: "Час конца (0-24)", parent: "schedule.enabled" },
+      { k: "schedule.no_weekends", t: "bool", label: "📅 Не торговать на выходных (Сб/Вс)", parent: "schedule.enabled" },
     ],
     "🗄 Хранение аналитики": [
       { k: "retention.signals_days", t: "int", min: 30, max: 365, step: 30, label: "Хранить signals (дней, 30-365)" },
     ],
     "📋 Периодический отчёт": [
       { k: "periodic_report.enabled", t: "bool", label: "Присылать сводку (по окончании торгов или утром при 24/7)" },
-      { k: "periodic_report.hour_when_24_7", t: "int", min: 0, max: 23, label: "Час отправки в режиме 24/7" },
+      { k: "periodic_report.hour_when_24_7", t: "int", min: 0, max: 23, label: "Час отправки в режиме 24/7", parent: "periodic_report.enabled" },
     ],
   };
 
@@ -358,10 +359,13 @@
         const div = document.createElement("div");
         div.className = "category";
         div.innerHTML = `<div class="category-title">${cat}</div>`;
+        // Карта parent → DOM-контейнер для детей (создаём пустые групы заранее)
+        const childGroups = new Map();
         for (const it of items) {
           const v = getDeep(cfg, it.k);
           const row = document.createElement("div");
           row.className = "setting-row";
+          if (it.parent) row.dataset.parent = it.parent;
           let input;
           if (it.t === "bool") {
             input = `<input type="checkbox" data-k="${it.k}" data-t="bool" ${v ? "checked" : ""}/>`;
@@ -375,17 +379,47 @@
               `<label class="multi-opt"><input type="checkbox" data-multi="${it.k}" data-opt="${o}" ${arr.includes(o) ? "checked" : ""}/> ${o}</label>`
             ).join("");
             input = `<div class="multi-row">${opts}</div>`;
+          } else if (it.t === "intlist") {
+            const csv = Array.isArray(v) ? v.join(",") : (v ?? "");
+            input = `<input type="text" data-k="${it.k}" data-t="intlist" placeholder="3,3,2" value="${csv}"/>`;
           } else {
             const step = it.step || (it.t === "int" ? 1 : 0.1);
             input = `<input type="number" data-k="${it.k}" data-t="${it.t}"
                             min="${it.min ?? ""}" max="${it.max ?? ""}" step="${step}" value="${v ?? ""}"/>`;
           }
           row.innerHTML = `<label>${it.label}<span class="hint">${it.k}</span></label>${input}`;
-          div.appendChild(row);
+
+          if (it.parent) {
+            // append в child-группу parent'а
+            let group = childGroups.get(it.parent);
+            if (!group) {
+              group = document.createElement("div");
+              group.className = "setting-children";
+              group.dataset.childrenOf = it.parent;
+              childGroups.set(it.parent, group);
+            }
+            group.appendChild(row);
+          } else {
+            div.appendChild(row);
+            // Если этот item — toggle (bool), создадим под него child-группу заранее
+            if (it.t === "bool") {
+              const group = document.createElement("div");
+              group.className = "setting-children";
+              group.dataset.childrenOf = it.k;
+              childGroups.set(it.k, group);
+              div.appendChild(group);
+            }
+          }
+        }
+        // Если родитель сам с parent=другой_родитель (вложенность), нашёл его group и закинул туда.
+        // Скрыть child-группы у выключенных toggle'ов сразу при первом рендере.
+        for (const [parentKey, group] of childGroups) {
+          const parentInput = div.querySelector(`[data-k="${parentKey}"][data-t="bool"]`);
+          if (parentInput && !parentInput.checked) group.style.display = "none";
         }
         cont.appendChild(div);
       }
-      // Handlers — single-key updates
+      // Handlers — single-key updates + parent/children visibility
       cont.querySelectorAll("[data-k]").forEach((el) => {
         el.addEventListener("change", async () => {
           const key = el.dataset.k;
@@ -394,10 +428,18 @@
           if (t === "bool") value = el.checked;
           else if (t === "int") value = parseInt(el.value);
           else if (t === "float") value = parseFloat(el.value);
-          else value = el.value;
+          else if (t === "intlist") {
+            value = el.value.split(",").map((s) => parseInt(s.trim())).filter((n) => Number.isFinite(n) && n > 0);
+            if (!value.length) { flashSetting(el, false); return; }
+          } else value = el.value;
           try {
             await api("/api/settings", { method: "PUT", body: JSON.stringify({ [key]: value }) });
             flashSetting(el, true);
+            // Если toggle — show/hide группу детей
+            if (t === "bool") {
+              const group = cont.querySelector(`[data-children-of="${key}"]`);
+              if (group) group.style.display = el.checked ? "" : "none";
+            }
           } catch (e) { flashSetting(el, false); console.error(e); }
         });
       });

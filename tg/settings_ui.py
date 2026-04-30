@@ -92,9 +92,9 @@ CATEGORIES: dict[str, list[Setting]] = {
     "🎰 Мартингейл": [
         Setting("martingale.enabled", "Включить мартингейл", "bool"),
         Setting("martingale.coefficient", "Множитель", "float", 1.5, 5.0, 0.1),
-        Setting("martingale.max_steps", "Общий лимит шагов в цикле", "int", 1, 20, 1),
+        Setting("martingale.cycle_total_limit", "Общий лимит шагов в цикле", "int", 1, 20, 1),
         Setting("martingale.stop_sum", "Стоп-сумма ($)", "float", 10.0, 10000.0, 50.0),
-        Setting("martingale.per_pair_max", "Макс. перекрытий на одной паре", "int", 0, 20, 1),
+        Setting("martingale.consecutive_losses_switch", "Минусов подряд → switch", "int", 0, 10, 1),
         Setting("martingale.carry_unused", "Переносить неиспользованные перекрытия", "bool"),
         Setting("martingale.last_pair_until_stop_sum", "На последней паре до stop_sum", "bool"),
     ],

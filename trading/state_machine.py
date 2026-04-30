@@ -56,11 +56,12 @@ class RuntimeState:
     # Trade in-flight at the moment of crash/restart. Resolved on startup.
     pending_trade: Optional[dict] = None
     # ↑ {asset, action, amount, pre_balance, open_ts, expiry_sec}
-    # Гибкий MG (этап 2): резерв неиспользованных перекрытий с предыдущих пар
-    # цикла. Когда current_pair достигла per_pair_max — карри переносится на
-    # следующую пару. На последней паре (cycle_switches >= max_pair_switch_per_cycle)
-    # отдаётся целиком.
+    # Гибкий MG (этап 2/3): резерв неиспользованных перекрытий с предыдущих пар
+    # цикла. На последней паре отдаётся целиком (pair_limits[-1] + cycle_unused_carry).
     cycle_unused_carry: int = 0
+    # Серия минусов подряд на ТЕКУЩЕЙ паре (resets on WIN/DRAW/switch).
+    # Триггер switch если достиг cfg.martingale.consecutive_losses_switch.
+    losses_streak_on_pair: int = 0
 
     def to_dict(self): return asdict(self)
 
@@ -180,6 +181,7 @@ class StateMachine:
         self.state.cycle_switches = 0
         self.state.switched_pairs = []
         self.state.cycle_unused_carry = 0
+        self.state.losses_streak_on_pair = 0
         self._persist()
         logger.info("RESUMED after stop-sum — fresh cycle")
 
@@ -221,12 +223,13 @@ class StateMachine:
         if bool(mg_cfg.get("manual_switch_counts", True)):
             self.state.cycle_switches += 1
         if bool(mg_cfg.get("carry_unused", True)):
-            per_pair = int(mg_cfg.get("per_pair_max", 0) or 0)
-            if per_pair > 0:
-                unused = max(0, per_pair - self.state.trades_on_pair)
-                self.state.cycle_unused_carry += unused
+            limits = self._mg_pair_limits()
+            pos = max(0, min(self.state.cycle_switches - 1, len(limits) - 1))
+            unused = max(0, limits[pos] - self.state.trades_on_pair)
+            self.state.cycle_unused_carry += unused
         self.state.current_pair = None   # ← SEARCH режим
         self.state.trades_on_pair = 0
+        self.state.losses_streak_on_pair = 0
         self._persist()
         # Сбросить last_closed_bar_time для всех tracked, чтобы _in_cycle_search_step
         # видел все пары как "свежие" и не пропустил недавно закрытые бары
@@ -467,6 +470,46 @@ class StateMachine:
             logger.exception("user_filter check failed for %s — propagating signal", symbol)
         return action
 
+    def _reclassify_current_pair_now(self):
+        """Этап 3: real-time бан/пере-фильтрация. Берёт cached candles
+        текущей пары, прогоняет filter_1000.classify(), обновляет
+        _pair_scores[sym]. Если max_loss_streak ≥ max_losses_in_row →
+        кладёт в journal.ban() немедленно (без ожидания 5-мин rescan).
+        Дёшево по CPU (~10ms на пару) — выполняется на каждой close.
+        """
+        from strategy.filter_1000 import classify
+        sym = self.state.current_pair
+        if not sym:
+            return
+        candles = self._candles.get(sym) or []
+        if len(candles) < 100:
+            return
+        params = {**DEFAULT_PARAMS, **(self.cfg.get("indicator") or {})}
+        if self.registry:
+            try:
+                params = self.registry.get_active().merged_params()
+            except Exception:
+                pass
+        f_cfg = self.cfg.get("filter") or {}
+        max_losses = int(f_cfg.get("max_losses_in_row", 3))
+        min_wr1 = float(f_cfg.get("min_wr1", 0) or 0)
+        min_wr1_recent = float(f_cfg.get("min_wr1_recent", 0) or 0)
+        payout_now = int((self.feed.assets.get(sym) or {}).get("payout", 0))
+        try:
+            score = classify(sym, payout_now, candles, params,
+                             max_losses, min_wr1, min_wr1_recent)
+        except Exception:
+            logger.exception("classify failed for %s", sym)
+            return
+        # Обновляем кэш сейчас же — _verify_current_pair_still_passes сразу
+        # увидит свежие данные.
+        self._pair_scores[sym] = score
+        # Real-time ban — если паттерн стал явно деструктивным
+        if score.ban and not self.journal.is_banned(sym):
+            ban_hours = int(f_cfg.get("ban_hours", 12))
+            self.journal.ban(sym, ban_hours, score.reason or "real-time reclassify")
+            logger.warning("real-time BAN %s (%dh) — %s", sym, ban_hours, score.reason)
+
     def _verify_current_pair_still_passes(self):
         """Постоянная пере-фильтрация (этап 3, архитектурный принцип №6).
         Берёт последний score из _pair_scores и проверяет что текущая пара
@@ -488,18 +531,21 @@ class StateMachine:
             reason = f"payout {payout}% < {floor}%"
         if not reason:
             return
-        # carry unused в резерв (как при обычной смене по payout-drop)
+        # carry unused в резерв (по limit'у текущей позиции)
         mg_cfg = self.cfg.get("martingale") or {}
-        per_pair = int(mg_cfg.get("per_pair_max", 0) or 0)
-        if bool(mg_cfg.get("carry_unused", True)) and per_pair > 0:
-            unused = max(0, per_pair - self.state.trades_on_pair)
+        if bool(mg_cfg.get("carry_unused", True)):
+            limits = self._mg_pair_limits()
+            pos = self._mg_position()
+            unused = max(0, limits[pos] - self.state.trades_on_pair)
             self.state.cycle_unused_carry += unused
-        max_switches = int(self.cfg["trading"].get("max_pair_switch_per_cycle", 1))
+        # Лимит смен = len(pair_limits) - 1
+        max_switches = max(0, len(self._mg_pair_limits()) - 1)
         if self.state.cycle_switches < max_switches:
             self.state.switched_pairs.append(sym)
             self.state.cycle_switches += 1
             self.state.current_pair = None
             self.state.trades_on_pair = 0
+            self.state.losses_streak_on_pair = 0
             self._persist()
             asyncio.create_task(self._notify(
                 f"🔁 Перефильтровано: {sym} больше не проходит ({reason}). "
@@ -1272,6 +1318,7 @@ class StateMachine:
         self.state.cycle_switches = 0
         self.state.switched_pairs = []
         self.state.cycle_unused_carry = 0
+        self.state.losses_streak_on_pair = 0
         self._persist()
 
         pre_balance_now = float(self.feed.balance() or 0.0)
@@ -1279,60 +1326,115 @@ class StateMachine:
 
         await self._open_and_track(sym, action, amt)
 
-    # ---------- in-cycle step (after a loss) ----------
+    # ---------- helpers: pair_limits / position ----------
+    def _mg_pair_limits(self) -> list[int]:
+        mg = self.cfg.get("martingale") or {}
+        raw = mg.get("pair_limits", [3, 3, 2])
+        if isinstance(raw, str):
+            try:
+                raw = [int(x.strip()) for x in raw.split(",") if x.strip()]
+            except Exception:
+                raw = [3, 3, 2]
+        if not isinstance(raw, list) or not raw:
+            raw = [3, 3, 2]
+        return [max(1, int(x)) for x in raw]
+
+    def _mg_position(self) -> int:
+        """0-based индекс текущей пары в ротации (= cycle_switches, но
+        clamped к len(pair_limits)-1)."""
+        limits = self._mg_pair_limits()
+        return min(self.state.cycle_switches, len(limits) - 1)
+
+    def _mg_is_last_pair(self) -> bool:
+        limits = self._mg_pair_limits()
+        return self.state.cycle_switches >= len(limits) - 1
+
+    def _mg_current_pair_allowed(self) -> int:
+        """Сколько перекрытий допустимо на текущей паре с учётом carry."""
+        limits = self._mg_pair_limits()
+        pos = self._mg_position()
+        own = limits[pos]
+        if self._mg_is_last_pair() and bool((self.cfg.get("martingale") or {}).get("carry_unused", True)):
+            return own + int(self.state.cycle_unused_carry)
+        return own
+
+    # ---------- in-cycle step ----------
     async def _in_cycle_step(self):
         sym = self.state.current_pair
 
-        # ── Гибкий MG (этап 2) ──
-        # cfg.martingale.per_pair_max + carry_unused + last_pair_until_stop_sum
-        # На последней паре цикла торгуем до stop_sum, игнорируя per_pair_max
-        # и payout drop. На предыдущих — стандартные перекрытия с переносом
-        # неиспользованного резерва.
+        # ── Гибкий MG (этап 2/3) — per-position limits + serie of losses ──
+        # Архитектура: pair_limits = [3, 3, 2] = три пары в цикле (две смены).
+        # На текущей паре (по позиции cycle_switches):
+        #   - allowed = pair_limits[pos]; для последней — + cycle_unused_carry
+        #   - триггеры switch (НЕ-последняя пара): pair_limit / consecutive_losses / payout_drop
+        #   - на последней + last_pair_until_stop_sum: только stop_sum / cycle_total_limit
         mg_cfg = self.cfg.get("martingale") or {}
-        per_pair_max = int(mg_cfg.get("per_pair_max", 0) or 0)
-        max_switches = int(self.cfg["trading"].get("max_pair_switch_per_cycle", 1))
-        is_last_pair = self.state.cycle_switches >= max_switches
+        is_last_pair = self._mg_is_last_pair()
         last_until_stop = bool(mg_cfg.get("last_pair_until_stop_sum", True))
         carry_unused = bool(mg_cfg.get("carry_unused", True))
-        # На последней паре + last_until_stop — лимит перекрытий не действует
-        skip_per_pair_limit = is_last_pair and last_until_stop
+        skip_pair_limits = is_last_pair and last_until_stop
 
-        if per_pair_max > 0 and not skip_per_pair_limit:
-            allowed = per_pair_max + (self.state.cycle_unused_carry if is_last_pair and carry_unused else 0)
+        # 1. Лимит перекрытий на текущей паре (если не освобождена последней парой)
+        if not skip_pair_limits:
+            allowed = self._mg_current_pair_allowed()
             if self.state.trades_on_pair >= allowed:
+                # used == limit, unused = 0, carry не растёт
                 self.state.switched_pairs.append(sym)
                 self.state.cycle_switches += 1
                 self.state.current_pair = None
                 self.state.trades_on_pair = 0
-                # перешли на максимуме — резерва от этой пары не остаётся
+                self.state.losses_streak_on_pair = 0
                 self._persist()
                 await self._notify(
                     f"🔀 Лимит {allowed} перекрытий на {sym} исчерпан — "
-                    f"перехожу на следующую пару. МГ-шаг {self.state.mg_step} сохранён."
+                    f"переход на следующую пару. МГ-шаг {self.state.mg_step} сохранён."
                 )
-                return  # next loop tick → _in_cycle_search_step
+                return
 
-        # Payout drop → switch (с переносом резерва). На последней паре игнор.
-        if not skip_per_pair_limit:
-            payout = int(self.feed.assets.get(sym, {}).get("payout", 0))
-            floor = self.cfg["filter"]["payout_floor"]
-            if payout < floor and self.state.cycle_switches < max_switches:
-                if carry_unused and per_pair_max > 0:
-                    unused = max(0, per_pair_max - self.state.trades_on_pair)
+        # 2. Триггер «N минусов подряд» (только на не-последней)
+        if not skip_pair_limits:
+            consec_limit = int(mg_cfg.get("consecutive_losses_switch", 0) or 0)
+            if consec_limit > 0 and self.state.losses_streak_on_pair >= consec_limit:
+                if carry_unused:
+                    pos_limit = self._mg_pair_limits()[self._mg_position()]
+                    unused = max(0, pos_limit - self.state.trades_on_pair)
                     self.state.cycle_unused_carry += unused
                 self.state.switched_pairs.append(sym)
                 self.state.cycle_switches += 1
                 self.state.current_pair = None
                 self.state.trades_on_pair = 0
+                self.state.losses_streak_on_pair = 0
                 self._persist()
                 await self._notify(
-                    f"🔄 Payout {payout}% < {floor}% на {sym} — переход (резерв: "
-                    f"{self.state.cycle_unused_carry} перекрытий). "
+                    f"🔁 {self.state.losses_streak_on_pair if False else consec_limit} минусов подряд на {sym} → переход "
+                    f"(резерв: {self.state.cycle_unused_carry} перекрытий). "
                     f"МГ-шаг {self.state.mg_step} сохранён."
                 )
-                return  # next loop tick → _in_cycle_search_step
+                return
 
-        # Stop-sum guardrail
+        # 3. Payout drop (только на не-последней)
+        if not skip_pair_limits:
+            payout = int(self.feed.assets.get(sym, {}).get("payout", 0))
+            floor = self.cfg["filter"]["payout_floor"]
+            if payout < floor:
+                if carry_unused:
+                    pos_limit = self._mg_pair_limits()[self._mg_position()]
+                    unused = max(0, pos_limit - self.state.trades_on_pair)
+                    self.state.cycle_unused_carry += unused
+                self.state.switched_pairs.append(sym)
+                self.state.cycle_switches += 1
+                self.state.current_pair = None
+                self.state.trades_on_pair = 0
+                self.state.losses_streak_on_pair = 0
+                self._persist()
+                await self._notify(
+                    f"🔄 Payout {payout}% < {floor}% на {sym} → переход "
+                    f"(резерв: {self.state.cycle_unused_carry} перекрытий). "
+                    f"МГ-шаг {self.state.mg_step} сохранён."
+                )
+                return
+
+        # 4. Stop-sum guardrail (всегда)
         next_amt = self._amount_for_step(self.state.mg_step)
         stop_sum = float(self.cfg["martingale"]["stop_sum"])
         if self.state.session_loss + next_amt > stop_sum:
@@ -1343,11 +1445,14 @@ class StateMachine:
                 f"Жду /resume."
             )
             return
-        if self.state.mg_step > int(self.cfg["martingale"]["max_steps"]):
+        # 5. Общий лимит цикла (cycle_total_limit, поддержка legacy max_steps)
+        total_limit = int(mg_cfg.get("cycle_total_limit",
+                                      mg_cfg.get("max_steps", 10)))
+        if self.state.mg_step > total_limit:
             self.state.waiting_resume = True
             self._persist()
             await self._notify(
-                f"🛑 Достигнут максимум догонов ({self.cfg['martingale']['max_steps']}). Жду /resume."
+                f"🛑 Достигнут общий лимит цикла ({total_limit} шагов). Жду /resume."
             )
             return
 
@@ -1411,11 +1516,13 @@ class StateMachine:
                 f"Жду /resume."
             )
             return
-        if self.state.mg_step > int(self.cfg["martingale"]["max_steps"]):
+        _mg = self.cfg.get("martingale") or {}
+        total_limit = int(_mg.get("cycle_total_limit", _mg.get("max_steps", 10)))
+        if self.state.mg_step > total_limit:
             self.state.waiting_resume = True
             self._persist()
             await self._notify(
-                f"🛑 Достигнут максимум догонов ({self.cfg['martingale']['max_steps']}). Жду /resume."
+                f"🛑 Достигнут общий лимит цикла ({total_limit} шагов). Жду /resume."
             )
             return
 
@@ -1650,12 +1757,16 @@ class StateMachine:
             "balance_after": self.feed.balance(),
             "mode": self.cfg["mode"],
         })
-        # Этап 3: постоянная пере-фильтрация. После каждого LOSS на текущей паре
-        # перепроверяем что её WR1-1000 / WR1-200 / payout всё ещё проходят.
-        # Если уже нет — помечаем для смены и переходим в SEARCH. Запускаем
-        # на ЛЮБОМ LOSS (включая первый в цикле, mg_step ещё 0) — нет смысла
-        # ждать второго минуса если пара перестала быть валидной.
-        if closed.result == "LOSS" and self.state.current_pair:
+        # Этап 3: постоянная пере-фильтрация в реальном времени. На КАЖДОЙ
+        # закрытой сделке (не только LOSS, не раз в час!) — заново классифицируем
+        # текущую пару на cached candles и обновляем _pair_scores. Если пара
+        # перестала проходить фильтр — баним (если max_losses_in_row превышен)
+        # или переходим в SEARCH.
+        if self.state.current_pair:
+            try:
+                self._reclassify_current_pair_now()
+            except Exception:
+                logger.exception("real-time reclassify failed")
             try:
                 self._verify_current_pair_still_passes()
             except Exception:
@@ -1666,6 +1777,7 @@ class StateMachine:
         if closed.result == "WIN":
             gained = closed.profit - opened.amount
             self.state.session_loss = max(0.0, self.state.session_loss - gained)
+            self.state.losses_streak_on_pair = 0
             self._reset_cycle()
             self._persist()
             base_msg = (
@@ -1685,6 +1797,7 @@ class StateMachine:
                 await self._notify(base_msg + "\n🔍 Возвращаюсь в поиск.")
         elif closed.result == "LOSS":
             self.state.session_loss += opened.amount
+            self.state.losses_streak_on_pair += 1
             mg_enabled = bool(self.cfg["martingale"].get("enabled", True))
             if mg_enabled:
                 self.state.mg_step += 1
@@ -1704,6 +1817,8 @@ class StateMachine:
                 )
             self._tick_event.set()
         else:  # DRAW
+            # DRAW не обнуляет streak (это «нейтральный» исход) — но и не
+            # увеличивает. Логика консистентна с экспирацией: refund != loss.
             self._persist()
             await self._notify(
                 f"➖ <b>DRAW {opened.asset}</b>\n"
@@ -1720,3 +1835,4 @@ class StateMachine:
         self.state.cycle_switches = 0
         self.state.switched_pairs = []
         self.state.cycle_unused_carry = 0
+        self.state.losses_streak_on_pair = 0

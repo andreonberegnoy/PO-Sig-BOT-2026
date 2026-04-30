@@ -730,18 +730,24 @@ class StateMachine:
         snap["votes_candle"] = votes.get("candle")
         snap["votes_total"]  = getattr(sig, "total", None)
 
-        # контекст
-        ts = int(times[i])
+        # контекст: hour_local и day_of_week берём из РЕАЛЬНОГО wall-clock
+        # времени когда бот зафиксировал сигнал — НЕ из candle.time. Причина:
+        # PO в WS-стриме шлёт timestamp с локальным офсетом (+2-3ч от UTC),
+        # который мы трактовали как UTC и потом ещё накладывали Kyiv/Helsinki —
+        # получалось двойное смещение, "час" сигнала уезжал на 2-3 часа вперёд.
+        # signal_ts в БД остаётся как PO даёт (для уникальности/сортировки),
+        # а hour_local/day_of_week отражают РЕАЛЬНЫЙ локальный час когда сигнал
+        # был обработан — это критично для фильтрации по времени торговли.
+        ts = int(times[i])  # для уникальности signal_ts (без изменений)
+        real_now = int(time.time())
         try:
             tz_name = (self.cfg.get("telegram") or {}).get("daily_report_timezone") or "Europe/Kyiv"
             tz = pytz.timezone(tz_name)
-            local = datetime.fromtimestamp(ts, tz=tz)
-            snap["hour_local"] = local.hour
-            snap["day_of_week"] = local.weekday()
+            local = datetime.fromtimestamp(real_now, tz=tz)
         except Exception:
-            local = datetime.utcfromtimestamp(ts)
-            snap["hour_local"] = local.hour
-            snap["day_of_week"] = local.weekday()
+            local = datetime.utcfromtimestamp(real_now)
+        snap["hour_local"] = local.hour
+        snap["day_of_week"] = local.weekday()
 
         try:
             snap["payout_at_signal"] = int((self.feed.assets.get(symbol) or {}).get("payout") or 0) or None

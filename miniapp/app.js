@@ -792,24 +792,10 @@
       const groupLabel = group === "hour" ? "24ч" : "по дням недели";
       const otherGroup = group === "hour" ? "dow" : "hour";
       const otherLabel = group === "hour" ? "📅 По дням" : "🕒 По часам";
-      // Колонки: stats до разделителя, market indicators после.
-      // Прокрутка горизонтальная — таблица в .analytics-table-wrap (overflow-x:auto).
-      const drillCols = [
-        { k: "signals",              h: "Сигналов" },
-        { k: "wr_chosen",            h: "WR exp %",       cls: wrClass },
-        { k: "wr_best",              h: "Best exp %",     cls: wrClass },
-        { k: "pluses",               h: "+" },
-        { k: "minuses",              h: "-" },
-        { k: "avg_payout",           h: "Avg payout" },
-        { k: "wr_real",              h: "WR real %",      cls: wrClass },
-        { k: "_sep_",                h: "│" },
-        { k: "avg_votes_total",      h: "Avg votes" },
-        { k: "avg_atr_ratio",        h: "Avg ATR ratio" },
-        { k: "avg_bb_position",      h: "Avg BB pos" },
-        { k: "avg_candle_atr_ratio", h: "Avg candle/ATR" },
-        { k: "avg_rsi_ma",           h: "Avg RSI MA" },
-        { k: "avg_qqe_trailing",     h: "Avg QQE" },
-      ];
+      // Drill-down показывает ТЕ ЖЕ колонки что и общая таблица (AN_COLS),
+      // только без "Пара" (drill-down уже привязан к одному символу).
+      // Прокрутка горизонтальная — .analytics-table-wrap (overflow-x:auto).
+      const drillCols = AN_COLS.filter((c) => c.k !== "symbol");
       let html = `<div class="card">
         <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:8px">
           <h3 style="margin:0; flex:1">📊 ${symbol} — ${groupLabel} (${data.period_days}д)</h3>

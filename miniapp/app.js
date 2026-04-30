@@ -69,6 +69,41 @@
     }
   });
 
+  // ─── Info-popover для ⓘ кнопок в настройках ────────────────────
+  // Один экземпляр на страницу, переиспользуется для всех ⓘ.
+  const infoPopover = document.createElement("div");
+  infoPopover.className = "info-popover";
+  infoPopover.innerHTML = `<div class="info-popover-body"></div><button class="info-popover-close">✕</button>`;
+  document.body.appendChild(infoPopover);
+  const infoPopBody = infoPopover.querySelector(".info-popover-body");
+  const closeInfoPop = () => infoPopover.classList.remove("show");
+  infoPopover.querySelector(".info-popover-close").addEventListener("click", (e) => {
+    e.stopPropagation();
+    closeInfoPop();
+  });
+  document.addEventListener("click", (e) => {
+    const btn = e.target.closest(".info-btn");
+    if (btn) {
+      e.stopPropagation();
+      infoPopBody.innerHTML = `<div class="info-popover-key">${btn.dataset.key || ""}</div>` +
+                              `<div>${btn.dataset.info || ""}</div>`;
+      // позиционирование: рядом с кнопкой, но clamp в viewport
+      const r = btn.getBoundingClientRect();
+      const vw = window.innerWidth;
+      infoPopover.classList.add("show");
+      // чуть позже измерим высоту и спозиционируем
+      const pw = Math.min(280, vw - 24);
+      infoPopover.style.maxWidth = pw + "px";
+      let left = r.left;
+      if (left + pw > vw - 12) left = vw - pw - 12;
+      if (left < 12) left = 12;
+      infoPopover.style.left = left + "px";
+      infoPopover.style.top = (r.bottom + 6) + "px";
+      return;
+    }
+    if (!e.target.closest(".info-popover")) closeInfoPop();
+  });
+
   const api = async (path, opts = {}) => {
     const res = await fetch(path, {
       ...opts,
@@ -305,45 +340,74 @@
     "🔍 Фильтр пар": [
       { k: "filter.asset_categories", t: "multi",
         options: ["forex", "crypto", "stocks", "indices", "commodities", "other"],
-        label: "Категории активов (пусто = все)" },
-      { k: "filter.min_payout", t: "int", min: 50, max: 95, label: "Мин. payout для первой сделки (%)" },
-      { k: "filter.payout_floor", t: "int", min: 50, max: 90, label: "Порог смены пары при падении payout (%)" },
-      { k: "filter.max_losses_in_row", t: "int", min: 1, max: 10, label: "Макс. минусов до бана" },
-      { k: "filter.min_wr1", t: "int", min: 0, max: 100, step: 5, label: "Мин. % 1-й сделки за 1000 свечей" },
-      { k: "filter.min_wr1_recent", t: "int", min: 0, max: 100, step: 5, label: "Мин. % 1-й сделки за 200 свечей" },
-      { k: "filter.recent_lookback_bars", t: "int", min: 50, max: 500, step: 50, label: "Окно recent (свечей)" },
-      { k: "filter.history_candles", t: "int", min: 200, max: 2000, label: "Размер истории" },
-      { k: "filter.ban_hours", t: "int", min: 1, max: 72, label: "Бан пары (часов)" },
-      { k: "filter.pause_minutes", t: "int", min: 5, max: 1440, step: 5, label: "Пауза за низкий recent WR1 (мин.)" },
-      { k: "filter.day_off_hours", t: "int", min: 1, max: 24, label: "День-офф (часов)" },
+        label: "Категории активов (пусто = все)",
+        desc: "какие типы активов разрешены к торговле; пусто = все доступные" },
+      { k: "filter.min_payout", t: "int", min: 50, max: 95, label: "Мин. payout для первой сделки (%)",
+        desc: "минимальная выплата чтобы зайти в ПЕРВУЮ сделку нового цикла" },
+      { k: "filter.payout_floor", t: "int", min: 50, max: 90, label: "Порог смены пары при падении payout (%)",
+        desc: "если выплата на текущей паре упала ниже — бот меняет пару (не для последней пары цикла)" },
+      { k: "filter.max_losses_in_row", t: "int", min: 1, max: 10, label: "Макс. минусов до бана",
+        desc: "если у пары серия минусов подряд > этого числа — 12ч бан" },
+      { k: "filter.min_wr1", t: "int", min: 0, max: 100, step: 5, label: "Мин. % 1-й сделки за 1000 свечей",
+        desc: "долгосрочный фильтр: пара с WR1 ниже не торгуется (skip, не бан)" },
+      { k: "filter.min_wr1_recent", t: "int", min: 0, max: 100, step: 5, label: "Мин. % 1-й сделки за 200 свечей",
+        desc: "фильтр свежей формы: пара ниже порога → пауза (не бан)" },
+      { k: "filter.recent_lookback_bars", t: "int", min: 50, max: 500, step: 50, label: "Окно recent (свечей)",
+        desc: "размер «свежего» окна для расчёта recent-статистики (default 200 свечей)" },
+      { k: "filter.history_candles", t: "int", min: 200, max: 2000, label: "Размер истории",
+        desc: "сколько свечей грузить на пару при старте (нужно ≥1000 для статистики)" },
+      { k: "filter.ban_hours", t: "int", min: 1, max: 72, label: "Бан пары (часов)",
+        desc: "длительность бана пары при провале max_losses_in_row" },
+      { k: "filter.pause_minutes", t: "int", min: 5, max: 1440, step: 5, label: "Пауза за низкий recent WR1 (мин.)",
+        desc: "короткая пауза ОДНОЙ пары при провале recent WR1 (остальные торгуются)" },
+      { k: "filter.day_off_hours", t: "int", min: 1, max: 24, label: "День-офф (часов)",
+        desc: "ГЛОБАЛЬНАЯ пауза всего бота если ни одна пара не прошла фильтр" },
     ],
     "💰 Торговля": [
-      { k: "trading.base_amount", t: "float", min: 0.5, max: 100, step: 0.5, label: "Базовая ставка ($)" },
-      { k: "trading.expiry_seconds", t: "int", min: 30, max: 600, label: "Экспирация (сек)" },
+      { k: "trading.base_amount", t: "float", min: 0.5, max: 100, step: 0.5, label: "Базовая ставка ($)",
+        desc: "сумма первой сделки нового цикла; от неё считаются все перекрытия" },
+      { k: "trading.expiry_seconds", t: "int", min: 30, max: 600, label: "Экспирация (сек)",
+        desc: "длительность открытой сделки в секундах (60 = 1 мин, 120 = 2 мин)" },
     ],
     "🎰 Мартингейл": [
-      { k: "martingale.enabled", t: "bool", label: "Включить мартингейл" },
-      { k: "martingale.coefficient", t: "float", min: 1.5, max: 5, step: 0.1, label: "Множитель", parent: "martingale.enabled" },
-      { k: "martingale.cycle_total_limit", t: "int", min: 1, max: 20, label: "Общий лимит сделок в цикле (РОВНО N сделок)", parent: "martingale.enabled" },
-      { k: "martingale.stop_sum", t: "float", min: 10, max: 10000, step: 50, label: "Стоп-сумма ($)", parent: "martingale.enabled" },
-      { k: "martingale.pair_limits", t: "intlist", label: "Перекрытия по парам через запятую (длина = число пар: «3,3,2» = 3 пары)", parent: "martingale.enabled" },
-      { k: "martingale.consecutive_losses_switch", t: "int", min: 0, max: 10, label: "Минусов подряд для switch (0 = выкл)", parent: "martingale.enabled" },
-      { k: "martingale.carry_unused", t: "bool", label: "Переносить неиспользованные перекрытия в резерв", parent: "martingale.enabled" },
-      { k: "martingale.last_pair_until_stop_sum", t: "bool", label: "На последней паре цикла торговать до stop-sum", parent: "martingale.enabled" },
-      { k: "martingale.manual_switch_counts", t: "bool", label: "Ручная смена пары засчитывается в счётчик", parent: "martingale.enabled" },
+      { k: "martingale.enabled", t: "bool", label: "Включить мартингейл",
+        desc: "вкл = удваивать после минуса; выкл = после LOSS сразу новый поиск с base" },
+      { k: "martingale.coefficient", t: "float", min: 1.5, max: 5, step: 0.1, label: "Множитель", parent: "martingale.enabled",
+        desc: "коэффициент удвоения ставки на каждое следующее перекрытие (2.1 = ×2.1)" },
+      { k: "martingale.cycle_total_limit", t: "int", min: 1, max: 20, label: "Общий лимит сделок в цикле (РОВНО N сделок)", parent: "martingale.enabled",
+        desc: "жёсткий потолок сделок в одном цикле; при достижении — стоп до /resume" },
+      { k: "martingale.stop_sum", t: "float", min: 10, max: 10000, step: 50, label: "Стоп-сумма ($)", parent: "martingale.enabled",
+        desc: "потолок потерь $ в цикле; при достижении — стоп до /resume" },
+      { k: "martingale.pair_limits", t: "intlist", label: "Сделок на каждой паре через запятую (длина = число пар)", parent: "martingale.enabled",
+        desc: "«3,3,2» = 3 пары (на 1-й до 3 сделок, на 2-й до 3, на последней до 2 + перенос резерва)" },
+      { k: "martingale.consecutive_losses_switch", t: "int", min: 0, max: 10, label: "Минусов подряд для switch (0 = выкл)", parent: "martingale.enabled",
+        desc: "после N минусов подряд на не-последней паре — переход с переносом резерва" },
+      { k: "martingale.carry_unused", t: "bool", label: "Переносить неиспользованные перекрытия в резерв", parent: "martingale.enabled",
+        desc: "если ушли с пары не исчерпав лимит — остаток отдадут последней паре цикла" },
+      { k: "martingale.last_pair_until_stop_sum", t: "bool", label: "На последней паре цикла торговать до stop-sum", parent: "martingale.enabled",
+        desc: "на последней паре игнорить лимит/payout/серии и торговать до WIN или stop-sum" },
+      { k: "martingale.manual_switch_counts", t: "bool", label: "Ручная смена пары засчитывается в счётчик", parent: "martingale.enabled",
+        desc: "если меняешь пару руками через UI/TG — считается как cycle_switches" },
     ],
     "⏰ Расписание работы": [
-      { k: "schedule.enabled", t: "bool", label: "Работать по расписанию (снять = 24/7 круглосуточно)" },
-      { k: "schedule.start_hour", t: "int", min: 0, max: 23, label: "Час начала (0-23)", parent: "schedule.enabled" },
-      { k: "schedule.end_hour", t: "int", min: 0, max: 24, label: "Час конца (0-24)", parent: "schedule.enabled" },
-      { k: "schedule.no_weekends", t: "bool", label: "📅 Не торговать на выходных (Сб/Вс)", parent: "schedule.enabled" },
+      { k: "schedule.enabled", t: "bool", label: "Работать по расписанию (снять = 24/7 круглосуточно)",
+        desc: "вкл = торговать только в указанные часы; аналитика пишется 24/7 в любом случае" },
+      { k: "schedule.start_hour", t: "int", min: 0, max: 23, label: "Час начала (0-23)", parent: "schedule.enabled",
+        desc: "час открытия торгового окна в локальной TZ (telegram.daily_report_timezone)" },
+      { k: "schedule.end_hour", t: "int", min: 0, max: 24, label: "Час конца (0-24)", parent: "schedule.enabled",
+        desc: "час закрытия торгового окна; активный цикл доводится до WIN даже после конца" },
+      { k: "schedule.no_weekends", t: "bool", label: "📅 Не торговать на выходных (Сб/Вс)", parent: "schedule.enabled",
+        desc: "вкл = пропускать субботу и воскресенье; аналитика всё равно пишется" },
     ],
     "🗄 Хранение аналитики": [
-      { k: "retention.signals_days", t: "int", min: 30, max: 365, step: 30, label: "Хранить signals (дней, 30-365)" },
+      { k: "retention.signals_days", t: "int", min: 30, max: 365, step: 30, label: "Хранить signals (дней, 30-365)",
+        desc: "сколько дней держать историю сигналов в БД; старше — удаляются раз в сутки" },
     ],
     "📋 Периодический отчёт": [
-      { k: "periodic_report.enabled", t: "bool", label: "Присылать сводку раз в сутки" },
-      { k: "periodic_report.hour", t: "int", min: 0, max: 23, label: "Час отправки (0–23, локальная TZ)", parent: "periodic_report.enabled" },
+      { k: "periodic_report.enabled", t: "bool", label: "Присылать сводку раз в сутки",
+        desc: "ежедневная сводка в TG: баланс, профит, минусы подряд, выплаты" },
+      { k: "periodic_report.hour", t: "int", min: 0, max: 23, label: "Час отправки (0–23, локальная TZ)", parent: "periodic_report.enabled",
+        desc: "час отправки; если в этот час идёт мартингейл-цикл — ждёт его закрытия" },
     ],
   };
 
@@ -399,7 +463,14 @@
             input = `<input type="number" data-k="${it.k}" data-t="${it.t}"
                             min="${it.min ?? ""}" max="${it.max ?? ""}" step="${step}" value="${v ?? ""}"/>`;
           }
-          row.innerHTML = `<label>${it.label}<span class="hint">${it.k}</span></label>${input}`;
+          // ⓘ button рядом с лейблом — клик показывает popover с it.desc.
+          // Если desc нет — ⓘ скрыта. Технический ключ (it.k) больше не
+          // показываем по умолчанию, чтобы не захламлять UI; он остаётся
+          // в data-key для отладки.
+          const infoBtn = it.desc
+            ? `<button class="info-btn" type="button" data-info="${it.desc.replace(/"/g, "&quot;")}" data-key="${it.k}" title="Что это">ⓘ</button>`
+            : "";
+          row.innerHTML = `<label>${it.label} ${infoBtn}</label>${input}`;
 
           if (it.parent) {
             // append в child-группу parent'а

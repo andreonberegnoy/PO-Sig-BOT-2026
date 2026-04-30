@@ -104,17 +104,16 @@ def generate_signals(candles: list[dict], params: dict) -> tuple[list[Signal], d
     closes = [c["close"] for c in candles]
 
     rsi_ma, trailing = qqe(closes, p["rsiPeriod"], p["rsiSmoothing"], p["qqeFactor"])
-    # HTF must group by absolute wall-time (e.g. 11:45-11:50, 11:50-11:55),
-    # NOT by buffer-relative index. Otherwise the boundary shifts whenever
-    # the buffer slides, causing earlier 4/5 signals to silently become 3/5
-    # ("repaint") on later renders. Infer tf from median time-delta.
-    tf_sec = 60
-    if len(times) >= 3:
-        deltas = sorted(times[i+1] - times[i] for i in range(len(times) - 1))
-        tf_sec = max(1, int(deltas[len(deltas) // 2]))
+    # HTF: буфер-относительная группировка (`floor(i / mult)`) — 1:1 с JS-индикатором
+    # PoSignals «CONSENSUS 4/5». Раньше тут была wall-time группировка чтобы
+    # избежать «repaint» при сдвиге буфера, но это давало расхождения с
+    # эталонным индикатором (на USDDZD: max_loss_streak=2 у нас vs 7 у PoSignals).
+    # Теперь полностью совпадает; ценой — лёгкая нестабильность signal-set
+    # при пересчёте на сдвинутом буфере (одни и те же бары могут давать
+    # 4/5 ↔ 3/5 в зависимости от offset).
     htf = htf_trend(opens, highs, lows, closes, p["htfMultiplier"],
                     p["htfMaPeriod"], p["htfMaType"],
-                    times=times, tf_seconds=tf_sec)
+                    times=None)   # ← buffer-relative grouping
     atr_arr = atr(highs, lows, closes, p["atrPeriod"])
     atr_avg = sma(atr_arr, p["atrAvgWindow"])
     bb = bollinger(closes, p["bbPeriod"], p["bbStdDev"])

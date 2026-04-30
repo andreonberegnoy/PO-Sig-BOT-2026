@@ -792,32 +792,53 @@
       const groupLabel = group === "hour" ? "24ч" : "по дням недели";
       const otherGroup = group === "hour" ? "dow" : "hour";
       const otherLabel = group === "hour" ? "📅 По дням" : "🕒 По часам";
+      // Колонки: stats до разделителя, market indicators после.
+      // Прокрутка горизонтальная — таблица в .analytics-table-wrap (overflow-x:auto).
+      const drillCols = [
+        { k: "signals",              h: "Сигналов" },
+        { k: "wr_chosen",            h: "WR exp %",       cls: wrClass },
+        { k: "wr_best",              h: "Best exp %",     cls: wrClass },
+        { k: "pluses",               h: "+" },
+        { k: "minuses",              h: "-" },
+        { k: "avg_payout",           h: "Avg payout" },
+        { k: "wr_real",              h: "WR real %",      cls: wrClass },
+        { k: "_sep_",                h: "│" },
+        { k: "avg_votes_total",      h: "Avg votes" },
+        { k: "avg_atr_ratio",        h: "Avg ATR ratio" },
+        { k: "avg_bb_position",      h: "Avg BB pos" },
+        { k: "avg_candle_atr_ratio", h: "Avg candle/ATR" },
+        { k: "avg_rsi_ma",           h: "Avg RSI MA" },
+        { k: "avg_qqe_trailing",     h: "Avg QQE" },
+      ];
       let html = `<div class="card">
         <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:8px">
           <h3 style="margin:0; flex:1">📊 ${symbol} — ${groupLabel} (${data.period_days}д)</h3>
           <button id="btn-drill-toggle" class="btn">${otherLabel}</button>
           <button id="btn-hourly-close" class="btn">✕</button>
         </div>
+        <p class="hint" style="font-size:11px;margin:0 0 6px">Свайпни таблицу влево — там ещё индикаторы (ATR, BB, RSI, QQE, votes).</p>
         <div class="analytics-table-wrap">
         <table class="analytics-table"><thead><tr>
-          <th>${group === "hour" ? "Час" : "День"}</th><th>Сигналов</th>
-          <th>WR exp %</th><th>Best exp %</th><th>+</th><th>-</th>
-          <th>Avg payout</th><th>WR real %</th>
-        </tr></thead><tbody>`;
+          <th>${group === "hour" ? "Час" : "День"}</th>` +
+          drillCols.map((c) => c.k === "_sep_"
+            ? `<th class="sep">${c.h}</th>`
+            : `<th>${c.h}</th>`
+          ).join("") +
+        `</tr></thead><tbody>`;
       for (let i = 0; i < range; i++) {
         const r = byKey[i];
         if (!r) {
-          html += `<tr class="hint"><td>${labelFor(i)}</td><td colspan="7">—</td></tr>`;
+          html += `<tr class="hint"><td>${labelFor(i)}</td><td colspan="${drillCols.length}">—</td></tr>`;
           continue;
         }
-        html += `<tr><td>${labelFor(i)}</td>
-          <td>${r.signals}</td>
-          <td class="${wrClass(r.wr_chosen)}">${fmtCell(r.wr_chosen, "wr_chosen")}</td>
-          <td class="${wrClass(r.wr_best)}">${fmtCell(r.wr_best, "wr_best")}</td>
-          <td>${r.pluses}</td><td>${r.minuses}</td>
-          <td>${fmtCell(r.avg_payout)}</td>
-          <td class="${wrClass(r.wr_real)}">${fmtCell(r.wr_real, "wr_real")}</td>
-        </tr>`;
+        html += `<tr><td>${labelFor(i)}</td>` +
+          drillCols.map((c) => {
+            if (c.k === "_sep_") return `<td class="sep">│</td>`;
+            const v = r[c.k];
+            const cls = c.cls ? c.cls(v) : "";
+            return `<td class="${cls}">${fmtCell(v, c.k)}</td>`;
+          }).join("") +
+        `</tr>`;
       }
       html += `</tbody></table></div></div>`;
       wrap.innerHTML = html;

@@ -181,6 +181,40 @@
       console.error(e);
     }
   }
+  async function loadActiveCycle(s) {
+    const card = document.getElementById("active-cycle-card");
+    if (!card) return;
+    const inCycle = (s.mg_step ?? 0) > 0 || s.current_pair;
+    card.style.display = inCycle ? "" : "none";
+    if (!inCycle) return;
+    document.getElementById("ac-current").textContent = s.current_pair || "🔍 поиск";
+    document.getElementById("ac-original").textContent = s.original_pair || "—";
+    document.getElementById("ac-direction").textContent = s.direction
+      ? (s.direction.toUpperCase() + (s.direction === "call" ? " ⬆" : " ⬇"))
+      : "—";
+    document.getElementById("ac-trades-on-pair").textContent = s.trades_on_pair ?? 0;
+    document.getElementById("ac-switches").textContent = s.cycle_switches ?? 0;
+    document.getElementById("ac-carry").textContent = s.cycle_unused_carry ?? 0;
+    const sp = s.switched_pairs || [];
+    document.getElementById("ac-switched-pairs").textContent = sp.length ? sp.join(", ") : "—";
+  }
+
+  function loadDayOff(s) {
+    const card = document.getElementById("day-off-card");
+    if (!card) return;
+    const until = s.day_off_until || 0;
+    const now = Math.floor(Date.now() / 1000);
+    if (until > now) {
+      card.style.display = "";
+      const remainMin = Math.round((until - now) / 60);
+      const endLocal = new Date(until * 1000).toLocaleString();
+      document.getElementById("day-off-meta").textContent =
+        `Осталось ~${remainMin} мин. Конец: ${endLocal}.`;
+    } else {
+      card.style.display = "none";
+    }
+  }
+
   async function loadProfitToday() {
     try {
       const p = await api("/api/profit_today");
@@ -198,9 +232,22 @@
       if (lEl) lEl.textContent = p.losses ?? 0;
     } catch (e) { /* silent */ }
   }
-  // Зов loadStatus также обновит profit-today
+  // Зов loadStatus также обновит profit-today + active cycle + day-off
   const _origLoadStatus = loadStatus;
-  loadStatus = async function () { await _origLoadStatus(); loadProfitToday(); };
+  loadStatus = async function () {
+    await _origLoadStatus();
+    loadProfitToday();
+    try {
+      const s = await api("/api/status");
+      loadActiveCycle(s);
+      loadDayOff(s);
+      const fActive = !!s.filter_active;
+      const sBadge = document.getElementById("m-strategy");
+      if (sBadge && s.active_strategy) {
+        sBadge.innerHTML = `${s.active_strategy} ${fActive ? '<span class="badge active" style="font-size:10px">🎯 фильтр</span>' : ''}`;
+      }
+    } catch (e) { /* silent */ }
+  };
 
   document.getElementById("btn-refresh").onclick = loadStatus;
   document.getElementById("btn-pause").onclick = async () => {
@@ -262,8 +309,6 @@
     "💰 Торговля": [
       { k: "trading.base_amount", t: "float", min: 0.5, max: 100, step: 0.5, label: "Базовая ставка ($)" },
       { k: "trading.expiry_seconds", t: "int", min: 30, max: 600, label: "Экспирация (сек)" },
-      { k: "trading.limit_trades_per_pair_enabled", t: "bool", label: "Лимит сделок на паре (вкл/выкл)" },
-      { k: "trading.max_trades_on_pair", t: "int", min: 1, max: 10, label: "Макс. сделок на паре" },
       { k: "trading.max_pair_switch_per_cycle", t: "int", min: 0, max: 5, label: "Смен пары за цикл" },
     ],
     "🎰 Мартингейл": [
@@ -676,51 +721,214 @@
     }
   }
 
-  async function loadHourly(symbol) {
+  async function loadHourly(symbol, group = "hour") {
     const wrap = document.getElementById("an-hourly");
     wrap.style.display = "";
-    wrap.innerHTML = `<div class="card"><h3>📊 ${symbol} — 24ч разбивка</h3><div>Загрузка…</div></div>`;
+    wrap.innerHTML = `<div class="card"><h3>📊 ${symbol} — drill-down</h3><div>Загрузка…</div></div>`;
     try {
       const { params } = getAnFilters();
       params.set("symbol", symbol);
+      params.set("group", group);
       const data = await api(`/api/analytics/hourly?${params.toString()}`);
       const rows = data.rows || [];
-      // build 24-row table indexed by hour (fill missing with —)
-      const byHour = {};
-      rows.forEach((r) => { byHour[r.hour] = r; });
-      let html = `<div class="card"><h3>📊 ${symbol} — 24ч разбивка (${data.period_days}д)</h3>`;
-      html += `<table class="analytics-table"><thead><tr>
-        <th>Час</th><th>Сигналов</th><th>WR exp %</th><th>Best exp %</th>
-        <th>+</th><th>-</th><th>Avg payout</th><th>WR real %</th>
-      </tr></thead><tbody>`;
-      for (let h = 0; h < 24; h++) {
-        const r = byHour[h];
+      const byKey = {};
+      rows.forEach((r) => { byKey[group === "hour" ? r.hour : r.dow] = r; });
+      const dowNames = ["Пн","Вт","Ср","Чт","Пт","Сб","Вс"];
+      const labelFor = (i) => group === "hour"
+        ? `${String(i).padStart(2, "0")}:00`
+        : dowNames[i] || "?";
+      const range = group === "hour" ? 24 : 7;
+      const groupLabel = group === "hour" ? "24ч" : "по дням недели";
+      const otherGroup = group === "hour" ? "dow" : "hour";
+      const otherLabel = group === "hour" ? "📅 По дням" : "🕒 По часам";
+      let html = `<div class="card">
+        <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:8px">
+          <h3 style="margin:0; flex:1">📊 ${symbol} — ${groupLabel} (${data.period_days}д)</h3>
+          <button id="btn-drill-toggle" class="btn">${otherLabel}</button>
+          <button id="btn-hourly-close" class="btn">✕</button>
+        </div>
+        <div class="analytics-table-wrap">
+        <table class="analytics-table"><thead><tr>
+          <th>${group === "hour" ? "Час" : "День"}</th><th>Сигналов</th>
+          <th>WR exp %</th><th>Best exp %</th><th>+</th><th>-</th>
+          <th>Avg payout</th><th>WR real %</th>
+        </tr></thead><tbody>`;
+      for (let i = 0; i < range; i++) {
+        const r = byKey[i];
         if (!r) {
-          html += `<tr class="hint"><td>${String(h).padStart(2, "0")}:00</td><td colspan="7">—</td></tr>`;
+          html += `<tr class="hint"><td>${labelFor(i)}</td><td colspan="7">—</td></tr>`;
           continue;
         }
-        html += `<tr><td>${String(h).padStart(2, "0")}:00</td>
+        html += `<tr><td>${labelFor(i)}</td>
           <td>${r.signals}</td>
           <td class="${wrClass(r.wr_chosen)}">${fmtCell(r.wr_chosen, "wr_chosen")}</td>
           <td class="${wrClass(r.wr_best)}">${fmtCell(r.wr_best, "wr_best")}</td>
-          <td>${r.pluses}</td>
-          <td>${r.minuses}</td>
+          <td>${r.pluses}</td><td>${r.minuses}</td>
           <td>${fmtCell(r.avg_payout)}</td>
           <td class="${wrClass(r.wr_real)}">${fmtCell(r.wr_real, "wr_real")}</td>
         </tr>`;
       }
-      html += `</tbody></table>
-        <div class="actions" style="margin-top:8px"><button id="btn-hourly-close" class="btn">✕ Закрыть</button></div>
-      </div>`;
+      html += `</tbody></table></div></div>`;
       wrap.innerHTML = html;
       document.getElementById("btn-hourly-close").addEventListener("click", () => {
-        wrap.style.display = "none";
-        wrap.innerHTML = "";
+        wrap.style.display = "none"; wrap.innerHTML = "";
+      });
+      document.getElementById("btn-drill-toggle").addEventListener("click", () => {
+        loadHourly(symbol, otherGroup);
       });
     } catch (e) {
       wrap.innerHTML = `<div class="card err">Ошибка: ${e.message}</div>`;
     }
   }
+
+  // ─── filter UI (этап 3) ───────────────────────────────────────────────
+  // Поля фильтра: тип, label, описание. Числовые показываются парами min/max.
+  const FILTER_FIELDS = [
+    { k: "atr_ratio_min",         t: "float", label: "ATR ratio мин"      },
+    { k: "atr_ratio_max",         t: "float", label: "ATR ratio макс"     },
+    { k: "bb_position_min",       t: "float", label: "BB позиция мин"      },
+    { k: "bb_position_max",       t: "float", label: "BB позиция макс"     },
+    { k: "candle_atr_ratio_max",  t: "float", label: "Candle / ATR макс"   },
+    { k: "rsi_ma_min",            t: "float", label: "RSI MA мин"          },
+    { k: "rsi_ma_max",            t: "float", label: "RSI MA макс"         },
+    { k: "payout_min",            t: "int",   label: "Payout мин (%)"      },
+    { k: "votes_total_min",       t: "int",   label: "Votes total мин"     },
+    { k: "hours_allowed",         t: "hours", label: "Разрешённые часы"    },
+    { k: "dow_allowed",           t: "dow",   label: "Разрешённые дни"     },
+  ];
+  const DOW_NAMES = ["Пн","Вт","Ср","Чт","Пт","Сб","Вс"];
+
+  let _filterDraft = null; // {key: value} — редактируемое состояние
+
+  function _activeStrategyName() {
+    return document.getElementById("m-strategy")?.textContent?.split(" ")[0] || "consensus";
+  }
+
+  function renderFilterForm(spec) {
+    _filterDraft = {...spec};
+    const f = document.getElementById("filter-form");
+    document.getElementById("filter-enabled").checked = !!spec.enabled;
+    const meta = document.getElementById("filter-meta");
+    if (spec.based_on) {
+      const b = spec.based_on;
+      meta.textContent = `Построен по ${b.winning_signals || 0} winning из ${b.total_signals || 0} сигналов · экспирация ${b.expiry_bars || "?"} бар(а)` +
+        (spec.warning ? ` · ⚠️ ${spec.warning}` : "");
+    } else {
+      meta.textContent = "Фильтр сохранён вручную.";
+    }
+    f.innerHTML = FILTER_FIELDS.map((it) => {
+      const v = spec[it.k];
+      if (it.t === "hours") {
+        const arr = Array.isArray(v) ? v : [];
+        const opts = Array.from({length: 24}, (_, h) =>
+          `<label class="dow-opt"><input type="checkbox" data-fk="${it.k}" data-h="${h}" ${arr.includes(h) ? "checked" : ""}/> ${String(h).padStart(2,"0")}</label>`
+        ).join("");
+        return `<div class="setting-row"><label>${it.label}</label><div class="multi-row">${opts}</div></div>`;
+      }
+      if (it.t === "dow") {
+        const arr = Array.isArray(v) ? v : [];
+        const opts = DOW_NAMES.map((n, i) =>
+          `<label class="dow-opt"><input type="checkbox" data-fk="${it.k}" data-d="${i}" ${arr.includes(i) ? "checked" : ""}/> ${n}</label>`
+        ).join("");
+        return `<div class="setting-row"><label>${it.label}</label><div class="multi-row">${opts}</div></div>`;
+      }
+      const step = it.t === "int" ? 1 : 0.001;
+      return `<div class="setting-row">
+        <label>${it.label}<span class="hint">${it.k}</span></label>
+        <input type="number" step="${step}" data-fk="${it.k}" data-ft="${it.t}" value="${v ?? ""}"/>
+      </div>`;
+    }).join("");
+    // bind change handlers
+    f.querySelectorAll("[data-fk]").forEach((el) => {
+      el.addEventListener("change", () => {
+        const k = el.dataset.fk;
+        if (el.dataset.h !== undefined) {
+          // hours collect
+          const arr = [];
+          f.querySelectorAll(`[data-fk="${k}"]:checked`).forEach((c) => arr.push(parseInt(c.dataset.h)));
+          _filterDraft[k] = arr.sort((a,b)=>a-b);
+        } else if (el.dataset.d !== undefined) {
+          const arr = [];
+          f.querySelectorAll(`[data-fk="${k}"]:checked`).forEach((c) => arr.push(parseInt(c.dataset.d)));
+          _filterDraft[k] = arr.sort((a,b)=>a-b);
+        } else {
+          const t = el.dataset.ft;
+          const raw = el.value;
+          _filterDraft[k] = raw === "" ? null : (t === "int" ? parseInt(raw) : parseFloat(raw));
+        }
+      });
+    });
+    document.getElementById("filter-enabled").addEventListener("change", (e) => {
+      _filterDraft.enabled = e.target.checked;
+    });
+  }
+
+  async function buildFilterPreview() {
+    const strat = _activeStrategyName();
+    const { params } = getAnFilters();
+    const days = parseInt(params.get("period_days"));
+    const hf = params.get("hour_from"); const ht = params.get("hour_to");
+    const dow = params.get("dow");
+    const payload = {
+      period_days: days,
+      hour_from: hf ? parseInt(hf) : null,
+      hour_to: ht ? parseInt(ht) : null,
+      dow: dow ? dow.split(",").map(Number) : null,
+      use_best_exp: false,
+    };
+    try {
+      const spec = await api(`/api/strategies/${encodeURIComponent(strat)}/filter/preview`, {
+        method: "POST", body: JSON.stringify(payload),
+      });
+      document.getElementById("filter-block").style.display = "";
+      renderFilterForm(spec);
+    } catch (e) {
+      alert("Не удалось построить фильтр: " + e.message);
+    }
+  }
+
+  async function loadActiveFilter() {
+    const strat = _activeStrategyName();
+    try {
+      const spec = await api(`/api/strategies/${encodeURIComponent(strat)}/filter`);
+      if (spec && Object.keys(spec).length > 0) {
+        document.getElementById("filter-block").style.display = "";
+        renderFilterForm(spec);
+      } else {
+        document.getElementById("filter-block").style.display = "none";
+      }
+    } catch (e) { /* silent */ }
+  }
+
+  document.getElementById("btn-an-build-filter")?.addEventListener("click", buildFilterPreview);
+  document.getElementById("btn-filter-collapse")?.addEventListener("click", () => {
+    document.getElementById("filter-block").style.display = "none";
+  });
+  document.getElementById("btn-filter-rebuild")?.addEventListener("click", buildFilterPreview);
+  document.getElementById("btn-filter-save")?.addEventListener("click", async () => {
+    const strat = _activeStrategyName();
+    if (!_filterDraft) return;
+    try {
+      await api(`/api/strategies/${encodeURIComponent(strat)}/filter`, {
+        method: "PUT", body: JSON.stringify(_filterDraft),
+      });
+      alert("✓ Фильтр сохранён" + (_filterDraft.enabled ? " и активен" : " (выключен)"));
+      loadStatus();
+    } catch (e) {
+      alert("Ошибка: " + e.message);
+    }
+  });
+  document.getElementById("btn-filter-delete")?.addEventListener("click", async () => {
+    if (!confirm("Удалить активный фильтр?")) return;
+    const strat = _activeStrategyName();
+    try {
+      await api(`/api/strategies/${encodeURIComponent(strat)}/filter`, { method: "DELETE" });
+      document.getElementById("filter-block").style.display = "none";
+      loadStatus();
+    } catch (e) {
+      alert("Ошибка: " + e.message);
+    }
+  });
 
   // period buttons
   document.querySelectorAll(".period-btn").forEach((b) => {

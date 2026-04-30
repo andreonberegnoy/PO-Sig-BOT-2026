@@ -100,6 +100,22 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
             "active_syms": sum(1 for v in (getattr(sm, "_tick_counts", {}) or {}).values() if v > 0) if sm else 0,
             "base_amount": (cfg.get("trading") or {}).get("base_amount", 1),
             "expiry_seconds": (cfg.get("trading") or {}).get("expiry_seconds", 120),
+            # Этап 3 — расширенный статус для UI
+            "day_off_until": getattr(s, "day_off_until", 0),
+            "cycle_unused_carry": getattr(s, "cycle_unused_carry", 0),
+            "cycle_switches": getattr(s, "cycle_switches", 0),
+            "switched_pairs": list(getattr(s, "switched_pairs", []) or []),
+            "original_pair": getattr(s, "original_pair", None),
+            "direction": getattr(s, "direction", None),
+            "trades_on_pair": getattr(s, "trades_on_pair", 0),
+            "active_cycle_pairs": (
+                [p for p in [getattr(s, "current_pair", None)] if p]
+                + list(getattr(s, "switched_pairs", []) or [])
+            ) if (getattr(s, "mg_step", 0) > 0 or getattr(s, "current_pair", None)) else [],
+            "filter_active": bool(
+                journal and registry and
+                ((journal.signal_filter_get(registry.active_name) or {}).get("enabled"))
+            ),
         }
 
     # ─── settings ───
@@ -303,8 +319,10 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
     async def analytics_hourly(request: Request,
                                 symbol: str,
                                 period_days: int = 30,
-                                strategy: Optional[str] = None):
-        """Drill-down: 24-часовая разбивка для одной пары."""
+                                strategy: Optional[str] = None,
+                                group: str = "hour"):
+        """Drill-down: разбивка для одной пары. group=hour (24-часовая) или
+        group=dow (по дням недели Mon..Sun)."""
         _auth(request)
         if not journal:
             raise HTTPException(503, "journal not ready")
@@ -313,12 +331,13 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
         strat = strategy or (registry.active_name if registry else None)
         ind_cfg = (cfg.get("indicator") or {})
         eb = int(ind_cfg.get("expiryBars", 2))
+        kwargs = {"group_by_hour": True} if group == "hour" else {"group_by_dow": True}
         rows = journal.analytics_aggregate(
             since_ts=since, strategy_name=strat,
-            expiry_bars_default=eb, group_by_hour=True, only_symbol=symbol,
+            expiry_bars_default=eb, only_symbol=symbol, **kwargs,
         )
         return {"symbol": symbol, "period_days": period_days,
-                "strategy": strat, "rows": rows}
+                "strategy": strat, "group": group, "rows": rows}
 
     @app.get("/api/analytics/csv")
     async def analytics_csv(request: Request,
@@ -384,6 +403,82 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
             "db_size_bytes": journal.signals_db_size_bytes(),
             "retention_days": int((cfg.get("retention") or {}).get("signals_days", 180)),
         }
+
+    # ─── per-strategy signal filter (Stage 3) ───
+    @app.post("/api/strategies/{name}/filter/preview")
+    async def filter_preview(request: Request, name: str, payload: dict = None):
+        """Считает предполагаемые границы фильтра по winning signals в срезе.
+        Возвращает spec — НЕ сохраняет. Юзер потом редактирует и шлёт PUT.
+        Payload: {period_days, hour_from, hour_to, dow, use_best_exp}.
+        """
+        _auth(request)
+        if not journal:
+            raise HTTPException(503, "journal not ready")
+        import time as _t
+        p = payload or {}
+        period_days = int(p.get("period_days") or 30)
+        since = int(_t.time()) - max(1, period_days) * 86400
+        hf = p.get("hour_from"); ht = p.get("hour_to")
+        dow = p.get("dow")
+        ind_cfg = (cfg.get("indicator") or {})
+        eb = int(ind_cfg.get("expiryBars", 2))
+        spec = journal.build_filter_preview(
+            strategy_name=name, since_ts=since,
+            hour_from=hf, hour_to=ht, dow=dow,
+            expiry_bars=eb, use_best_exp=bool(p.get("use_best_exp")),
+        )
+        return spec
+
+    @app.get("/api/strategies/{name}/filter")
+    async def filter_get(request: Request, name: str):
+        _auth(request)
+        if not journal:
+            return {}
+        return journal.signal_filter_get(name) or {}
+
+    @app.put("/api/strategies/{name}/filter")
+    async def filter_set(request: Request, name: str, spec: dict):
+        _auth(request)
+        if not journal:
+            raise HTTPException(503, "journal not ready")
+        if not isinstance(spec, dict):
+            raise HTTPException(400, "expected dict")
+        # Базовая валидация — обрезать неизвестные поля чтобы не разносить мусор
+        ALLOWED = {
+            "enabled", "atr_ratio_min", "atr_ratio_max",
+            "bb_position_min", "bb_position_max",
+            "candle_atr_ratio_max", "rsi_ma_min", "rsi_ma_max",
+            "payout_min", "votes_total_min",
+            "hours_allowed", "dow_allowed",
+            "based_on", "note",
+        }
+        clean = {k: v for k, v in spec.items() if k in ALLOWED}
+        clean["enabled"] = bool(clean.get("enabled", False))
+        journal.signal_filter_set(name, clean)
+        return {"ok": True, "filter": journal.signal_filter_get(name)}
+
+    @app.delete("/api/strategies/{name}/filter")
+    async def filter_delete(request: Request, name: str):
+        _auth(request)
+        if not journal:
+            return {"ok": True}
+        journal.signal_filter_delete(name)
+        return {"ok": True}
+
+    @app.get("/api/strategies/{name}/filter/export")
+    async def filter_export(request: Request, name: str):
+        """Скачать активный фильтр как JSON для ручного редактирования."""
+        _auth(request)
+        if not journal:
+            raise HTTPException(503, "journal not ready")
+        spec = journal.signal_filter_get(name) or {}
+        import json as _json
+        from fastapi.responses import PlainTextResponse
+        body = _json.dumps(spec, ensure_ascii=False, indent=2)
+        return PlainTextResponse(
+            body, media_type="application/json",
+            headers={"Content-Disposition": f"attachment; filename=filter_{name}.json"},
+        )
 
     @app.get("/api/profit_today")
     async def get_profit_today(request: Request):

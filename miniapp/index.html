@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <title>PO-Sig Bot</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
-<link rel="stylesheet" href="/miniapp/style.css?v=20260513" />
+<link rel="stylesheet" href="/miniapp/style.css?v=20260514" />
 </head>
 <body>
 <header>
@@ -48,6 +48,25 @@
         <button id="btn-reset-cycle" class="btn">🔄 Сбросить цикл (FREE)</button>
       </div>
       <div id="action-msg" class="action-msg" style="margin-top:8px"></div>
+    </div>
+
+    <div class="card" id="active-cycle-card" style="display:none">
+      <h3>🎯 Активный цикл</h3>
+      <table class="kv">
+        <tr><td>Текущая пара:</td><td id="ac-current">—</td></tr>
+        <tr><td>Изначальная:</td><td id="ac-original">—</td></tr>
+        <tr><td>Сторона:</td><td id="ac-direction">—</td></tr>
+        <tr><td>Сделок на паре:</td><td id="ac-trades-on-pair">—</td></tr>
+        <tr><td>Смен пары:</td><td id="ac-switches">—</td></tr>
+        <tr><td>Резерв перекрытий:</td><td id="ac-carry">—</td></tr>
+        <tr><td>Использованные пары:</td><td id="ac-switched-pairs">—</td></tr>
+      </table>
+    </div>
+
+    <div class="card" id="day-off-card" style="display:none">
+      <h3>😴 Day-off активен</h3>
+      <p class="hint" id="day-off-meta">—</p>
+      <p class="hint">Бот не сканирует и не торгует до окончания паузы. Можно снять через «🔄 Сбросить цикл (FREE)» — пауза снимется автоматически.</p>
     </div>
 
     <div class="card">
@@ -160,6 +179,23 @@
             <div class="actions">
               <button id="btn-an-apply" class="btn primary">🔄 Применить</button>
               <button id="btn-an-csv" class="btn">⬇️ CSV</button>
+              <button id="btn-an-build-filter" class="btn">🎯 Построить фильтр</button>
+            </div>
+          </div>
+
+          <!-- Block: editable filter (этап 3) -->
+          <div id="filter-block" style="display:none; margin-top: 14px; padding: 12px; background: rgba(96, 165, 250, 0.05); border-radius: 8px; border-left: 3px solid var(--button);">
+            <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom: 8px">
+              <h3 style="margin:0; flex:1">🎯 Фильтр сигналов</h3>
+              <label class="dow-opt"><input type="checkbox" id="filter-enabled"/> Включить</label>
+              <button id="btn-filter-delete" class="btn-mini">🗑</button>
+            </div>
+            <p class="hint" id="filter-meta">—</p>
+            <div id="filter-form"></div>
+            <div class="actions" style="margin-top:8px">
+              <button id="btn-filter-save" class="btn primary">💾 Сохранить</button>
+              <button id="btn-filter-rebuild" class="btn">🔄 Пересоздать из текущей выборки</button>
+              <button id="btn-filter-collapse" class="btn">✕ Свернуть</button>
             </div>
           </div>
           <div id="an-meta" class="hint" style="margin: 6px 0 10px"></div>
@@ -182,6 +218,6 @@
 </main>
 
 <!-- Cache-bust: bump v=YYYYMMDD when app.js changes. -->
-<script src="/miniapp/app.js?v=20260513"></script>
+<script src="/miniapp/app.js?v=20260514"></script>
 </body>
 </html>

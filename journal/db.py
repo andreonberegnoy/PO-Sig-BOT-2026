@@ -286,6 +286,7 @@ class Journal:
                              dow: Optional[list] = None,
                              expiry_bars_default: int = 2,
                              group_by_hour: bool = False,
+                             group_by_dow: bool = False,
                              only_symbol: Optional[str] = None) -> list[dict]:
         """Главная агрегационная функция аналитики. Возвращает список dict
         per symbol (или per (symbol, hour) если group_by_hour=True).
@@ -303,14 +304,21 @@ class Journal:
         # группировка
         groups: dict = {}
         for r in rows:
-            key = (r["symbol"], r["hour_local"]) if group_by_hour else r["symbol"]
+            if group_by_hour:
+                key = (r["symbol"], r["hour_local"])
+            elif group_by_dow:
+                key = (r["symbol"], r["day_of_week"])
+            else:
+                key = r["symbol"]
             groups.setdefault(key, []).append(r)
 
         ebd = max(1, min(5, int(expiry_bars_default or 2)))
         out: list[dict] = []
+        grouped = group_by_hour or group_by_dow
         for key, items in groups.items():
-            symbol = key[0] if group_by_hour else key
+            symbol = key[0] if grouped else key
             hour = key[1] if group_by_hour else None
+            dow_v = key[1] if group_by_dow else None
 
             n_total = len(items)
             n_entered = sum(1 for r in items if r["entered"])
@@ -414,6 +422,7 @@ class Journal:
             row = {
                 "symbol": symbol,
                 "hour": hour,
+                "dow": dow_v,
                 "signals": n_total,
                 "entered": n_entered,
                 "settled": len(ew),
@@ -443,9 +452,114 @@ class Journal:
         # сортировка
         if group_by_hour:
             out.sort(key=lambda r: (r["symbol"], r["hour"] if r["hour"] is not None else -1))
+        elif group_by_dow:
+            out.sort(key=lambda r: (r["symbol"], r["dow"] if r["dow"] is not None else -1))
         else:
             out.sort(key=lambda r: (-r["signals"], r["symbol"]))
         return out
+
+    # ---------- per-strategy signal filter (Stage 3) ----------
+
+    def build_filter_preview(self,
+                              strategy_name: str,
+                              since_ts: int,
+                              hour_from: Optional[int] = None,
+                              hour_to: Optional[int] = None,
+                              dow: Optional[list] = None,
+                              expiry_bars: int = 2,
+                              use_best_exp: bool = False) -> dict:
+        """Анализирует winning signals в указанном срезе и возвращает
+        предлагаемый фильтр (не сохраняет). Юзер потом может отредактировать
+        значения перед save.
+
+        'Выигрышная' = exp_wins[expiry_bars-1]==1, либо ANY w==1 если use_best_exp.
+        Числовые границы — quantile 10..90 чтобы отсечь outliers.
+        """
+        rows = self._signals_filtered(since_ts, strategy_name, hour_from, hour_to, dow)
+        import json as _json
+        eb_idx = max(0, min(4, int(expiry_bars) - 1))
+        wins: list[sqlite3.Row] = []
+        for r in rows:
+            if not r["exp_wins"]:
+                continue
+            try:
+                ew = _json.loads(r["exp_wins"])
+            except Exception:
+                continue
+            if use_best_exp:
+                if any(v == 1 for v in ew if v is not None):
+                    wins.append(r)
+            else:
+                if eb_idx < len(ew) and ew[eb_idx] == 1:
+                    wins.append(r)
+
+        n_total = len(rows)
+        n_wins = len(wins)
+        based_on = {
+            "total_signals": n_total, "winning_signals": n_wins,
+            "since_ts": since_ts,
+            "hour_from": hour_from, "hour_to": hour_to, "dow": dow,
+            "expiry_bars": expiry_bars, "use_best_exp": use_best_exp,
+        }
+        if n_wins < 5:
+            return {
+                "enabled": False,
+                "based_on": based_on,
+                "warning": f"мало выигрышных сигналов ({n_wins}). Нужно ≥5 — продолжай собирать.",
+            }
+
+        def _q(vals, q):
+            s = sorted(v for v in vals if v is not None)
+            if not s:
+                return None
+            k = max(0, min(len(s) - 1, int(round(q * (len(s) - 1)))))
+            return s[k]
+
+        def _range(field, qlow=0.1, qhigh=0.9):
+            vals = [r[field] for r in wins if r[field] is not None]
+            if len(vals) < 3:
+                return None, None
+            lo, hi = _q(vals, qlow), _q(vals, qhigh)
+            if isinstance(lo, float):
+                lo = round(lo, 4)
+            if isinstance(hi, float):
+                hi = round(hi, 4)
+            return lo, hi
+
+        atr_lo, atr_hi = _range("atr_ratio")
+        bb_lo,  bb_hi  = _range("bb_position")
+        cnd_lo, cnd_hi = _range("candle_atr_ratio")
+        rsi_lo, rsi_hi = _range("rsi_ma")
+
+        payouts = [r["payout_at_signal"] for r in wins if r["payout_at_signal"] is not None]
+        votes   = [r["votes_total"] for r in wins if r["votes_total"] is not None]
+        hours   = sorted({r["hour_local"] for r in wins if r["hour_local"] is not None})
+        dows    = sorted({r["day_of_week"] for r in wins if r["day_of_week"] is not None})
+
+        return {
+            "enabled": True,
+            "based_on": based_on,
+            "atr_ratio_min":  atr_lo, "atr_ratio_max":  atr_hi,
+            "bb_position_min": bb_lo, "bb_position_max": bb_hi,
+            "candle_atr_ratio_max": cnd_hi,
+            "rsi_ma_min":     rsi_lo, "rsi_ma_max":     rsi_hi,
+            "payout_min":     min(payouts) if payouts else None,
+            "votes_total_min": min(votes) if votes else None,
+            "hours_allowed":  hours,
+            "dow_allowed":    dows,
+        }
+
+    def signal_filter_get(self, strategy_name: str) -> Optional[dict]:
+        return self.get(f"signal_filter:{strategy_name}")
+
+    def signal_filter_set(self, strategy_name: str, spec: dict):
+        spec = dict(spec or {})
+        spec.setdefault("created_at", int(time.time()))
+        spec["updated_at"] = int(time.time())
+        self.set(f"signal_filter:{strategy_name}", spec)
+
+    def signal_filter_delete(self, strategy_name: str):
+        self.delete(f"signal_filter:{strategy_name}")
 
     def profit_today(self, since_ts: int, mode: str) -> dict:
         """Сумма реального profit за сутки (только entered=1 трейды).

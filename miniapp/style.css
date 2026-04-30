@@ -247,3 +247,18 @@ ul.strategies li.strategy-card:hover .strategy-arrow {
 .wr-red    { color: #ef4444; }
 .profit-pos { color: #22c55e; }
 .profit-neg { color: #ef4444; }
+
+/* ─── Mobile-friendly analytics table (этап 3) ─── */
+@media (max-width: 760px) {
+  .analytics-table { font-size: 11px; }
+  .analytics-table th, .analytics-table td { padding: 4px 6px; }
+  .analytics-table th:first-child,
+  .analytics-table td:first-child {
+    position: sticky; left: 0; z-index: 2;
+    background: var(--section-bg);
+    box-shadow: 1px 0 0 rgba(255,255,255,0.06);
+  }
+  .analytics-table thead th:first-child { z-index: 3; }
+  .analytics-toolbar { font-size: 12px; }
+  .period-btn { padding: 4px 8px; font-size: 12px; }
+}

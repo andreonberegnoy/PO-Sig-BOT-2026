@@ -435,7 +435,99 @@ class StateMachine:
         last = sigs[-1]
         if last.i != len(closed) - 1:
             return None
-        return "call" if last.side == "buy" else "put"
+        action = "call" if last.side == "buy" else "put"
+        # Этап 3 — per-strategy user filter (multi-dim). Применяется ТОЛЬКО к
+        # торговому решению, не к записи в `signals` (collector использует
+        # `_check_signal_with_meta` напрямую и пишет всё). Если фильтр активен
+        # и snapshot не проходит — игнорируем сигнал на торговой стороне.
+        try:
+            strat_for_filter = "consensus"
+            if self.registry:
+                try:
+                    strat_for_filter = self.registry.get_active().name
+                except Exception:
+                    pass
+            f = self.journal.signal_filter_get(strat_for_filter)
+            if f and f.get("enabled"):
+                params_for_snap = (f.get("__params_cache__")
+                                   or self.cfg.get("indicator") or {})
+                snap = self._market_snapshot(symbol, last,
+                                             {**DEFAULT_PARAMS, **params_for_snap},
+                                             closed, strat_for_filter)
+                if not self._signal_passes_user_filter(snap, f):
+                    logger.info("user_filter: %s %s rejected by active filter",
+                                symbol, action)
+                    return None
+        except Exception:
+            logger.exception("user_filter check failed for %s — propagating signal", symbol)
+        return action
+
+    def _verify_current_pair_still_passes(self):
+        """Постоянная пере-фильтрация (этап 3, архитектурный принцип №6).
+        Берёт последний score из _pair_scores и проверяет что текущая пара
+        по-прежнему `allowed=True` И не упала в payout. Если нет —
+        помечает switched + переходит в SEARCH (МГ-шаг сохранён). Ban/pause
+        выставит следующий _rescan_pairs (через час)."""
+        sym = self.state.current_pair
+        if not sym:
+            return
+        score = self._pair_scores.get(sym)
+        if score is None:
+            return
+        payout = int((self.feed.assets.get(sym) or {}).get("payout", 0))
+        floor = int(self.cfg["filter"].get("payout_floor", 0))
+        reason = None
+        if not score.allowed:
+            reason = score.reason or "не проходит фильтр"
+        elif payout < floor:
+            reason = f"payout {payout}% < {floor}%"
+        if not reason:
+            return
+        # carry unused в резерв (как при обычной смене по payout-drop)
+        mg_cfg = self.cfg.get("martingale") or {}
+        per_pair = int(mg_cfg.get("per_pair_max", 0) or 0)
+        if bool(mg_cfg.get("carry_unused", True)) and per_pair > 0:
+            unused = max(0, per_pair - self.state.trades_on_pair)
+            self.state.cycle_unused_carry += unused
+        max_switches = int(self.cfg["trading"].get("max_pair_switch_per_cycle", 1))
+        if self.state.cycle_switches < max_switches:
+            self.state.switched_pairs.append(sym)
+            self.state.cycle_switches += 1
+            self.state.current_pair = None
+            self.state.trades_on_pair = 0
+            self._persist()
+            asyncio.create_task(self._notify(
+                f"🔁 Перефильтровано: {sym} больше не проходит ({reason}). "
+                f"Перехожу в SEARCH. МГ-шаг {self.state.mg_step} сохранён, "
+                f"резерв перекрытий: {self.state.cycle_unused_carry}."
+            ), name=f"refilter_{sym}")
+            self._tick_event.set()
+
+    def _signal_passes_user_filter(self, snap: dict, f: dict) -> bool:
+        """True если snapshot укладывается во все границы активного фильтра.
+        Отсутствующие в snapshot поля считаются проходящими (custom-стратегии
+        могут не заполнять часть индикаторов CONSENSUS)."""
+        def _between(val, lo, hi):
+            if val is None or (lo is None and hi is None):
+                return True
+            if lo is not None and val < lo: return False
+            if hi is not None and val > hi: return False
+            return True
+        if not _between(snap.get("atr_ratio"),       f.get("atr_ratio_min"),  f.get("atr_ratio_max")):     return False
+        if not _between(snap.get("bb_position"),     f.get("bb_position_min"), f.get("bb_position_max")):  return False
+        if not _between(snap.get("rsi_ma"),          f.get("rsi_ma_min"),     f.get("rsi_ma_max")):        return False
+        cmax = f.get("candle_atr_ratio_max")
+        cval = snap.get("candle_atr_ratio")
+        if cmax is not None and cval is not None and cval > cmax: return False
+        pmin = f.get("payout_min"); pval = snap.get("payout_at_signal")
+        if pmin is not None and pval is not None and pval < pmin: return False
+        vmin = f.get("votes_total_min"); vval = snap.get("votes_total")
+        if vmin is not None and vval is not None and vval < vmin: return False
+        ha = f.get("hours_allowed") or []
+        if ha and snap.get("hour_local") is not None and snap["hour_local"] not in ha: return False
+        da = f.get("dow_allowed") or []
+        if da and snap.get("day_of_week") is not None and snap["day_of_week"] not in da: return False
+        return True
 
     # ---------- TG notifications (Stage 2 — enriched) ----------
 
@@ -1532,9 +1624,16 @@ class StateMachine:
             "balance_after": self.feed.balance(),
             "mode": self.cfg["mode"],
         })
-        # NOTE: exp_wins backtest collector был удалён в этапе 1 рефакторинга.
-        # В этапе 2 будет реализован per-strategy в составе нового signals
-        # collector с market snapshots на момент сигнала.
+        # Этап 3: постоянная пере-фильтрация. После каждого LOSS на текущей паре
+        # перепроверяем что её WR1-1000 / WR1-200 / payout всё ещё проходят
+        # фильтры. Если уже нет — помечаем для смены и переходим в SEARCH.
+        # FREE-режим: фильтр уже учитывается в _eligible_for_new_cycle.
+        if (closed.result == "LOSS" and self.state.current_pair
+                and self.state.mg_step >= 1):
+            try:
+                self._verify_current_pair_still_passes()
+            except Exception:
+                logger.exception("re-filter on close failed")
 
         bal_after = float(self.feed.balance() or 0.0)
         prev_step = self.state.mg_step

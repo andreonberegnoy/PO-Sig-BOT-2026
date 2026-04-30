@@ -255,6 +255,12 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
                     f"🔄 Цикл сброшен через Mini App ({old} → FREE). Ищу новый сигнал…"
                 ))
             return {"ok": True, "old": old}
+        if action == "rescan":
+            # Force immediate _rescan_pairs (без ожидания 60с тика).
+            # Используется при «pull-to-refresh» в Mini App.
+            sm._force_rescan = True
+            sm._tick_event.set()   # разбудить main loop
+            return {"ok": True}
         if action == "switch_pair":
             if not (sm.state.mg_step > 0 and sm.state.current_pair):
                 raise HTTPException(400, "no active cycle to switch")

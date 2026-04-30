@@ -242,7 +242,25 @@
       if (lEl) lEl.textContent = p.losses ?? 0;
     } catch (e) { /* silent */ }
   }
-  document.getElementById("btn-refresh").onclick = loadStatus;
+  // 🔄 «Обновить» — форсит немедленный rescan на VPS (не ждать 60с тика)
+  // и сразу читает свежий /api/status. Полезно после изменения настроек,
+  // чтобы tracked-список и фильтр обновились мгновенно.
+  document.getElementById("btn-refresh").onclick = async () => {
+    const btn = document.getElementById("btn-refresh");
+    const orig = btn.textContent;
+    btn.disabled = true; btn.textContent = "⏳ Обновляю…";
+    try {
+      await api("/api/control/rescan", { method: "POST" });
+      // дать боту 1-2 сек чтобы прогнать rescan (он у нас лёгкий)
+      await new Promise((r) => setTimeout(r, 1500));
+      await loadStatus();
+      showActionMsg("✓ Обновлено", "ok");
+    } catch (e) {
+      showActionMsg(`❌ ${e.message || e}`, "err");
+    } finally {
+      btn.disabled = false; btn.textContent = orig;
+    }
+  };
   document.getElementById("btn-pause").onclick = async () => {
     try { await api("/api/control/pause", { method: "POST" }); showActionMsg("⏸ Пауза включена", "ok"); }
     catch (e) { showActionMsg(`❌ ${e.message || e}`, "err"); }

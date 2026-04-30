@@ -1197,8 +1197,13 @@ class StateMachine:
                     self._force_rescan = True
                 self._was_feed_ready = feed_ready_now
 
-                # Periodic rescan (every 5 min) OR forced (e.g., assets arrived late)
-                if self._force_rescan or now - last_scan > 300:
+                # Periodic rescan (every 60s) OR forced (e.g. assets arrived late,
+                # /api/control/rescan, etc). Снижено с 300с → 60с для живого
+                # отображения tracked-пар: payout у пар меняется в реальном
+                # времени (через updateAssets WS-фрейм), но tracked-set обновлялся
+                # только при rescan. С 60с задержка не превышает минуту, что
+                # юзер уже не замечает в UI.
+                if self._force_rescan or now - last_scan > 60:
                     self._force_rescan = False
                     last_scan = now
                     await self._rescan_pairs()

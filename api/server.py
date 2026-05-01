@@ -372,7 +372,7 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
             expiry_bars_default=eb,
         )
         cols = ["symbol", "signals", "entered", "settled",
-                "wr_first", "wr_chosen", "wr_best",
+                "wr_first", "wr_chosen", "wr_best", "best_exp_bar",
                 "pluses", "minuses", "max_loss_streak_to_win",
                 "avg_payout", "pct_payout_optimal",
                 "avg_votes_total", "avg_atr_ratio", "avg_bb_position",

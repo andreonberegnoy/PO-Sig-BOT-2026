@@ -907,15 +907,18 @@ class StateMachine:
             return
 
         self._pair_scores = scores
-        # Apply bans + pauses silently. Pause uses same bans table но с
-        # коротким сроком (`filter.pause_minutes`, default 60 мин) —
-        # journal.is_banned() прячет такие пары из торговли до истечения,
-        # после чего на следующем _rescan_pairs пара авто-переоценивается.
+        # Apply bans + temp_pauses + pauses. Все используют ту же bans таблицу,
+        # отличаются только сроком истечения:
+        #   BAN  — score.ban,         filter.ban_hours        (макс. минусов > N)
+        #   TEMP — score.temp_pause,  filter.temp_pause_hours (обе проходимости провалены)
+        #   PAUSE— score.pause,       filter.pause_minutes    (только проходимость последних)
         new_bans = 0
+        new_temp = 0
         new_pauses = 0
         ban_hours = int(self.cfg["filter"].get("ban_hours", 12))
-        # Backward-compat: если в state_kv остался старый ключ pause_hours,
-        # используем его как fallback (1ч = 60мин).
+        # Backwards-compat: day_off_hours (старый ключ) → temp_pause_hours
+        temp_pause_hours = int(self.cfg["filter"].get("temp_pause_hours",
+                               self.cfg["filter"].get("day_off_hours", 6)))
         pause_minutes = int(self.cfg["filter"].get("pause_minutes",
                             int(self.cfg["filter"].get("pause_hours", 1)) * 60))
         for sym, s in scores.items():
@@ -923,12 +926,17 @@ class StateMachine:
                 self.journal.ban(sym, hours=ban_hours, reason=s.reason)
                 logger.info("BAN %s (%dh) — %s", sym, ban_hours, s.reason)
                 new_bans += 1
+            elif getattr(s, "temp_pause", False) and not self.journal.is_banned(sym):
+                self.journal.ban(sym, hours=temp_pause_hours, reason=s.reason)
+                logger.info("TEMP-PAUSE %s (%dh) — %s", sym, temp_pause_hours, s.reason)
+                new_temp += 1
             elif s.pause and not self.journal.is_banned(sym):
                 self.journal.ban(sym, minutes=pause_minutes, reason=s.reason)
                 logger.info("PAUSE %s (%dmin) — %s", sym, pause_minutes, s.reason)
                 new_pauses += 1
-        if new_bans or new_pauses:
-            logger.info("applied %d bans + %d pauses this scan", new_bans, new_pauses)
+        if new_bans or new_temp or new_pauses:
+            logger.info("applied %d bans + %d temp_pauses + %d pauses this scan",
+                        new_bans, new_temp, new_pauses)
 
         # Build tracked set = currently allowed + not banned + payout>=min_payout
         min_payout = self.cfg["filter"]["min_payout"]
@@ -1062,25 +1070,18 @@ class StateMachine:
 
         await self._rescan_pairs()
         if not self._tracked:
-            # Only trigger day-off if assets were actually available — otherwise
-            # it's a startup race (assets haven't arrived yet) and _on_assets_update
-            # will force a rescan once they do.
+            # Глобальный day_off убран в этапе 3+. Per-pair temp_pause выставляет
+            # сама `_rescan_pairs` для пар провалявших обе проходимости. Если
+            # tracked пуст — просто крутим main loop, рескан раз в минуту
+            # автоматически добавит пары которые освободились из паузы.
             if self.feed.assets:
-                hours = self.cfg["filter"]["day_off_hours"]
-                self.state.day_off_until = int(time.time()) + hours * 3600
-                self._persist()
-                end_h = time.strftime("%H:%M UTC", time.gmtime(self.state.day_off_until))
                 logger.warning(
-                    "🛌 ENTERING DAY-OFF (startup): no pairs passed filter, "
-                    "pausing %dh until %s. Trading loop will sit idle. "
-                    "Clear via: python3 -c '... state_kv day_off_until=0' or wait.",
-                    hours, end_h,
+                    "initial scan: 0 tracked. Per-pair temp_pause/ban применены, "
+                    "loop продолжается, рескан раз в минуту."
                 )
                 await self._notify(
-                    f"😴 Ни одна пара не прошла фильтр на старте. "
-                    f"Пауза {hours}ч до <code>{end_h}</code>. Бот будет молчать "
-                    f"всё это время — открой /control → 🔄 Reset cycle если "
-                    f"хочешь снять раньше."
+                    "ℹ️ Стартовый скан: 0 подходящих пар. Часть в bans/pause/temp_pause "
+                    "по правилам фильтра. Бот будет авто-переоценивать каждую минуту."
                 )
             else:
                 logger.info("initial scan empty — waiting for assets_list from WS")
@@ -1153,41 +1154,14 @@ class StateMachine:
 
             now = time.time()
 
-            # Day-off handling
-            if self.state.day_off_until and now < self.state.day_off_until:
-                # Periodic reminder so user sees bot is in day-off, not crashed.
-                # Every ~5 min: one heartbeat log line with remaining time.
-                if int(now) - getattr(self, "_last_dayoff_log", 0) > 300:
-                    self._last_dayoff_log = int(now)
-                    remain_min = int((self.state.day_off_until - now) / 60)
-                    end_h = time.strftime("%H:%M UTC", time.gmtime(self.state.day_off_until))
-                    logger.info(
-                        "🛌 day-off active: %d min remaining (until %s). "
-                        "No scan/trade until then.",
-                        remain_min, end_h,
-                    )
-                continue
-            if self.state.day_off_until and now >= self.state.day_off_until:
+            # NOTE: глобальный day_off механизм удалён в этапе 3+. Per-pair
+            # temp_pause кладёт пары в bans с длительным сроком когда обе
+            # проходимости провалены. Если есть legacy day_off_until в state —
+            # снимаем его одноразово (миграция).
+            if self.state.day_off_until:
                 self.state.day_off_until = 0
                 self._persist()
-                logger.info("⏰ day-off expired — running rescan")
-                await self._rescan_pairs()
-                await self._notify("⏰ Пауза истекла, возобновляю поиск.")
-                if not self._tracked:
-                    # still no pairs → another day_off
-                    hours = self.cfg["filter"]["day_off_hours"]
-                    self.state.day_off_until = int(now) + hours * 3600
-                    self._persist()
-                    end_h = time.strftime("%H:%M UTC", time.gmtime(self.state.day_off_until))
-                    logger.warning(
-                        "🛌 RE-ENTERING DAY-OFF: rescan still found 0 pairs. "
-                        "Pausing %dh until %s.", hours, end_h,
-                    )
-                    await self._notify(
-                        f"😴 После переоценки фильтр опять пуст. "
-                        f"Ещё пауза {hours}ч до <code>{end_h}</code>."
-                    )
-                    continue
+                logger.info("legacy day_off_until cleared (mechanism removed in stage 3+)")
 
             # ── Main loop body wrapped in broad try/except so a single bad tick
             # or unexpected exception never kills the entire trading loop.

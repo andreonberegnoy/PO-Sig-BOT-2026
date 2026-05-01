@@ -578,20 +578,20 @@
         desc: "если выплата на текущей паре упала ниже — бот меняет пару (не для последней пары цикла)" },
       { k: "filter.max_losses_in_row", t: "int", min: 1, max: 10, label: "Макс. минусов до бана",
         desc: "если у пары серия минусов подряд > этого числа — 12ч бан" },
-      { k: "filter.min_wr1", t: "int", min: 0, max: 100, step: 5, label: "Мин. % 1-й сделки за 1000 свечей",
-        desc: "долгосрочный фильтр: пара с WR1 ниже не торгуется (skip, не бан)" },
-      { k: "filter.min_wr1_recent", t: "int", min: 0, max: 100, step: 5, label: "Мин. % 1-й сделки за 200 свечей",
-        desc: "фильтр свежей формы: пара ниже порога → пауза (не бан)" },
-      { k: "filter.recent_lookback_bars", t: "int", min: 50, max: 500, step: 50, label: "Окно recent (свечей)",
-        desc: "размер «свежего» окна для расчёта recent-статистики (default 200 свечей)" },
+      { k: "filter.min_wr1", t: "int", min: 0, max: 100, step: 5, label: "Мин. общая проходимость (%)",
+        desc: "% первой сделки за 1000 свечей. Если ниже — пара skip (не торгуется)" },
+      { k: "filter.min_wr1_recent", t: "int", min: 0, max: 100, step: 5, label: "Мин. проходимость последних свечей (%)",
+        desc: "% первой сделки за последние 200 свечей. Если ниже — короткая пауза" },
+      { k: "filter.recent_lookback_bars", t: "int", min: 50, max: 500, step: 50, label: "Окно последних свечей (для проходимости)",
+        desc: "сколько последних свечей считать «свежим окном» для проходимости (default 200)" },
       { k: "filter.history_candles", t: "int", min: 200, max: 2000, label: "Размер истории",
         desc: "сколько свечей грузить на пару при старте (нужно ≥1000 для статистики)" },
       { k: "filter.ban_hours", t: "int", min: 1, max: 72, label: "Бан пары (часов)",
         desc: "длительность бана пары при провале max_losses_in_row" },
       { k: "filter.pause_minutes", t: "int", min: 5, max: 1440, step: 5, label: "Пауза за низкий recent WR1 (мин.)",
         desc: "короткая пауза ОДНОЙ пары при провале recent WR1 (остальные торгуются)" },
-      { k: "filter.day_off_hours", t: "int", min: 1, max: 24, label: "День-офф (часов)",
-        desc: "ГЛОБАЛЬНАЯ пауза всего бота если ни одна пара не прошла фильтр" },
+      { k: "filter.temp_pause_hours", t: "int", min: 1, max: 48, label: "Временная пауза (часов)",
+        desc: "длительность паузы для пары у которой ОБЕ проходимости (общая + последних) провалены одновременно. Payout сюда не входит" },
     ],
     "💰 Торговля": [
       { k: "trading.base_amount", t: "float", min: 0.5, max: 100, step: 0.5, label: "Базовая ставка ($)",
@@ -958,7 +958,7 @@
     { k: "entered",                 h: "Вошёл" },
     { k: "wr_first",                h: "WR 1 бар %",    cls: wrClass },
     { k: "wr_chosen",               h: "WR exp %",      cls: wrClass },
-    { k: "wr_best",                 h: "Best exp %",    cls: wrClass },
+    { k: "best_exp_bar",            h: "Best exp #",    cls: bestBarClass },
     { k: "pluses",                  h: "+" },
     { k: "minuses",                 h: "-" },
     { k: "max_loss_streak_to_win",  h: "Макс minus→plus" },
@@ -976,8 +976,8 @@
     { k: "avg_candle_atr_ratio",    h: "Avg candle/ATR" },
     { k: "avg_rsi_ma",              h: "Avg RSI MA" },
     { k: "avg_qqe_trailing",        h: "Avg QQE" },
-    { k: "avg_wr1_long",            h: "WR1-1000 %" },
-    { k: "avg_wr1_recent",          h: "WR1-200 %" },
+    { k: "avg_wr1_long",            h: "Общая проход. %" },
+    { k: "avg_wr1_recent",          h: "Проход. последних %" },
   ];
 
   function wrClass(v) {
@@ -990,6 +990,14 @@
   function profitClass(v) {
     if (v == null || v === 0) return "";
     return v > 0 ? "profit-pos" : "profit-neg";
+  }
+  // Best exp bar: 1..5, чем меньше тем лучше
+  function bestBarClass(v) {
+    if (v == null) return "";
+    if (v <= 1.5) return "wr-green";
+    if (v <= 2.5) return "wr-yellow";
+    if (v <= 3.5) return "wr-orange";
+    return "wr-red";
   }
   function fmtCell(v, k) {
     if (v == null) return "—";

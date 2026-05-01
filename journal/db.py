@@ -351,21 +351,34 @@ class Journal:
             wr_chosen = _wr(ebd - 1)
 
             # best-exp WR: signal считается plus если ХОТЯ БЫ один w==1
+            # best_exp_bar: на каком баре (1..5) случилась первая победа.
+            # Среднее по всем выигравшим сигналам — чем меньше тем лучше.
             best_wins = 0
             best_total = 0
             pluses = 0
             minuses = 0
+            best_bars_sum = 0
+            best_bars_count = 0
             for w in ew:
                 non_null = [x for x in w if x is not None]
                 if not non_null:
                     continue
                 best_total += 1
-                if any(x == 1 for x in non_null):
+                # Найти ПЕРВЫЙ бар где w==1 (1-indexed для UX)
+                first_win_bar = None
+                for bar_idx, v in enumerate(w):
+                    if v == 1:
+                        first_win_bar = bar_idx + 1   # 1..5
+                        break
+                if first_win_bar is not None:
                     best_wins += 1
                     pluses += 1
+                    best_bars_sum += first_win_bar
+                    best_bars_count += 1
                 else:
                     minuses += 1
             wr_best = (best_wins / best_total * 100.0) if best_total else None
+            best_exp_bar = (best_bars_sum / best_bars_count) if best_bars_count else None
 
             # max loss streak до плюса (по экспирации ebd-1 — пользовательской)
             cur_streak = 0
@@ -430,6 +443,7 @@ class Journal:
                 "wr_first":  None if wr_first is None else round(wr_first, 1),
                 "wr_chosen": None if wr_chosen is None else round(wr_chosen, 1),
                 "wr_best":   None if wr_best is None else round(wr_best, 1),
+                "best_exp_bar": None if best_exp_bar is None else round(best_exp_bar, 2),
                 "pluses": pluses,
                 "minuses": minuses,
                 "max_loss_streak_to_win": max_streak,

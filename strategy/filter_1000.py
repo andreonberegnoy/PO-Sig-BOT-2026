@@ -102,6 +102,11 @@ class PairScore:
     # WR1 фильтр. После истечения автоматически переоцениваются на следующем
     # _rescan_pairs (раз в час). Если снова не пройдут — снова на паузу.
     pause: bool = False
+    # Per-pair «временная пауза» (этап 3+): срабатывает когда ОБЕ
+    # проходимости (общая wr1 за 1000 свечей И за последние 200) ниже
+    # порогов одновременно. Дольше короткой паузы (60 мин), но без
+    # учёта payout. Хранится в bans с сроком из cfg.filter.temp_pause_hours.
+    temp_pause: bool = False
 
 
 def classify(
@@ -141,25 +146,33 @@ def classify(
         score.reason = f"макс. минусов подряд {a.max_loss_streak_overall} > {max_losses_in_row} → бан"
         return score
 
-    # First-trade win rate filter — pair must historically win the first trade
-    # (no martingale needed) at least `min_wr1`% of the time. Otherwise skip
-    # (not banned — it might recover; just unattractive vs alternatives).
-    if min_wr1 > 0 and a.wr1 < min_wr1:
+    # ── Проверка проходимостей (этап 3+) ──
+    # Раздельно: ОБЩАЯ ПРОХОДИМОСТЬ (за 1000 свечей) и ПРОХОДИМОСТЬ
+    # ПОСЛЕДНИХ СВЕЧЕЙ (200). Решение зависит от того сколько провалено:
+    #   ОБЕ < min       → temp_pause (per-pair, ~6ч в bans)
+    #   только wr1      → skip (не торгуем, но в bans не кладём)
+    #   только wr1_recent → pause (короткая 60-мин в bans)
+    long_fail = (min_wr1 > 0 and a.wr1 < min_wr1)
+    recent_fail = (min_wr1_recent > 0 and a.completed_recent >= 3
+                    and a.wr1_recent < min_wr1_recent)
+
+    if long_fail and recent_fail:
+        score.temp_pause = True
         score.reason = (
-            f"WR1 {a.wr1:.0f}% < {min_wr1:.0f}% — низкая проходимость первой сделки"
+            f"ВРЕМЕННАЯ ПАУЗА: общая проходимость {a.wr1:.0f}% < {min_wr1:.0f}% "
+            f"И проходимость последних {a.wr1_recent:.0f}% < {min_wr1_recent:.0f}%"
         )
         return score
-
-    # Recent-form filter — even if long-term WR1 is good, pair must also be
-    # performing well in the last N bars (recentLookbackBars, default 200).
-    # Catches pairs that historically passed but recently degraded.
-    # Failing this filter → PAUSE (short ban, default 1h) instead of full ban.
-    # After pause expires the pair is auto-rechecked on next _rescan_pairs.
-    if min_wr1_recent > 0 and a.completed_recent >= 3 and a.wr1_recent < min_wr1_recent:
+    if long_fail:
+        score.reason = (
+            f"общая проходимость {a.wr1:.0f}% < {min_wr1:.0f}% — пара не торгуется"
+        )
+        return score
+    if recent_fail:
         score.pause = True
         score.reason = (
-            f"WR1 recent {a.wr1_recent:.0f}% < {min_wr1_recent:.0f}% → пауза "
-            f"(плохая форма последних {a.completed_recent} сделок, переоценка через час)"
+            f"проходимость последних свечей {a.wr1_recent:.0f}% < {min_wr1_recent:.0f}% "
+            f"→ короткая пауза (плохая форма последних {a.completed_recent} сделок)"
         )
         return score
 

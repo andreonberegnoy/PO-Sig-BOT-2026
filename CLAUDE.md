@@ -86,6 +86,8 @@ Without checkout, git pull conflicts with local mode=real edit.
   - **Общая проходимость** (`min_wr1`, default 60%) — % первой плюсовой сделки за 1000 свечей
   - **Проходимость последних свечей** (`min_wr1_recent`, default 75%) — то же за 200 свечей
 - **Search-mode**: после payout drop / max_trades — НЕ выбирать одну пару, а сканировать все допустимые
+- **Search-mode фильтр ослаблен** (этап 3+): когда мы уже в цикле и ищем следующую пару — игнорируется PAUSE и TEMP_PAUSE (провал recent проходимости). Учитываются только BAN (max_loss_streak), payout floor, switched_pairs (anti-bounce). Юзерская логика: «уже потеряли деньги, добиваем цикл, форма пары вторична».
+- **Sticky current_pair**: пара которая в активном цикле (mg_step > 0) принудительно остаётся в `_tracked` даже если её score ухудшился во время цикла. Цикл должен довестись до WIN/stop_sum.
 - **Asset categories**: forex / crypto / stocks / indices / commodities — multi-checkbox в Mini App
 - **NB**: глобальный «day_off» механизм удалён в этапе 3+. Если все пары не прошли — main loop крутится впустую, рескан раз в 60с автоматически освобождает пары когда форма улучшится.
 

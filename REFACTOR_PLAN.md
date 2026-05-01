@@ -497,3 +497,45 @@ Backwards-compat: старый `filter.day_off_hours` в state_kv override ав�
 - Mini App: pin через `tg.disableVerticalSwipes()` + `enableClosingConfirmation()`
 - Rescan каждые 60с (раньше 300с) + ручной триггер «🔄 Обновить»
 - Periodic report: единый `periodic_report.hour` без зависимости от schedule
+
+### Удаление `consecutive_losses_switch`
+По запросу юзера: триггер «N минусов подряд → switch» избыточен в типовой
+конфигурации `pair_limits=[3,3]` где `consec=3` — оба триггера срабатывают
+одновременно. Оставлены только два switch-триггера на не-последней паре:
+- Исчерпан лимит `pair_limits[i]`
+- Payout упал ниже `payout_floor`
+
+Поле `RuntimeState.losses_streak_on_pair` сохранено как внутренний счётчик
+(инкремент на LOSS, ресет на WIN/DRAW/switch) — может пригодиться для
+аналитики, но ничего не триггерит.
+
+### Расширенный candidate-set в in-cycle SEARCH
+Когда бот в цикле (mg_step>0) ищет следующую пару после switch (по
+исчерпанному лимиту или payout-drop), фильтр кандидатов **ослаблен**:
+- IGNORE: `score.pause` (60-мин за recent_wr1), `score.temp_pause`
+  (6ч за обе проходимости), `score.allowed=False` (любые мягкие фильтры)
+- KEEP: `score.ban` (max_loss_streak — деструктивные паттерны),
+  `payout < min_payout`, `switched_pairs` (anti-bounce)
+
+Юзерская логика: «уже сделка в работе на паре, проходимость последних
+свечей не должна влиять на поиск новых пар». В CYCLE мы УЖЕ потеряли
+деньги, добиваем — форма пары вторична. recent_wr1 имеет смысл только
+при ВХОДЕ в цикл (FREE-режим).
+
+### Sticky `current_pair` в `_tracked`
+Пара которая сейчас в активном цикле (`state.current_pair` + `mg_step>0`)
+**принудительно остаётся** в `self._tracked` при каждом `_rescan_pairs`,
+даже если её оценка ухудшилась за время цикла. Иначе цикл мог бы
+прерваться из-за временного отвала пары из tracked-set, что нарушало
+бы `_in_cycle_step` (опирается на cached candles + WS-subscription
+через tracked).
+
+Юзер: «Если она в работе, она не должна уходить с tracked пар пока
+ещё в работе».
+
+### Layout `intlist`-инпутов
+`intlist` (например `pair_limits = "3,3"`) использует text-инпут.
+Раньше тянулся на 100% ширины через базовое CSS-правило, забирая место
+у лейбла → лейбл переносился слово-по-слово. Сейчас все scalar-инпуты
+в `.setting-row` уравнены: width:120px, flex:0 0 auto, text-align:right,
+tabular-nums. Лейбл нормально занимает левую часть строки.

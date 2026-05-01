@@ -77,11 +77,17 @@ Without checkout, git pull conflicts with local mode=real edit.
 ## Architecture you should already know
 
 - **3 SM states**: FREE / LOCKED / SEARCH (current_pair=None when searching)
-- **3 levels of "no trade"**: SKIP / PAUSE (1h) / BAN (12h)
-- **Double WR1 filter**: long 1000 свечей (≥60%) + recent 200 свечей (≥70%)
-- **Search-mode**: после payout drop / max_trades — НЕ выбирать одну пару,
-  а сканировать все допустимые
+- **4 levels of "no trade"** (этап 3+):
+  - **SKIP** — общая проходимость провалена в одиночку (просто не торгуется, в bans не кладём)
+  - **PAUSE** (60 мин) — провалена ТОЛЬКО проходимость последних свечей
+  - **TEMP_PAUSE** (6ч default) — обе проходимости провалены одновременно. Per-pair, не глобальный.
+  - **BAN** (6ч/12ч default) — серия LOSS-ов > max_losses_in_row
+- **Двойной фильтр проходимости**:
+  - **Общая проходимость** (`min_wr1`, default 60%) — % первой плюсовой сделки за 1000 свечей
+  - **Проходимость последних свечей** (`min_wr1_recent`, default 75%) — то же за 200 свечей
+- **Search-mode**: после payout drop / max_trades — НЕ выбирать одну пару, а сканировать все допустимые
 - **Asset categories**: forex / crypto / stocks / indices / commodities — multi-checkbox в Mini App
+- **NB**: глобальный «day_off» механизм удалён в этапе 3+. Если все пары не прошли — main loop крутится впустую, рескан раз в 60с автоматически освобождает пары когда форма улучшится.
 
 ## Permissions you have (auto-allow in `.claude/settings.json` если настроено)
 

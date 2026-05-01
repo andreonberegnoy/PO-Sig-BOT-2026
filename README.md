@@ -125,18 +125,21 @@ tools/
 | 3 | `asset_categories` | В списке разрешённых классов (forex/crypto/etc) | SKIP |
 | 4 | `completed >= 5` | Минимум 5 виртуальных сделок в окне 1000 свечей | SKIP |
 | 5 | `max_loss_streak <= max_losses_in_row` | Не было серии больше 3 минусов подряд | **BAN** на ban_hours |
-| 6 | `wr1_long >= min_wr1` | % первой плюсовой сделки за 1000 свечей ≥ 60% | SKIP |
-| 7 | `wr1_recent >= min_wr1_recent` | % за последние 200 свечей ≥ 70% (≥3 сделок) | **PAUSE** на pause_hours |
+| 6 | Общая проходимость ≥ `min_wr1` | % первой плюсовой сделки за 1000 свечей ≥ 60% | SKIP / TEMP_PAUSE |
+| 7 | Проходимость последних свечей ≥ `min_wr1_recent` | % за последние 200 свечей ≥ 75% (≥3 сделок) | **PAUSE** / TEMP_PAUSE |
 
 Прошедшие все фильтры пары попадают в `_tracked` — бот живёт на их тиках и ждёт сигнал.
 
-### Шаг 2. Три уровня "не торговать"
+### Шаг 2. Четыре уровня "не торговать" (этап 3+)
 
 | Уровень | Триггер | Срок | Что дальше |
 |---|---|---|---|
-| **SKIP** | Мало сделок, низкий long WR1, payout упал | до 1 часа | Переоценка на следующем сканировании |
-| **PAUSE** | Низкий recent WR1 (200 свечей) | `pause_hours` (1ч) | Авто-переоценка, если опять плохо — снова пауза |
-| **BAN** | max_loss_streak > 3 (системно плохая) | `ban_hours` (12ч) | Длительный бан |
+| **SKIP** | Только общая проходимость провалена / payout упал / мало сделок | без bans | Переоценка на следующем сканировании |
+| **PAUSE** | Только проходимость последних провалена | `pause_minutes` (60 мин) | Авто-переоценка после истечения |
+| **TEMP_PAUSE** ⭐ | ОБЕ проходимости провалены одновременно | `temp_pause_hours` (6ч) | Дольше PAUSE, не учитывает payout |
+| **BAN** | max_loss_streak > 3 (системно плохая) | `ban_hours` (6ч-12ч) | Длительный бан |
+
+> NB: глобальный «day_off» механизм (раньше — пауза всего бота когда все пары провалены) **удалён в этапе 3+**. Теперь только per-pair temp_pause.
 
 ### Шаг 3. CONSENSUS 4/5 — генерация сигнала
 
@@ -336,7 +339,7 @@ docker compose up -d --build
    Switch/Reset Cycle.
 
 2. **⚙️ Настройки бота** — только общие настройки:
-   - 🔍 Фильтр пар (asset_categories, min_payout, WR1 пороги, ban/pause hours)
+   - 🔍 Фильтр пар (asset_categories, min_payout, общая/recent проходимость, ban_hours / temp_pause_hours / pause_minutes)
    - 💰 Торговля (base_amount, expiry_seconds, max_trades_on_pair)
    - 🎰 Мартингейл (enabled, coefficient, max_steps, stop_sum)
    - ⏰ Расписание работы (start_hour, end_hour, weekend skip — этап 2)
@@ -378,14 +381,14 @@ filter:
   min_payout: 92             # минимум payout для входа
   payout_floor: 85           # ниже → search-mode (поиск на всех парах)
   max_losses_in_row: 3       # >3 минусов подряд в истории → BAN
-  min_wr1: 60                # минимум % 1-й сделки за 1000 свечей
-  min_wr1_recent: 70         # минимум % 1-й сделки за 200 свечей (recent form)
+  min_wr1: 60                # минимум общей проходимости за 1000 свечей (% первой плюсовой сделки)
+  min_wr1_recent: 75         # минимум проходимости последних свечей за 200 свечей
   recent_lookback_bars: 200  # окно для recent-статистики
   history_candles: 1060
   stats_lookback_bars: 1000
   ban_hours: 12              # длительный BAN
-  pause_hours: 1             # короткая PAUSE за низкий recent WR1
-  day_off_hours: 6           # если вообще нет пар — пауза
+  pause_minutes: 60          # короткая PAUSE за провал ТОЛЬКО проходимости последних свечей
+  temp_pause_hours: 6        # TEMP_PAUSE за провал ОБЕИХ проходимостей одновременно (per-pair)
   asset_categories: []       # [] = все. ["forex","crypto"] = только форекс+крипта
   tf: 60                     # M1
 

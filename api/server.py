@@ -506,6 +506,118 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
             since = int(_t.time()) - 86400
         return journal.profit_today(since, cfg.get("mode", "paper"))
 
+    # ─── chart panel: candles / pair_score / payout_pairs ───
+    @app.get("/api/candles")
+    async def get_candles(request: Request, symbol: str, period: int = 60, limit: int = 1100):
+        """Свечи для рендера live-графика. Сначала live cache state_machine,
+        fallback в CandlesDB (persistent storage)."""
+        _auth(request)
+        candles = []
+        if sm and hasattr(sm, "_candles"):
+            buf = sm._candles.get(symbol) or []
+            if len(buf) >= 100:
+                candles = buf
+        if len(candles) < 100:
+            try:
+                from journal.candles_db import CandlesDB
+                import os as _os
+                cdb_path = "/data/candles.db" if _os.path.isdir("/data") else "data/candles.db"
+                cdb = CandlesDB(cdb_path)
+                is_demo = (cfg.get("mode") == "paper")
+                fetched = cdb.load(symbol, period, is_demo=is_demo, limit=limit)
+                if fetched:
+                    candles = fetched
+            except Exception:
+                logger.exception("candles_db load failed for %s", symbol)
+        out = []
+        for c in candles[-limit:]:
+            out.append({
+                "time":  int(c["time"]),
+                "open":  float(c["open"]),
+                "high":  float(c["high"]),
+                "low":   float(c["low"]),
+                "close": float(c["close"]),
+            })
+        return {"symbol": symbol, "candles": out, "count": len(out)}
+
+    @app.get("/api/pair_score")
+    async def get_pair_score(request: Request, symbol: str):
+        """HUD-данные для пары (стиль PoSignals): WR / WR1 / WR1_recent /
+        max_streak / последние результаты / payout / allowed/ban/pause."""
+        _auth(request)
+        if not sm:
+            raise HTTPException(503, "state machine not ready")
+        score = sm._pair_scores.get(symbol)
+        candles = sm._candles.get(symbol) or []
+        # Recent results — берём из analyze() на текущих candles
+        recent_results = []
+        signals_count = 0
+        completed = 0
+        expiry_bars = 2
+        if len(candles) >= 100:
+            try:
+                from strategy.consensus import analyze, DEFAULT_PARAMS
+                params = {**DEFAULT_PARAMS, **(cfg.get("indicator") or {})}
+                expiry_bars = int(params.get("expiryBars", 2))
+                if sm.registry:
+                    try:
+                        params = sm.registry.get_active().merged_params()
+                        expiry_bars = int(params.get("expiryBars", 2))
+                    except Exception:
+                        pass
+                a = analyze(candles, params)
+                recent_results = list(a.recent_results)
+                signals_count = len(a.signals)
+                completed = a.completed
+            except Exception:
+                logger.exception("analyze failed for %s", symbol)
+        try:
+            payout = int((feed.assets.get(symbol) or {}).get("payout") or 0) if feed else 0
+        except Exception:
+            payout = 0
+        return {
+            "symbol": symbol,
+            "payout": payout,
+            "wr":   getattr(score, "wr", None) if score else None,
+            "wr1":  getattr(score, "wr1", None) if score else None,
+            "wr1_recent": getattr(score, "wr1_recent", None) if score else None,
+            "wins": getattr(score, "wins", 0) if score else 0,
+            "losses": getattr(score, "losses", 0) if score else 0,
+            "completed": completed,
+            "signals_count": signals_count,
+            "max_loss_streak": getattr(score, "max_loss_streak", 0) if score else 0,
+            "max_loss_streak_before_win": getattr(score, "max_loss_streak_before_win", 0) if score else 0,
+            "allowed": getattr(score, "allowed", False) if score else False,
+            "ban": getattr(score, "ban", False) if score else False,
+            "pause": getattr(score, "pause", False) if score else False,
+            "reason": getattr(score, "reason", "") if score else "",
+            "recent_results": recent_results,
+            "expiry_bars": expiry_bars,
+        }
+
+    @app.get("/api/payout_pairs")
+    async def get_payout_pairs(request: Request, min_payout: Optional[int] = None):
+        """Все доступные пары (из feed.assets) с payout >= min_payout.
+        По умолчанию min_payout берётся из cfg.filter.min_payout
+        («Мин. payout для первой сделки» в Настройках).
+        Передачей ?min_payout=N можно переопределить."""
+        _auth(request)
+        if min_payout is None:
+            min_payout = int((cfg.get("filter") or {}).get("min_payout", 90))
+        if not feed:
+            return {"pairs": [], "min_payout": min_payout}
+        out = []
+        for sym, info in (feed.assets or {}).items():
+            try:
+                p = int(info.get("payout") or 0)
+            except Exception:
+                continue
+            if p < min_payout:
+                continue
+            out.append({"symbol": sym, "payout": p})
+        out.sort(key=lambda x: -x["payout"])
+        return {"pairs": out, "count": len(out), "min_payout": min_payout}
+
     # ─── miniapp static ───
     miniapp_dir = Path("miniapp")
     if miniapp_dir.exists():

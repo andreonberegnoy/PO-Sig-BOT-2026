@@ -11,7 +11,15 @@
 (() => {
   const tg = window.Telegram?.WebApp;
   const initData = tg?.initData || "";
-  if (tg) { tg.ready(); tg.expand(); }
+  if (tg) {
+    tg.ready();
+    tg.expand();
+    // Закрепить Mini App: запретить вертикальный свайп-вниз который сворачивает
+    // приложение. BotAPI 7.7+ — у старых клиентов метода нет, ловим try/catch.
+    try { if (typeof tg.disableVerticalSwipes === "function") tg.disableVerticalSwipes(); } catch (e) {}
+    // Подтверждение закрытия — чтобы случайный свайп вниз не закрывал случайно.
+    try { if (typeof tg.enableClosingConfirmation === "function") tg.enableClosingConfirmation(); } catch (e) {}
+  }
 
   // ─── Fullscreen toggle (на весь экран в TG Mini App) ────────────────
   // Telegram WebApp API: requestFullscreen / exitFullscreen (BotAPI 8.0+).
@@ -333,6 +341,217 @@
     }
     loadStatus();
   };
+
+  // ═════════════════════ ЧАРТ-ПАНЕЛЬ (этап 3+) ═══════════════════════════
+  // Сворачиваемая панель с лайв-графиком + HUD карточкой как у PoSignals.
+  // Открывается кликом по строке «Tracked пары» в карточке статуса.
+  let chart = null, candleSeries = null, currentChartSymbol = null;
+  let chartFilterMode = "tracked";  // tracked | payout | all
+  let chartAutoRefreshTimer = null;
+
+  function initChart() {
+    if (chart) return;
+    if (typeof LightweightCharts === "undefined") {
+      console.error("LightweightCharts не загружен");
+      return;
+    }
+    const container = document.getElementById("chart-container");
+    if (!container) return;
+    chart = LightweightCharts.createChart(container, {
+      width: container.clientWidth || 320,
+      height: 360,
+      layout: { background: { type: "solid", color: "#0f1115" }, textColor: "#e8eaed" },
+      grid:   { vertLines: { color: "rgba(255,255,255,0.04)" }, horzLines: { color: "rgba(255,255,255,0.04)" } },
+      crosshair: { mode: 0 },
+      rightPriceScale: { borderColor: "rgba(255,255,255,0.08)" },
+      timeScale: {
+        timeVisible: true, secondsVisible: false,
+        borderColor: "rgba(255,255,255,0.08)",
+        rightOffset: 5,
+      },
+    });
+    candleSeries = chart.addCandlestickSeries({
+      upColor: "#22c55e", downColor: "#ef4444",
+      borderUpColor: "#22c55e", borderDownColor: "#ef4444",
+      wickUpColor: "#22c55e", wickDownColor: "#ef4444",
+    });
+    // Resize-observer чтобы график подстраивался при разворачивании панели
+    const ro = new ResizeObserver(() => {
+      if (chart && container.clientWidth > 0) {
+        chart.applyOptions({ width: container.clientWidth });
+      }
+    });
+    ro.observe(container);
+  }
+
+  async function fetchPairsForFilter() {
+    if (chartFilterMode === "tracked") {
+      const s = await api("/api/status");
+      const list = s.tracked_pairs_list || [];
+      // дополним payout-инфой через /api/payout_pairs (без отсечки)
+      const all = await api("/api/payout_pairs?min_payout=0").catch(() => ({ pairs: [] }));
+      const payoutMap = {};
+      (all.pairs || []).forEach((p) => { payoutMap[p.symbol] = p.payout; });
+      return list.map((sym) => ({ symbol: sym, payout: payoutMap[sym] || 0 }));
+    }
+    if (chartFilterMode === "payout") {
+      const data = await api("/api/payout_pairs");
+      // Обновим лейбл фильтра текущим порогом
+      if (data.min_payout != null) {
+        const el = document.getElementById("filter-min-payout");
+        if (el) el.textContent = data.min_payout;
+      }
+      return data.pairs || [];
+    }
+    // all
+    const data = await api("/api/payout_pairs?min_payout=0");
+    return data.pairs || [];
+  }
+
+  async function populateChartPairsList() {
+    const select = document.getElementById("chart-pair-select");
+    if (!select) return;
+    let pairs = [];
+    try { pairs = await fetchPairsForFilter(); } catch (e) { console.error(e); }
+    select.innerHTML = pairs.length
+      ? pairs.map((p) =>
+          `<option value="${p.symbol}">${p.symbol}${p.payout ? ` — ${p.payout}%` : ""}</option>`
+        ).join("")
+      : `<option value="">— нет пар —</option>`;
+    if (currentChartSymbol && pairs.find((p) => p.symbol === currentChartSymbol)) {
+      select.value = currentChartSymbol;
+    } else if (pairs.length) {
+      currentChartSymbol = pairs[0].symbol;
+      select.value = currentChartSymbol;
+    } else {
+      currentChartSymbol = null;
+    }
+  }
+
+  async function loadCandlesForChart(symbol) {
+    if (!symbol || !chart || !candleSeries) return;
+    try {
+      const data = await api(`/api/candles?symbol=${encodeURIComponent(symbol)}&limit=1100`);
+      const cs = (data.candles || []).map((c) => ({
+        time: c.time, open: c.open, high: c.high, low: c.low, close: c.close,
+      }));
+      candleSeries.setData(cs);
+      // Show last ~60 bars by default; user может проскроллить назад до самого начала
+      if (cs.length > 60) {
+        chart.timeScale().setVisibleLogicalRange({
+          from: cs.length - 60, to: cs.length - 1,
+        });
+      } else {
+        chart.timeScale().fitContent();
+      }
+    } catch (e) {
+      console.error("loadCandles failed", e);
+    }
+  }
+
+  async function updateChartHUD(symbol) {
+    if (!symbol) return;
+    const hud = document.getElementById("chart-hud");
+    if (!hud) return;
+    try {
+      const s = await api(`/api/pair_score?symbol=${encodeURIComponent(symbol)}`);
+      const wr = s.wr ?? 0;
+      const wr1 = s.wr1 ?? 0;
+      const wr1r = s.wr1_recent ?? 0;
+      const recent = (s.recent_results || []).slice(-30);
+      const recentStr = recent.map((r) => r === 1 ? "✓" : "✗").join("");
+      const wrColor = wr >= 60 ? "#22c55e" : wr >= 50 ? "#fdf647" : "#ef4444";
+      const wr1rColor = wr1r >= 70 ? "#22c55e" : wr1r >= 60 ? "#fdf647" : "#ef4444";
+      const streakWarn = (s.max_loss_streak_before_win || 0) > 3 ? " ⚠️" : "";
+      let stateBadge = "";
+      if (s.ban) stateBadge = ` <span style="color:#ef4444">🚫 BAN</span>`;
+      else if (s.pause) stateBadge = ` <span style="color:#fdf647">⏸ ПАУЗА</span>`;
+      else if (s.allowed) stateBadge = ` <span style="color:#22c55e">✓ tracked</span>`;
+      hud.innerHTML = `
+        <div>🧠 CONSENSUS 4/5 | ⏱ Экспир: ${s.expiry_bars} бара${stateBadge}</div>
+        <div>📊 Payout: <b>${s.payout || "?"}%</b></div>
+        <div style="color:${wrColor}">🏁 Общая: ${wr.toFixed(0)}% | ✅ ${s.wins} : ❌ ${s.losses} (всего сигналов: ${s.signals_count || 0})</div>
+        <div style="color:${wr1rColor}">🎯 Проходимость 1-го входа за 200 св: ${wr1r.toFixed(0)}%</div>
+        <div>⚡ WR1 (вся ист.): ${wr1.toFixed(0)}%</div>
+        <div>📉 Макс. минусов до ✅: ${s.max_loss_streak_before_win}${streakWarn} | всего: ${s.max_loss_streak}</div>
+        ${recentStr ? `<div>📈 Последние ${recent.length}: ${recentStr}</div>` : ""}
+        ${s.reason ? `<div class="hint" style="margin-top:6px; font-size:10px">${s.reason}</div>` : ""}
+      `;
+    } catch (e) {
+      hud.innerHTML = `<div class="err">Ошибка: ${e.message || e}</div>`;
+    }
+  }
+
+  async function refreshChart() {
+    if (!currentChartSymbol) return;
+    await loadCandlesForChart(currentChartSymbol);
+    await updateChartHUD(currentChartSymbol);
+  }
+
+  async function openChartPanel() {
+    const panel = document.getElementById("chart-panel");
+    if (!panel) return;
+    panel.style.display = "";
+    initChart();
+    await populateChartPairsList();
+    if (currentChartSymbol) await refreshChart();
+    // авто-обновление каждые 10 сек пока панель открыта
+    if (chartAutoRefreshTimer) clearInterval(chartAutoRefreshTimer);
+    chartAutoRefreshTimer = setInterval(() => {
+      const p = document.getElementById("chart-panel");
+      if (p && p.style.display !== "none") refreshChart();
+    }, 10000);
+  }
+
+  function closeChartPanel() {
+    const panel = document.getElementById("chart-panel");
+    if (!panel) return;
+    panel.style.display = "none";
+    if (chartAutoRefreshTimer) {
+      clearInterval(chartAutoRefreshTimer);
+      chartAutoRefreshTimer = null;
+    }
+  }
+
+  function toggleChartPanel() {
+    const panel = document.getElementById("chart-panel");
+    if (!panel) return;
+    if (panel.style.display === "none") openChartPanel();
+    else closeChartPanel();
+  }
+
+  // Привязки чарт-панели
+  document.getElementById("row-tracked")?.addEventListener("click", toggleChartPanel);
+  document.getElementById("btn-chart-close")?.addEventListener("click", closeChartPanel);
+  document.getElementById("chart-pair-select")?.addEventListener("change", (e) => {
+    currentChartSymbol = e.target.value;
+    refreshChart();
+  });
+  document.getElementById("btn-chart-prev")?.addEventListener("click", () => {
+    const sel = document.getElementById("chart-pair-select");
+    if (!sel || sel.options.length === 0) return;
+    const idx = sel.selectedIndex;
+    sel.selectedIndex = (idx - 1 + sel.options.length) % sel.options.length;
+    currentChartSymbol = sel.value;
+    refreshChart();
+  });
+  document.getElementById("btn-chart-next")?.addEventListener("click", () => {
+    const sel = document.getElementById("chart-pair-select");
+    if (!sel || sel.options.length === 0) return;
+    const idx = sel.selectedIndex;
+    sel.selectedIndex = (idx + 1) % sel.options.length;
+    currentChartSymbol = sel.value;
+    refreshChart();
+  });
+  document.querySelectorAll(".chart-filter-btn").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      document.querySelectorAll(".chart-filter-btn").forEach((b) => b.classList.remove("active"));
+      btn.classList.add("active");
+      chartFilterMode = btn.dataset.filter;
+      await populateChartPairsList();
+      await refreshChart();
+    });
+  });
 
   // ═════════════════════ НАСТРОЙКИ БОТА (общие) ══════════════════════════
   // Только общие настройки. Indicator params живут в «Стратегия → Настройки».

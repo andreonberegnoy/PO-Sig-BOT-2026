@@ -945,6 +945,12 @@ class StateMachine:
                   if s.allowed and not self.journal.is_banned(sym)
                   and int(self.feed.assets.get(sym, {}).get("payout", 0)) >= min_payout}
 
+        # ВАЖНО (юзер): пара которая сейчас торгуется (current_pair в активном
+        # цикле) НЕ ДОЛЖНА вылетать из tracked, даже если её оценка ухудшилась
+        # на этом скане. Цикл должен довестись до WIN/stop_sum на этой паре.
+        if self.state.current_pair and self.state.mg_step > 0:
+            wanted.add(self.state.current_pair)
+
         # Drop pairs we no longer track — unsubscribe from WS if supported.
         to_drop = self._tracked - wanted
         if hasattr(self.feed, "unsubscribe"):
@@ -1475,16 +1481,18 @@ class StateMachine:
     # ---------- in-cycle SEARCH (no pair locked, scan all eligible) ----------
     async def _in_cycle_search_step(self):
         """Active MG cycle but no pair locked (just switched away from previous).
-        Scan ALL eligible tracked pairs for a fresh CONSENSUS signal. First
-        match wins → that pair becomes new current_pair, MG step preserved.
+        Scan ALL КАНДИДАТЫ для добивания цикла. First match wins → that pair
+        becomes new current_pair, MG step preserved.
 
-        Honours the same stop-sum / max-steps guardrails as _in_cycle_step.
-        Pairs already used in this cycle (in switched_pairs) are excluded so
-        we don't bounce back and forth.
+        В отличие от FREE-режима, в SEARCH мы УЖЕ потеряли деньги на предыдущей
+        паре и должны их отбить. Поэтому фильтр **ослаблен**:
+          • IGNORE: short pause (60-min, recent WR1 fail) и temp_pause (6h, обе
+            проходимости провалены) — юзер: «проходимость последних свечей не
+            должна влиять на поиск новых пар если уже сделка в работе»
+          • KEEP: payout (чтобы вообще была выгода), score.ban (max_loss_streak —
+            эти пары деструктивны системно, не отбивают), switched_pairs (уже
+            использовались в этом цикле — не bounce'аем)
         """
-        if not self._tracked:
-            return
-
         # Stop-sum guardrail (same as _in_cycle_step)
         next_amt = self._amount_for_step(self.state.mg_step)
         stop_sum = float(self.cfg["martingale"]["stop_sum"])
@@ -1511,9 +1519,15 @@ class StateMachine:
         now_ts = int(time.time())
         min_payout = self.cfg["filter"]["min_payout"]
 
-        # Iterate by priority + payout (same ordering as _free_scan_step)
-        sorted_tracked = sorted(
-            self._tracked,
+        # Расширенный candidate-set: ВСЕ пары из _pair_scores (не только tracked).
+        # Включает pairs которые сейчас в pause/temp_pause — их recent WR1
+        # провалена, но мы СОГЛАСНЫ это игнорить ради добивания цикла.
+        candidates = list((self._pair_scores or {}).keys())
+        if not candidates:
+            return
+
+        sorted_cands = sorted(
+            candidates,
             key=lambda s: (
                 (self._pair_scores.get(s).priority if self._pair_scores.get(s) else 999),
                 -int((self.feed.assets.get(s) or {}).get("payout", 0)),
@@ -1523,14 +1537,17 @@ class StateMachine:
         evaluated = 0
         new_bars = 0
         fired = None
-        for sym in sorted_tracked:
-            # Skip pairs already used in this cycle
+        for sym in sorted_cands:
+            # Skip pairs already used in this cycle (anti-bounce)
             if sym in self.state.switched_pairs:
                 continue
-            # Skip banned pairs
-            if self.journal.is_banned(sym):
+            # Skip ТОЛЬКО жёсткий бан (max_loss_streak > N) — деструктивные пары
+            score = self._pair_scores.get(sym)
+            if score is None or score.ban:
                 continue
-            # Skip low payout
+            # NB: НЕ пропускаем score.pause / score.temp_pause / score.allowed=False —
+            # в режиме SEARCH цикла нам важно добить, форма пары вторична.
+            # Skip low payout — без выгоды нет смысла торговать
             payout = int(self.feed.assets.get(sym, {}).get("payout", 0))
             if payout < min_payout:
                 continue

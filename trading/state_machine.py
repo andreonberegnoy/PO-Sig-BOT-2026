@@ -59,8 +59,9 @@ class RuntimeState:
     # Гибкий MG (этап 2/3): резерв неиспользованных перекрытий с предыдущих пар
     # цикла. На последней паре отдаётся целиком (pair_limits[-1] + cycle_unused_carry).
     cycle_unused_carry: int = 0
-    # Серия минусов подряд на ТЕКУЩЕЙ паре (resets on WIN/DRAW/switch).
-    # Триггер switch если достиг cfg.martingale.consecutive_losses_switch.
+    # Серия минусов подряд на ТЕКУЩЕЙ паре. Сейчас не используется как
+    # триггер switch (consec убран по запросу юзера) — оставлено как
+    # внутренний счётчик для возможной аналитики и логирования.
     losses_streak_on_pair: int = 0
 
     def to_dict(self): return asdict(self)
@@ -1385,26 +1386,9 @@ class StateMachine:
                 )
                 return
 
-        # 2. Триггер «N минусов подряд» (только на не-последней)
-        if not skip_pair_limits:
-            consec_limit = int(mg_cfg.get("consecutive_losses_switch", 0) or 0)
-            if consec_limit > 0 and self.state.losses_streak_on_pair >= consec_limit:
-                if carry_unused:
-                    pos_limit = self._mg_pair_limits()[self._mg_position()]
-                    unused = max(0, pos_limit - self.state.trades_on_pair)
-                    self.state.cycle_unused_carry += unused
-                self.state.switched_pairs.append(sym)
-                self.state.cycle_switches += 1
-                self.state.current_pair = None
-                self.state.trades_on_pair = 0
-                self.state.losses_streak_on_pair = 0
-                self._persist()
-                await self._notify(
-                    f"🔁 {self.state.losses_streak_on_pair if False else consec_limit} минусов подряд на {sym} → переход "
-                    f"(резерв: {self.state.cycle_unused_carry} перекрытий). "
-                    f"МГ-шаг {self.state.mg_step} сохранён."
-                )
-                return
+        # NOTE: триггер «N минусов подряд» убран по запросу юзера.
+        # Логика switch: только pair_limits (исчерпан лимит) + payout_drop.
+        # Раньше тут была проверка consecutive_losses_switch.
 
         # 3. Payout drop (только на не-последней)
         if not skip_pair_limits:

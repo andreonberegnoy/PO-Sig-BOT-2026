@@ -78,8 +78,8 @@ martingale:
                              # [0] на 1-й паре, [1] на 2-й, [2] на последней.
                              # ДЛИНА массива = число пар = (число смен + 1).
                              # На последней паре доступно = pair_limits[-1] + ВЕСЬ carry.
-  consecutive_losses_switch: 3  # N минусов подряд на текущей паре → switch с carry.
-                                # На последней паре + last_pair_until_stop_sum игнор.
+  # NOTE: consecutive_losses_switch удалён — единственный switch-триггер
+  # это лимит сделок из pair_limits + payout_drop.
   carry_unused: true         # неиспользованные перекрытия предыдущих пар
                              # (limit - использовано) переносить в резерв
                              # и отдавать ПОСЛЕДНЕЙ паре цикла

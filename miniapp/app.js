@@ -610,8 +610,6 @@
         desc: "потолок потерь $ в цикле; при достижении — стоп до /resume" },
       { k: "martingale.pair_limits", t: "intlist", label: "Сделок на каждой паре через запятую (длина = число пар)", parent: "martingale.enabled",
         desc: "«3,3,2» = 3 пары (на 1-й до 3 сделок, на 2-й до 3, на последней до 2 + перенос резерва)" },
-      { k: "martingale.consecutive_losses_switch", t: "int", min: 0, max: 10, label: "Минусов подряд для switch (0 = выкл)", parent: "martingale.enabled",
-        desc: "после N минусов подряд на не-последней паре — переход с переносом резерва" },
       { k: "martingale.carry_unused", t: "bool", label: "Переносить неиспользованные перекрытия в резерв", parent: "martingale.enabled",
         desc: "если ушли с пары не исчерпав лимит — остаток отдадут последней паре цикла" },
       { k: "martingale.last_pair_until_stop_sum", t: "bool", label: "На последней паре цикла торговать до stop-sum", parent: "martingale.enabled",

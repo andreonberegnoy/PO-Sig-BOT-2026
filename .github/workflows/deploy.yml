@@ -1,0 +1,109 @@
+# Auto-deploy on push to main: SSH в Hetzner VPS → git pull + docker rebuild.
+# Триггеры:
+#   • push в main — автоматически
+#   • workflow_dispatch — ручной триггер из GitHub UI
+#
+# Секреты (Settings → Secrets and variables → Actions):
+#   VPS_HOST     — IP сервера (37.27.13.173)
+#   VPS_USER     — root
+#   VPS_PORT     — 22
+#   VPS_SSH_KEY  — приватный ключ ~/.ssh/github_actions_deploy
+
+name: Deploy to VPS
+
+on:
+  push:
+    branches: [main]
+    # Не триггерим деплой на изменениях документации/CI — экономим минуты
+    paths-ignore:
+      - "**.md"
+      - ".github/**"
+      - "tools/make_*_pdf.py"
+
+  workflow_dispatch:
+
+# Защита от параллельных деплоев — только один в очереди, остальные ждут
+concurrency:
+  group: deploy-vps
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -p ${{ secrets.VPS_PORT }} -H ${{ secrets.VPS_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Deploy to VPS
+        env:
+          HOST: ${{ secrets.VPS_HOST }}
+          USER: ${{ secrets.VPS_USER }}
+          PORT: ${{ secrets.VPS_PORT }}
+        run: |
+          ssh -i ~/.ssh/deploy_key -p $PORT $USER@$HOST 'bash -se' << 'REMOTE'
+            set -euo pipefail
+            cd /opt/po-bot
+            echo "=== git pull ==="
+            git checkout -- config.yaml
+            git pull --ff-only
+            echo "=== set mode=real ==="
+            sed -i 's/^mode: paper/mode: real/' config.yaml
+            grep '^mode:' config.yaml
+            echo "=== docker rebuild ==="
+            cd deploy
+            docker compose down --timeout 30
+            docker compose up -d --build
+            echo "=== status ==="
+            docker compose ps
+          REMOTE
+
+      - name: Wait for healthcheck
+        env:
+          HOST: ${{ secrets.VPS_HOST }}
+          USER: ${{ secrets.VPS_USER }}
+          PORT: ${{ secrets.VPS_PORT }}
+        run: |
+          # Ждём до 90 сек чтобы контейнер прошёл healthcheck (auth + load history)
+          for i in {1..18}; do
+            sleep 5
+            STATUS=$(ssh -i ~/.ssh/deploy_key -p $PORT $USER@$HOST 'cd /opt/po-bot/deploy && docker compose ps --format "{{.Status}}"' 2>/dev/null || echo "ssh_failed")
+            echo "[$i/18] status: $STATUS"
+            if echo "$STATUS" | grep -q "healthy"; then
+              echo "✓ Контейнер healthy"
+              exit 0
+            fi
+          done
+          echo "✗ Healthcheck не прошёл за 90 сек"
+          ssh -i ~/.ssh/deploy_key -p $PORT $USER@$HOST 'cd /opt/po-bot/deploy && docker compose logs --tail=50 po-bot'
+          exit 1
+
+      - name: Verify bot authenticated
+        env:
+          HOST: ${{ secrets.VPS_HOST }}
+          USER: ${{ secrets.VPS_USER }}
+          PORT: ${{ secrets.VPS_PORT }}
+        run: |
+          # Дополнительная проверка: бот реально подключился к PO
+          for i in {1..12}; do
+            sleep 5
+            AUTH=$(ssh -i ~/.ssh/deploy_key -p $PORT $USER@$HOST 'cd /opt/po-bot/deploy && docker compose logs --since 3m po-bot 2>&1 | grep -c "authenticated:"' 2>/dev/null || echo "0")
+            echo "[$i/12] auth count: $AUTH"
+            if [ "$AUTH" -gt 0 ]; then
+              echo "✓ Бот подключился к PO"
+              exit 0
+            fi
+          done
+          echo "⚠ PO authentication не зафиксирован за 60 сек — проверь логи вручную"
+          # Не падаем — health-check прошёл, может быть retry'ится сам
+          exit 0

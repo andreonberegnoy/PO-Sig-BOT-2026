@@ -529,8 +529,9 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
                     candles = fetched
             except Exception:
                 logger.exception("candles_db load failed for %s", symbol)
+        windowed = candles[-limit:]
         out = []
-        for c in candles[-limit:]:
+        for c in windowed:
             out.append({
                 "time":  int(c["time"]),
                 "open":  float(c["open"]),
@@ -538,7 +539,58 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
                 "low":   float(c["low"]),
                 "close": float(c["close"]),
             })
-        return {"symbol": symbol, "candles": out, "count": len(out)}
+        # Маркеры BUY/SELL + ✓/✗ — прогон CONSENSUS по этим же candles
+        # для отрисовки исторических сигналов поверх графика (как у PoSignals).
+        markers = []
+        try:
+            from strategy.consensus import analyze, DEFAULT_PARAMS
+            params = {**DEFAULT_PARAMS, **(cfg.get("indicator") or {})}
+            if sm and sm.registry:
+                try:
+                    params = sm.registry.get_active().merged_params()
+                except Exception:
+                    pass
+            a = analyze(windowed, params)
+            for ev in a.signals:
+                if ev.i < 0 or ev.i >= len(windowed):
+                    continue
+                bar = windowed[ev.i]
+                is_buy = (ev.side == "buy")
+                markers.append({
+                    "time":     int(bar["time"]),
+                    "position": "belowBar" if is_buy else "aboveBar",
+                    "shape":    "arrowUp"  if is_buy else "arrowDown",
+                    "color":    "#22c55e"  if is_buy else "#ef4444",
+                    "text":     f"{'BUY' if is_buy else 'SELL'} {ev.total}/5",
+                    "size":     1.0,
+                })
+                # WIN/LOSS маркер на exit-баре (если outcome известен)
+                r = a.outcomes.get(ev.i)
+                if r and r.completed and 0 <= r.exit_index < len(windowed):
+                    exit_bar = windowed[r.exit_index]
+                    if r.total_win:
+                        markers.append({
+                            "time":     int(exit_bar["time"]),
+                            "position": "aboveBar" if is_buy else "belowBar",
+                            "shape":    "circle",
+                            "color":    "#22c55e",
+                            "text":     "✓",
+                            "size":     0.8,
+                        })
+                    else:
+                        markers.append({
+                            "time":     int(exit_bar["time"]),
+                            "position": "aboveBar" if is_buy else "belowBar",
+                            "shape":    "square",
+                            "color":    "#ef4444",
+                            "text":     "✗",
+                            "size":     0.8,
+                        })
+            # LWC требует sorted by time ASC
+            markers.sort(key=lambda m: m["time"])
+        except Exception:
+            logger.exception("markers compute failed for %s", symbol)
+        return {"symbol": symbol, "candles": out, "markers": markers, "count": len(out)}
 
     @app.get("/api/pair_score")
     async def get_pair_score(request: Request, symbol: str):

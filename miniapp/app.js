@@ -436,6 +436,17 @@
         time: c.time, open: c.open, high: c.high, low: c.low, close: c.close,
       }));
       candleSeries.setData(cs);
+      // Маркеры BUY/SELL + ✓/✗ — отрисовываются на исторических барах
+      // как у PoSignals. data.markers уже отсортированы по time ASC сервером.
+      const markers = (data.markers || []).map((m) => ({
+        time:     m.time,
+        position: m.position,
+        shape:    m.shape,
+        color:    m.color,
+        text:     m.text,
+        size:     m.size,
+      }));
+      candleSeries.setMarkers(markers);
       // Show last ~60 bars by default; user может проскроллить назад до самого начала
       if (cs.length > 60) {
         chart.timeScale().setVisibleLogicalRange({

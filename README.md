@@ -453,7 +453,22 @@ schedule:
 
 ## Деплой
 
-### Опция A — Railway (быстро, $5/мес)
+### Опция A — VPS Hetzner + GitHub Actions автодеплой (текущая prod-схема)
+
+Любой `git push origin main` → GitHub Actions runner подключается по SSH к VPS, делает `git pull` + docker rebuild. Время деплоя ~2-3 минуты, healthcheck + verify auth включены.
+
+```bash
+git push origin main
+# → https://github.com/andreonberegnoy/PO-Sig-BOT-2026/actions (история запусков)
+```
+
+Ручной триггер без коммита: `gh workflow run deploy.yml -R andreonberegnoy/PO-Sig-BOT-2026`.
+
+Workflow YAML: [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml). Деплой не триггерится при push'ах с изменениями только в `*.md`, `.github/**`, `tools/make_*_pdf.py` (экономия минут).
+
+Подробно про SSH-ключи / GitHub Secrets / откат / отзыв ключа: [`.github/DEPLOY_SETUP.md`](.github/DEPLOY_SETUP.md).
+
+### Опция B — Railway (быстро, $5/мес, legacy)
 
 1. Push в GitHub → Railway автодеплой через `railway.toml`
 2. Volume → mount `/data` (1 GB)
@@ -464,7 +479,7 @@ schedule:
 
 См. [DEPLOY.md](DEPLOY.md) для деталей.
 
-### Опция B — VPS (стабильнее, фиксированный IP)
+### Опция C — VPS вручную (без GitHub Actions, для первого старта)
 
 Hetzner / Selectel / DigitalOcean. Преимущества: фиксированный IP (лучше CF reputation), географический контроль, дешевле в долгую.
 
@@ -491,7 +506,7 @@ docker compose logs -f po-bot
 - `deploy/.env.example` — шаблон env
 - `deploy/po-bot.service` — systemd unit для автостарта (опц.)
 
-### Опция C — локально для разработки
+### Опция D — локально для разработки
 
 ```bash
 git clone https://github.com/andreonberegnoy/PO-Sig-BOT-2026.git

@@ -1,6 +1,6 @@
 """Generate Pocket Option storage_state.json on your local machine.
 
-Why: Cloudflare blocks headless logins from datacenter IPs (Railway).
+Why: Cloudflare blocks headless logins from datacenter IPs (Hetzner / любой VPS).
 Workaround: log in once on your laptop in a real browser, save cookies +
 localStorage to a file, ship it to the server. PO sessions live ~30 days.
 
@@ -12,11 +12,8 @@ Then a Chromium window opens. Log in to PO normally (do captcha / 2FA if
 needed), wait until you see the trading page. Come back to terminal and
 press Enter. state.json is saved in cwd.
 
-Encode for Railway env var:
-  base64 -i state.json | tr -d '\n' | pbcopy        # macOS
-  base64 -w0 state.json | tr -d '\n' | xclip        # Linux
-
-Paste into Railway → Variables → PO_STORAGE_STATE_B64. Redeploy.
+Then ship to VPS — один скрипт делает всё (.env update + restart):
+  bash tools/update_po_session.sh
 """
 
 import asyncio
@@ -51,9 +48,9 @@ async def main():
         await asyncio.get_event_loop().run_in_executor(None, input)
         await context.storage_state(path=str(out_path))
         print(f"\n✓ Saved: {out_path}")
-        print("\nNext steps:")
-        print(f"  base64 -i {out_path} | tr -d '\\n' | pbcopy   # macOS, copies to clipboard")
-        print("  Then paste into Railway → Variables → PO_STORAGE_STATE_B64")
+        print("\nNext step — залить на VPS одной командой:")
+        print("  bash tools/update_po_session.sh")
+        print("\n(скрипт сам обновит .env на VPS и перезапустит контейнер)")
         await browser.close()
 
 

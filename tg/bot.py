@@ -875,7 +875,7 @@ class TelegramBot:
                         "🩺 <b>Watchdog: нашёл проблемы</b>\n\n"
                         + "\n".join(problems)
                         + "\n\n👉 Нажми /ping для подробной диагностики, "
-                        + "посмотри логи Railway если не очевидно."
+                        + "логи: <code>ssh root@37.27.13.173 'docker logs po-bot --tail 100'</code>."
                     )
                     _alert_once("health_problems", msg)
                 else:

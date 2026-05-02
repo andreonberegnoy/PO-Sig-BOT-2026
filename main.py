@@ -178,11 +178,16 @@ async def run(cfg: dict, config_path: str = "config.yaml"):
                 "   • закрой модалку Unlock A New Location если появится\n"
                 "   • вернись в Terminal и нажми Enter\n\n"
                 "━━━━━━━━━━━━━━━━━━\n"
-                "ШАГ 3. Залей новые cookies в Railway (одна команда):\n\n"
-                '<code>railway variables --set "PO_STORAGE_STATE_B64=$(base64 -i state.json | tr -d \'\\n\')"</code>\n\n'
+                "ШАГ 3. Залей новые cookies на VPS — один скрипт делает всё "
+                "(обновит .env и рестартанёт контейнер):\n\n"
+                "<code>bash tools/update_po_session.sh</code>\n\n"
+                "(или вручную — однострочник):\n\n"
+                "<code>B64=$(base64 -i state.json | tr -d '\\n') && \\\n"
+                "ssh root@37.27.13.173 \"sed -i 's|^PO_STORAGE_STATE_B64=.*|"
+                "PO_STORAGE_STATE_B64='\\\"$B64\\\"'|' /opt/po-bot/deploy/.env && "
+                "cd /opt/po-bot/deploy && docker compose restart po-bot\"</code>\n\n"
                 "━━━━━━━━━━━━━━━━━━\n"
-                "ШАГ 4. Railway сам пересоберёт контейнер. Через ~1-2 минуты "
-                "придёт сообщение что бот снова работает."
+                "ШАГ 4. Через ~30с придёт сообщение что бот снова работает."
             )
             try:
                 await fn(msg, parse_mode="HTML")
@@ -380,7 +385,8 @@ async def run(cfg: dict, config_path: str = "config.yaml"):
                     f"🔴 Бот падал и перезапустился сам.\n"
                     f"Когда: {when}\n"
                     f"Ошибка: <code>{err_safe}</code>\n\n"
-                    f"Сейчас всё работает. Если хочешь — посмотри логи Railway.",
+                    f"Сейчас всё работает. Логи: "
+                    f"<code>ssh root@37.27.13.173 'docker logs po-bot --tail 100'</code>",
                     parse_mode="HTML",
                 )
             except Exception:
@@ -388,7 +394,8 @@ async def run(cfg: dict, config_path: str = "config.yaml"):
                 await tg.notify(
                     f"🔴 Бот падал и перезапустился сам.\n"
                     f"Когда: {when}\nОшибка: {err}\n\n"
-                    f"Сейчас всё работает. Если хочешь — посмотри логи Railway."
+                    f"Сейчас всё работает. Логи: ssh root@37.27.13.173 "
+                    f"'docker logs po-bot --tail 100'"
                 )
             journal.delete("last_supervisor_crash")
     except Exception:

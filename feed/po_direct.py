@@ -583,8 +583,10 @@ class PoDirectFeed:
                     "ws_persistent",
                     f"❌ WebSocket не восстанавливается уже {max_fast_attempts}+ "
                     f"попыток (~5 мин). Перешёл в режим persistent retry. "
-                    f"Возможные причины: бан Railway IP, миграция endpoint'а PO. "
-                    f"Если за 10 мин не отпустит — попробуй redeploy на Railway.",
+                    f"Возможные причины: бан VPS IP, миграция endpoint'а PO. "
+                    f"Если за 10 мин не отпустит — пересобери контейнер: "
+                    f"<code>ssh root@37.27.13.173 'cd /opt/po-bot/deploy && "
+                    f"docker compose down && docker compose up -d --build'</code>",
                     cooldown_sec=1800,   # 30 min — серьёзный алерт, повторяем не часто
                 )
                 # Trigger a relogin every 3 rounds in phase 2 (not on first to
@@ -748,7 +750,9 @@ class PoDirectFeed:
                             f"для твоего аккаунта. Видимо, PO перевёл аккаунт на другой "
                             f"регион насовсем. Временно отключаю регион-лок (5 циклов "
                             f"релогина), чтобы бот не висел в петле. Если хочешь "
-                            f"навсегда — убери PO_PREFERRED_WS_URL на Railway.",
+                            f"навсегда — убери строку <code>PO_PREFERRED_WS_URL=…</code> из "
+                            f"<code>/opt/po-bot/deploy/.env</code> на VPS и перезапусти "
+                            f"контейнер: <code>docker compose restart po-bot</code>.",
                             cooldown_sec=3600,
                         )
                 if self._relogin_callback and not self._relogin_in_progress:

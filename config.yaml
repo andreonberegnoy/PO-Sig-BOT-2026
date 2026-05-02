@@ -93,6 +93,31 @@ retention:
   signals_days: 180          # сколько дней хранить signals (default 6 месяцев,
                              # configurable до 365). Cleanup еженедельно.
 
+# ---- защита от live-расхождения с моделью ----
+# Если на паре в реальном времени серия LOSS превышает исторический
+# max_loss_streak_to_win × multiplier, ставим пару на короткую паузу.
+# Это страхует мартингейл когда форма пары изменилась, а статистика
+# ещё не успела это отразить.
+protection:
+  live_streak_pause_enabled: true
+  live_streak_multiplier: 1.5
+  live_streak_pause_minutes: 60
+  live_streak_min_abs: 4         # не срабатывать если live-streak < этого
+  live_streak_min_history: 30    # минимум settled-сигналов в окне 30д для расчёта hist_max
+
+# ---- аналитика: Wilson + per-exp WR + decay ----
+# Эти параметры влияют ТОЛЬКО на новые поля в /api/analytics/* (wr_1..5,
+# wr_*_wlb, best_exp_by_wlb, n_for_exp_*). Старые поля (wr_first, wr_chosen,
+# pluses, minuses и т.д.) считаются как раньше — без decay, без min_sample.
+analytics:
+  min_sample_size: 20        # минимум сигналов на ячейку для best_exp_by_wlb.
+                             # Если ни одна экспирация не набрала — best_exp_by_wlb=null
+                             # (UI должен показать «нет данных» / fallback).
+  decay_half_life_days: null # экспоненциальный распад веса сигнала по возрасту.
+                             # null/0 = выкл (все сигналы весят 1.0).
+                             # Рекомендуемое значение для FX: 14.
+                             # Включается при появлении достаточной истории.
+
 # ---- CONSENSUS 4/5 (параметры индикатора) ----
 # 1:1 с meta.defaultParams из твоего JS
 indicator:

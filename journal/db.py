@@ -288,7 +288,9 @@ class Journal:
                              expiry_bars_default: int = 2,
                              group_by_hour: bool = False,
                              group_by_dow: bool = False,
-                             only_symbol: Optional[str] = None) -> list[dict]:
+                             only_symbol: Optional[str] = None,
+                             min_sample_size: int = 20,
+                             decay_half_life_days: Optional[float] = None) -> list[dict]:
         """Главная агрегационная функция аналитики. Возвращает список dict
         per symbol (или per (symbol, hour) если group_by_hour=True).
         Все WR-метрики используют exp_wins (post-settlement); profit — trades.
@@ -314,6 +316,12 @@ class Journal:
             groups.setdefault(key, []).append(r)
 
         ebd = max(1, min(5, int(expiry_bars_default or 2)))
+        from .stats import wilson_lower_bound, decay_weight
+        now_ts = int(time.time())
+        # half-life: None/<=0 = выкл; вес 1.0 для всех сигналов.
+        hl_days = decay_half_life_days if (decay_half_life_days and decay_half_life_days > 0) else None
+        min_n = max(1, int(min_sample_size or 1))
+
         out: list[dict] = []
         grouped = group_by_hour or group_by_dow
         for key, items in groups.items():
@@ -324,15 +332,24 @@ class Journal:
             n_total = len(items)
             n_entered = sum(1 for r in items if r["entered"])
 
-            # exp_wins-based аналитика (settled-only)
+            # exp_wins-based аналитика (settled-only).
+            # Для каждого settled-сигнала запоминаем вес (decay по возрасту):
+            # ew_w = [(parsed_wins_array, weight), ...]
             settled = [r for r in items if r["exp_wins"]]
             import json as _json
-            ew = []
+            ew_w: list[tuple[list, float]] = []
             for r in settled:
                 try:
-                    ew.append(_json.loads(r["exp_wins"]))
+                    parsed = _json.loads(r["exp_wins"])
                 except Exception:
-                    pass
+                    continue
+                # sqlite3.Row не поддерживает .get(); читаем напрямую.
+                sig_ts = r["signal_ts"] if "signal_ts" in r.keys() else None
+                age = max(0, now_ts - int(sig_ts or now_ts))
+                w = decay_weight(age, hl_days)
+                ew_w.append((parsed, w))
+            # Бэк-совместимый список без весов — старая логика ниже.
+            ew = [a for a, _ in ew_w]
 
             def _wr(arr_idx: int):
                 total = wins = 0
@@ -346,6 +363,22 @@ class Journal:
                     if v == 1:
                         wins += 1
                 return (wins / total * 100.0) if total else None
+
+            def _wr_weighted(arr_idx: int) -> tuple[float, float]:
+                """Возвращает (sum_wins, sum_total) по экспирации arr_idx
+                с учётом decay-веса. None-значения пропускаются."""
+                tw = 0.0
+                ww = 0.0
+                for arr, weight in ew_w:
+                    if arr_idx >= len(arr):
+                        continue
+                    v = arr[arr_idx]
+                    if v is None:
+                        continue
+                    tw += weight
+                    if v == 1:
+                        ww += weight
+                return ww, tw
 
             wr_first  = _wr(0)
             wr_chosen = _wr(ebd - 1)
@@ -432,6 +465,44 @@ class Journal:
                     losses_real += 1
                     profit_real -= float(t["amount"])
             wr_real = (wins_real / (wins_real + losses_real) * 100.0) if (wins_real + losses_real) else None
+            wr_real_wlb = wilson_lower_bound(wins_real, wins_real + losses_real) if (wins_real + losses_real) else None
+
+            # ── per-expiration WR (1..5) + Wilson lower bound ──
+            # n_for_exp_i — количество сигналов, у которых для бара i есть
+            # определённый исход (не None). С decay это сумма весов; без —
+            # обычное число. Wilson корректно работает с дробными.
+            wr_per_exp: dict[int, Optional[float]] = {}
+            n_per_exp: dict[int, float] = {}
+            wlb_per_exp: dict[int, Optional[float]] = {}
+            for i in range(1, 6):
+                wins_w, total_w = _wr_weighted(i - 1)
+                n_per_exp[i] = total_w
+                if total_w > 0:
+                    wr_per_exp[i] = wins_w / total_w * 100.0
+                    wlb_per_exp[i] = wilson_lower_bound(wins_w, total_w)
+                else:
+                    wr_per_exp[i] = None
+                    wlb_per_exp[i] = None
+
+            # Wilson для существующих агрегатов wr_first / wr_chosen.
+            # Считаем по тем же данным что и wr_first/wr_chosen, но через
+            # weighted-сумму чтобы decay (если включён) применялся однородно.
+            _w_first, _t_first = _wr_weighted(0)
+            wr_first_wlb = wilson_lower_bound(_w_first, _t_first) if _t_first > 0 else None
+            _w_chosen, _t_chosen = _wr_weighted(ebd - 1)
+            wr_chosen_wlb = wilson_lower_bound(_w_chosen, _t_chosen) if _t_chosen > 0 else None
+
+            # best_exp_by_wlb: какая экспирация (1..5) даёт max(wlb)
+            # при условии n_per_exp[i] >= min_sample_size. Если ни одна —
+            # None (надо использовать fallback в decision-функции).
+            eligible = [(i, wlb_per_exp[i]) for i in range(1, 6)
+                        if wlb_per_exp[i] is not None and n_per_exp[i] >= min_n]
+            if eligible:
+                best_exp_by_wlb = max(eligible, key=lambda kv: kv[1])[0]
+                best_wlb = max(eligible, key=lambda kv: kv[1])[1]
+            else:
+                best_exp_by_wlb = None
+                best_wlb = None
 
             row = {
                 "symbol": symbol,
@@ -461,6 +532,37 @@ class Journal:
                 "losses_real": losses_real,
                 "wr_real": None if wr_real is None else round(wr_real, 1),
                 "profit_real": round(profit_real, 2),
+                # ── новые поля (Wilson + per-expiration) ──
+                # Точечный WR (%) по каждой экспирации 1..5.
+                "wr_1": None if wr_per_exp[1] is None else round(wr_per_exp[1], 1),
+                "wr_2": None if wr_per_exp[2] is None else round(wr_per_exp[2], 1),
+                "wr_3": None if wr_per_exp[3] is None else round(wr_per_exp[3], 1),
+                "wr_4": None if wr_per_exp[4] is None else round(wr_per_exp[4], 1),
+                "wr_5": None if wr_per_exp[5] is None else round(wr_per_exp[5], 1),
+                # Wilson lower bound (%) по каждой экспирации 1..5.
+                # При decay-весах это «честный» нижний WR с учётом давности.
+                "wr_1_wlb": None if wlb_per_exp[1] is None else round(wlb_per_exp[1] * 100.0, 1),
+                "wr_2_wlb": None if wlb_per_exp[2] is None else round(wlb_per_exp[2] * 100.0, 1),
+                "wr_3_wlb": None if wlb_per_exp[3] is None else round(wlb_per_exp[3] * 100.0, 1),
+                "wr_4_wlb": None if wlb_per_exp[4] is None else round(wlb_per_exp[4] * 100.0, 1),
+                "wr_5_wlb": None if wlb_per_exp[5] is None else round(wlb_per_exp[5] * 100.0, 1),
+                # Sample size per expiration (с учётом decay-весов если включён).
+                # Округляем чтобы UI понимал «достоверность» цифры.
+                "n_for_exp_1": round(n_per_exp[1], 2) if hl_days else int(n_per_exp[1]),
+                "n_for_exp_2": round(n_per_exp[2], 2) if hl_days else int(n_per_exp[2]),
+                "n_for_exp_3": round(n_per_exp[3], 2) if hl_days else int(n_per_exp[3]),
+                "n_for_exp_4": round(n_per_exp[4], 2) if hl_days else int(n_per_exp[4]),
+                "n_for_exp_5": round(n_per_exp[5], 2) if hl_days else int(n_per_exp[5]),
+                # Wilson для существующих метрик — для UI колонки «честный WR».
+                "wr_first_wlb":  None if wr_first_wlb  is None else round(wr_first_wlb  * 100.0, 1),
+                "wr_chosen_wlb": None if wr_chosen_wlb is None else round(wr_chosen_wlb * 100.0, 1),
+                "wr_real_wlb":   None if wr_real_wlb   is None else round(wr_real_wlb   * 100.0, 1),
+                # Адаптивная экспирация: 1..5 или None если ни одна
+                # экспирация не прошла фильтр n >= min_sample_size.
+                "best_exp_by_wlb": best_exp_by_wlb,
+                "best_exp_wlb_value": None if best_wlb is None else round(best_wlb * 100.0, 1),
+                "min_sample_size": min_n,
+                "decay_half_life_days": hl_days,
             }
             out.append(row)
 
@@ -688,18 +790,20 @@ class Journal:
         losses = stat.get("LOSS", {"n":0,"total_profit":0})["n"]
         draws  = stat.get("DRAW", {"n":0,"total_profit":0})["n"]
 
-        # Net PnL
+        # Net PnL.
+        # ВАЖНО: trades.profit = ПОЛНАЯ выплата брокера (стейк + выигрыш) для
+        # WIN, 0 для LOSS, ≈amount для DRAW (refund). Чистый выигрыш на WIN
+        # это (profit - amount). Убыток на LOSS это amount. DRAW нейтрален.
+        # Раньше считали net = SUM(profit_win) - SUM(amount_loss), что
+        # завышало результат на сумму стейков всех WIN-сделок.
         cur = self.conn.execute(
-            "SELECT COALESCE(SUM(profit),0) - COALESCE(SUM(amount),0) FROM trades WHERE close_ts>=? AND mode=? AND result='LOSS'",
-            (since_ts, mode))
-        # Simpler: profit field is payout - amount on win; 0 on loss; so net = sum(profit) - sum(amount_where_loss)
-        # But to be safe: compute net as sum(profit) for wins minus sum(amount) for losses
-        cur = self.conn.execute(
-            "SELECT COALESCE(SUM(profit),0) FROM trades WHERE close_ts>=? AND mode=? AND result='WIN'",
+            "SELECT COALESCE(SUM(profit - amount),0) FROM trades "
+            "WHERE close_ts>=? AND mode=? AND result='WIN'",
             (since_ts, mode))
         win_gain = cur.fetchone()[0] or 0
         cur = self.conn.execute(
-            "SELECT COALESCE(SUM(amount),0) FROM trades WHERE close_ts>=? AND mode=? AND result='LOSS'",
+            "SELECT COALESCE(SUM(amount),0) FROM trades "
+            "WHERE close_ts>=? AND mode=? AND result='LOSS'",
             (since_ts, mode))
         loss_cost = cur.fetchone()[0] or 0
         net = win_gain - loss_cost

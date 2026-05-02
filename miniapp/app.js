@@ -478,11 +478,19 @@
       if (s.ban) stateBadge = ` <span style="color:#ef4444">🚫 BAN</span>`;
       else if (s.pause) stateBadge = ` <span style="color:#fdf647">⏸ ПАУЗА</span>`;
       else if (s.allowed) stateBadge = ` <span style="color:#22c55e">✓ tracked</span>`;
+      const win = s.recent_lookback_bars || 200;
+      const sigRecent = s.signals_recent ?? 0;
+      const compRecent = s.completed_recent ?? 0;
+      // «settled / total» если есть ещё не закрытые в окне; иначе одно число.
+      const sigRecentStr = (sigRecent === compRecent)
+        ? `${sigRecent}`
+        : `${compRecent}/${sigRecent}`;
       hud.innerHTML = `
         <div>🧠 CONSENSUS 4/5 | ⏱ Экспир: ${s.expiry_bars} бара${stateBadge}</div>
         <div>📊 Payout: <b>${s.payout || "?"}%</b></div>
         <div style="color:${wrColor}">🏁 Общая: ${wr.toFixed(0)}% | ✅ ${s.wins} : ❌ ${s.losses} (всего сигналов: ${s.signals_count || 0})</div>
-        <div style="color:${wr1rColor}">🎯 Проходимость 1-го входа за 200 св: ${wr1r.toFixed(0)}%</div>
+        <div>📡 Сигналов за ${win} свечей: <b>${sigRecentStr}</b></div>
+        <div style="color:${wr1rColor}">🎯 Проходимость 1-го входа за ${win} св: ${wr1r.toFixed(0)}%</div>
         <div>⚡ WR1 (вся ист.): ${wr1.toFixed(0)}%</div>
         <div>📉 Макс. минусов до ✅: ${s.max_loss_streak_before_win}${streakWarn} | всего: ${s.max_loss_streak}</div>
         ${recentStr ? `<div>📈 Последние ${recent.length}: ${recentStr}</div>` : ""}
@@ -659,6 +667,49 @@
     try {
       const cfg = await api("/api/settings");
       cont.innerHTML = "";
+
+      // ─── Быстрые действия (повторяют доступные кнопки из главного экрана,
+      //     чтобы их можно было дёргать прямо из настроек, не выходя обратно)
+      const quick = document.createElement("div");
+      quick.className = "category";
+      quick.innerHTML = `
+        <div class="category-title">⚡ Быстрые действия</div>
+        <div class="setting-row" style="flex-direction:column; align-items:stretch; gap:6px">
+          <button id="btn-settings-switch-pair" class="btn" type="button">
+            🔀 Сменить пару (МГ сохранён)
+          </button>
+          <div class="hint" style="font-size:11px; opacity:0.75">
+            Текущая пара исключается из цикла, бот переходит в SEARCH —
+            войдёт в первый CONSENSUS-сигнал среди оставшихся tracked-пар.
+            Шаг мартингейла НЕ сбрасывается.
+          </div>
+          <div id="settings-quick-status" class="status-line"></div>
+        </div>
+      `;
+      cont.appendChild(quick);
+      const qBtn = quick.querySelector("#btn-settings-switch-pair");
+      const qStatus = quick.querySelector("#settings-quick-status");
+      qBtn.onclick = async () => {
+        qStatus.textContent = "🔀 Перехожу в SEARCH режим…";
+        qStatus.className = "status-line info";
+        try {
+          const r = await api("/api/control/switch_pair", { method: "POST" });
+          if (r && r.ok && (r.new === "SEARCH" || r.mode === "SEARCH")) {
+            qStatus.textContent = `🔍 SEARCH: ${r.old || "пара"} исключена из цикла.`;
+            qStatus.className = "status-line ok";
+          } else if (r && r.ok && r.new) {
+            qStatus.textContent = `🔀 Сменена пара: ${r.old} → ${r.new}`;
+            qStatus.className = "status-line ok";
+          } else {
+            qStatus.textContent = "⚠️ Нет активного цикла или tracked-пар.";
+            qStatus.className = "status-line warn";
+          }
+        } catch (e) {
+          qStatus.textContent = `❌ ${e.message || e}`;
+          qStatus.className = "status-line err";
+        }
+      };
+
       for (const [cat, items] of Object.entries(GLOBAL_SCHEMA)) {
         const div = document.createElement("div");
         div.className = "category";

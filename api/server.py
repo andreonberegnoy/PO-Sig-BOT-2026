@@ -307,10 +307,15 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
                 dow_list = None
         ind_cfg = (cfg.get("indicator") or {})
         eb = int(ind_cfg.get("expiryBars", 2))
+        an_cfg = (cfg.get("analytics") or {})
+        min_n = int(an_cfg.get("min_sample_size", 20) or 20)
+        hl = an_cfg.get("decay_half_life_days")
         rows = journal.analytics_aggregate(
             since_ts=since, strategy_name=strat,
             hour_from=hour_from, hour_to=hour_to, dow=dow_list,
             expiry_bars_default=eb,
+            min_sample_size=min_n,
+            decay_half_life_days=hl,
         )
         return {
             "period_days": period_days,
@@ -318,6 +323,8 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
             "hour_from": hour_from, "hour_to": hour_to,
             "dow": dow_list,
             "expiry_bars": eb,
+            "min_sample_size": min_n,
+            "decay_half_life_days": hl,
             "rows": rows,
         }
 
@@ -338,12 +345,18 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
         ind_cfg = (cfg.get("indicator") or {})
         eb = int(ind_cfg.get("expiryBars", 2))
         kwargs = {"group_by_hour": True} if group == "hour" else {"group_by_dow": True}
+        an_cfg = (cfg.get("analytics") or {})
+        min_n = int(an_cfg.get("min_sample_size", 20) or 20)
+        hl = an_cfg.get("decay_half_life_days")
         rows = journal.analytics_aggregate(
             since_ts=since, strategy_name=strat,
-            expiry_bars_default=eb, only_symbol=symbol, **kwargs,
+            expiry_bars_default=eb, only_symbol=symbol,
+            min_sample_size=min_n, decay_half_life_days=hl, **kwargs,
         )
         return {"symbol": symbol, "period_days": period_days,
-                "strategy": strat, "group": group, "rows": rows}
+                "strategy": strat, "group": group,
+                "min_sample_size": min_n, "decay_half_life_days": hl,
+                "rows": rows}
 
     @app.get("/api/analytics/csv")
     async def analytics_csv(request: Request,
@@ -366,10 +379,14 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
                 dow_list = None
         ind_cfg = (cfg.get("indicator") or {})
         eb = int(ind_cfg.get("expiryBars", 2))
+        an_cfg = (cfg.get("analytics") or {})
+        min_n = int(an_cfg.get("min_sample_size", 20) or 20)
+        hl = an_cfg.get("decay_half_life_days")
         rows = journal.analytics_aggregate(
             since_ts=since, strategy_name=strat,
             hour_from=hour_from, hour_to=hour_to, dow=dow_list,
             expiry_bars_default=eb,
+            min_sample_size=min_n, decay_half_life_days=hl,
         )
         cols = ["symbol", "signals", "entered", "settled",
                 "wr_first", "wr_chosen", "wr_best", "best_exp_bar",
@@ -378,7 +395,14 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
                 "avg_votes_total", "avg_atr_ratio", "avg_bb_position",
                 "avg_candle_atr_ratio", "avg_rsi_ma", "avg_qqe_trailing",
                 "avg_wr1_long", "avg_wr1_recent",
-                "wins_real", "losses_real", "wr_real", "profit_real"]
+                "wins_real", "losses_real", "wr_real", "profit_real",
+                # новые колонки (Wilson + per-exp). В конце — чтобы не ломать
+                # существующих парсеров CSV если такие у юзера есть.
+                "wr_1", "wr_2", "wr_3", "wr_4", "wr_5",
+                "wr_1_wlb", "wr_2_wlb", "wr_3_wlb", "wr_4_wlb", "wr_5_wlb",
+                "n_for_exp_1", "n_for_exp_2", "n_for_exp_3", "n_for_exp_4", "n_for_exp_5",
+                "wr_first_wlb", "wr_chosen_wlb", "wr_real_wlb",
+                "best_exp_by_wlb", "best_exp_wlb_value"]
         buf = io.StringIO()
         w = csv.writer(buf)
         w.writerow(cols)
@@ -605,6 +629,9 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
         recent_results = []
         signals_count = 0
         completed = 0
+        completed_recent = 0
+        signals_recent = 0
+        recent_lookback_bars = 200
         expiry_bars = 2
         if len(candles) >= 100:
             try:
@@ -617,10 +644,16 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
                         expiry_bars = int(params.get("expiryBars", 2))
                     except Exception:
                         pass
+                recent_lookback_bars = int(params.get("recentLookbackBars", 200))
                 a = analyze(candles, params)
                 recent_results = list(a.recent_results)
                 signals_count = len(a.signals)
                 completed = a.completed
+                completed_recent = a.completed_recent
+                # Сырое число CONSENSUS-сигналов в окне последних N баров
+                # (с учётом ещё не settled — для UI это «всего сработок за окно»).
+                from_bar_recent = max(0, (len(candles) - 1) - recent_lookback_bars)
+                signals_recent = sum(1 for ev in a.signals if ev.i >= from_bar_recent)
             except Exception:
                 logger.exception("analyze failed for %s", symbol)
         try:
@@ -637,6 +670,13 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
             "losses": getattr(score, "losses", 0) if score else 0,
             "completed": completed,
             "signals_count": signals_count,
+            # Окно «свежей формы» (по умолчанию 200 баров):
+            #   completed_recent — сколько settled-сигналов за окно (для WR1_recent)
+            #   signals_recent   — общее число сработок CONSENSUS за окно
+            #   recent_lookback_bars — размер окна (для динамической подписи в HUD)
+            "completed_recent": completed_recent,
+            "signals_recent": signals_recent,
+            "recent_lookback_bars": recent_lookback_bars,
             "max_loss_streak": getattr(score, "max_loss_streak", 0) if score else 0,
             "max_loss_streak_before_win": getattr(score, "max_loss_streak_before_win", 0) if score else 0,
             "allowed": getattr(score, "allowed", False) if score else False,

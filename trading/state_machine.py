@@ -109,6 +109,14 @@ class StateMachine:
         self._force_rescan = False   # set True to trigger _rescan_pairs next tick
         self._was_feed_ready = False  # edge-detect for WS-ready transition
 
+        # Live loss-streak monitor (доп. защита поверх BAN/TEMP_PAUSE).
+        # Считает подряд идущие LOSS на паре через все циклы; на WIN — сброс.
+        # Если live_streak ≥ historical_max_loss_streak_to_win × multiplier
+        # и собрана достаточная история — пара ставится на live-pause.
+        # Не путать с self.state.losses_streak_on_pair: тот сбрасывается
+        # _reset_cycle() на WIN, этот — только на WIN текущей пары.
+        self._live_loss_streak: dict[str, int] = {}
+
         # Strategy registry — replaceable at runtime via Mini App
         self.registry = None   # set externally by main.py if available
 
@@ -1771,6 +1779,14 @@ class StateMachine:
 
         bal_after = float(self.feed.balance() or 0.0)
         prev_step = self.state.mg_step
+        # ── live loss-streak (см. self._live_loss_streak в __init__) ──
+        sym_for_streak = opened.asset
+        if closed.result == "WIN":
+            self._live_loss_streak.pop(sym_for_streak, None)
+        elif closed.result == "LOSS":
+            self._live_loss_streak[sym_for_streak] = self._live_loss_streak.get(sym_for_streak, 0) + 1
+        # DRAW — не трогаем.
+
         if closed.result == "WIN":
             gained = closed.profit - opened.amount
             self.state.session_loss = max(0.0, self.state.session_loss - gained)
@@ -1812,6 +1828,13 @@ class StateMachine:
                     f"💼 Баланс: ${bal_after:.2f}   📉 Потери сессии: ${self.state.session_loss:.2f}\n"
                     f"🚫 МГ выключен — ищу новый сигнал."
                 )
+            # Доп. защита: если live-серия LOSS на этой паре превысила
+            # исторический max_loss_streak_to_win × multiplier — ставим
+            # пару на временную паузу (через bans). Не падаем при ошибке.
+            try:
+                await self._maybe_pause_on_live_streak(sym_for_streak)
+            except Exception:
+                logger.exception("live loss-streak check failed for %s", sym_for_streak)
             self._tick_event.set()
         else:  # DRAW
             # DRAW не обнуляет streak (это «нейтральный» исход) — но и не
@@ -1822,6 +1845,79 @@ class StateMachine:
                 f"💼 Баланс: ${bal_after:.2f}   ↻ Повторяю тот же шаг (MG{self.state.mg_step})."
             )
             self._tick_event.set()
+
+    async def _maybe_pause_on_live_streak(self, symbol: str):
+        """Сравнивает live-серию LOSS-ов на паре с историческим
+        max_loss_streak_to_win и ставит пару на live-pause если превышен порог.
+
+        Защита от перекоса исторических данных vs текущая форма пары:
+        если модель говорит «макс серия 2», а в live уже 4 — модель
+        не работает на этой паре сегодня, лучше остыть.
+
+        Параметры (config.yaml → protection):
+          live_streak_multiplier   (default 1.5) — порог = hist_max × этот
+          live_streak_pause_minutes (default 60)
+          live_streak_min_abs      (default 4)   — не срабатывать на streak<этого
+          live_streak_min_history  (default 30)  — нужно ≥ N settled сигналов
+                                                  для надёжной hist_max
+        Учитывается active strategy_name.
+        """
+        prot = self.cfg.get("protection") or {}
+        if not bool(prot.get("live_streak_pause_enabled", True)):
+            return
+        live = int(self._live_loss_streak.get(symbol, 0))
+        abs_floor = int(prot.get("live_streak_min_abs", 4) or 4)
+        if live < abs_floor:
+            return
+
+        multiplier = float(prot.get("live_streak_multiplier", 1.5) or 1.5)
+        pause_min = int(prot.get("live_streak_pause_minutes", 60) or 60)
+        min_hist = int(prot.get("live_streak_min_history", 30) or 30)
+
+        # Не плодим новый ban, если он уже стоит.
+        if self.journal.is_banned(symbol):
+            return
+
+        strat_name = None
+        if self.registry:
+            try:
+                strat_name = self.registry.get_active().name
+            except Exception:
+                strat_name = None
+        # окно последних 30 дней — достаточно репрезентативно и не сканит всё
+        since = int(time.time()) - 30 * 86400
+        rows = self.journal.analytics_aggregate(
+            since_ts=since, strategy_name=strat_name, only_symbol=symbol,
+        )
+        if not rows:
+            return
+        r = rows[0]
+        hist_max = int(r.get("max_loss_streak_to_win") or 0)
+        n_settled = int(r.get("settled") or 0)
+        if hist_max <= 0 or n_settled < min_hist:
+            return  # данных мало — не судим
+
+        threshold = max(abs_floor, int(round(hist_max * multiplier)))
+        if live < threshold:
+            return
+
+        reason = (
+            f"live_loss_streak={live} ≥ hist_max({hist_max})×{multiplier}={threshold} "
+            f"(n_settled={n_settled})"
+        )
+        self.journal.ban(symbol, minutes=pause_min, reason=reason)
+        logger.warning("LIVE-STREAK-PAUSE %s for %dmin — %s", symbol, pause_min, reason)
+        # сбрасываем live-streak — пара ушла в pause, отсчёт начнётся заново
+        # после возврата в торговлю.
+        self._live_loss_streak.pop(symbol, None)
+        try:
+            await self._notify(
+                f"⏸ <b>LIVE-PAUSE {symbol}</b> на {pause_min} мин\n"
+                f"Серия минусов {live} ≥ исторический max {hist_max} × {multiplier} = {threshold}.\n"
+                f"Модель пары устарела — даём пересобраться."
+            )
+        except Exception:
+            pass
 
     def _reset_cycle(self):
         self.state.current_pair = None

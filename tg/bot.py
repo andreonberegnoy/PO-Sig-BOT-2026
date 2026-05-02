@@ -437,9 +437,15 @@ class TelegramBot:
         # Ниже — handler'ы для callback'ов с префиксом "ctrl:".
 
         def _build_control_text() -> str:
+            paused_now = bool(self.sm and self.sm.state.paused) if self.sm else False
+            run_state = "⏸ <b>НА ПАУЗЕ</b>" if paused_now else "▶️ <b>РАБОТАЕТ</b>"
             return (
                 "🎛 <b>Панель управления</b>\n\n"
+                f"Текущее состояние: {run_state}\n\n"
                 "Выбери действие. Описание каждой кнопки:\n\n"
+                "⛔ <b>Полный стоп</b> — глобальная пауза всего процесса\n"
+                "    (текущая сделка дойдёт до закрытия, новые не открываются)\n"
+                "▶️ <b>Запустить</b> — снять паузу, продолжить торговлю\n"
                 "📊 <b>Диагностика</b> — статус WS, задач, балансы, фрейм-фрешность\n"
                 "💰 <b>Сегодня</b> — сделки за 24ч, WR, профит\n"
                 "🚫 <b>Баны/паузы</b> — пары временно отстранённые\n"
@@ -452,7 +458,17 @@ class TelegramBot:
             )
 
         def _build_control_keyboard() -> InlineKeyboardMarkup:
+            paused_now = bool(self.sm and self.sm.state.paused) if self.sm else False
+            # Глобальный Stop/Start — ярлык отражает текущее состояние.
+            # Используем ctrl:* (а не sm:*) чтобы handler'ы остались в этом
+            # меню и перерисовали control-панель, не подменяя её на status-вью.
+            run_btn = (
+                InlineKeyboardButton(text="▶️ Запустить", callback_data="ctrl:resume")
+                if paused_now
+                else InlineKeyboardButton(text="⛔ Полный стоп", callback_data="ctrl:pause")
+            )
             return InlineKeyboardMarkup(inline_keyboard=[
+                [run_btn],
                 [
                     InlineKeyboardButton(text="📊 Диагностика", callback_data="ctrl:diag"),
                     InlineKeyboardButton(text="💰 Сегодня", callback_data="ctrl:today"),
@@ -527,6 +543,28 @@ class TelegramBot:
 
             if action == "menu":
                 await cb.answer("Главное меню")
+                return await cb.message.edit_text(
+                    _build_control_text(), parse_mode="HTML",
+                    reply_markup=_build_control_keyboard(),
+                )
+
+            if action == "pause":
+                if self.sm:
+                    self.sm.pause()
+                await cb.answer("⛔ Полный стоп — пауза включена")
+                return await cb.message.edit_text(
+                    _build_control_text(), parse_mode="HTML",
+                    reply_markup=_build_control_keyboard(),
+                )
+
+            if action == "resume":
+                if self.sm:
+                    if self.sm.state.waiting_resume:
+                        self.sm.resume_after_stop_sum()
+                        await cb.answer("▶️ Перезапуск после стоп-суммы")
+                    else:
+                        self.sm.resume()
+                        await cb.answer("▶️ Торговля возобновлена")
                 return await cb.message.edit_text(
                     _build_control_text(), parse_mode="HTML",
                     reply_markup=_build_control_keyboard(),

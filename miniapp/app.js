@@ -770,11 +770,9 @@
           </div>
           <div id="calc-warn" style="display:none; padding:6px 8px; background:#7f1d1d; color:#fecaca; border-radius:4px; font-size:12px"></div>
           <div id="calc-table" style="font-size:11px; opacity:0.85"></div>
-          <div style="display:flex; gap:6px; flex-wrap:wrap">
-            <button id="btn-calc-refresh" class="btn" type="button">🔄 Пересчитать</button>
-            <button id="btn-calc-apply" class="btn primary" type="button">✅ Применить вручную</button>
+          <div id="calc-status" class="status-line" style="font-size:11px; opacity:0.7">
+            Превью обновляется автоматически. Применит сам — через выбранный триггер выше.
           </div>
-          <div id="calc-status" class="status-line"></div>
         </div>
       `;
       cont.appendChild(calc);
@@ -836,9 +834,6 @@
       const $ = (id) => calc.querySelector(`#${id}`);
       const fmt = (v) => (v == null ? "—" : `$${(+v).toFixed(2)}`);
 
-      // Текущее состояние расчёта (нужно для apply)
-      let lastBase = null;
-
       async function recomputeCalc() {
         try {
           const st = await api("/api/status");
@@ -856,7 +851,6 @@
           const sumFactor = (Math.pow(q, N) - 1) / (q - 1);
           const rawBase = balance / sumFactor;
           const base = Math.floor(rawBase * 10) / 10;
-          lastBase = base;
 
           $("calc-balance").textContent = fmt(balance);
           $("calc-n").textContent = N;
@@ -868,21 +862,17 @@
           const minOk = base >= minAmount;
           $("calc-base").style.color = minOk ? "#22c55e" : "#ef4444";
           const warn = calc.querySelector("#calc-warn");
-          const applyBtn = calc.querySelector("#btn-calc-apply");
           if (!minOk) {
             const minBalNeeded = minAmount * sumFactor;
             warn.style.display = "block";
             warn.innerHTML = `
               ⛔ <b>Невозможно поставить ${N} циклов при q=${q}</b><br/>
               Расчёт $${base.toFixed(2)} ниже минимума PO ($${minAmount.toFixed(2)}).<br/>
-              Нужен баланс ≥ <b>$${minBalNeeded.toFixed(2)}</b>, либо уменьши N или коэффициент.
+              Нужен баланс ≥ <b>$${minBalNeeded.toFixed(2)}</b>, либо уменьши N или коэффициент.<br/>
+              <i>Авто-пересчёт не сработает (значение игнорируется).</i>
             `;
-            applyBtn.disabled = true;
-            applyBtn.style.opacity = "0.5";
           } else {
             warn.style.display = "none";
-            applyBtn.disabled = false;
-            applyBtn.style.opacity = "1";
           }
 
           // Таблица сделок (нумерация с 1, как просил юзер)
@@ -920,30 +910,10 @@
         }
       }
 
-      $("btn-calc-refresh").onclick = recomputeCalc;
-      $("btn-calc-apply").onclick = async () => {
-        if (lastBase == null || lastBase <= 0) {
-          $("calc-status").textContent = "⚠️ Сначала пересчитай.";
-          $("calc-status").className = "status-line warn";
-          return;
-        }
-        try {
-          await api("/api/settings", {
-            method: "PUT",
-            body: JSON.stringify({ "trading.base_amount": lastBase }),
-          });
-          // Обновим инпут в форме ниже, если он уже отрендерился.
-          const inp = cont.querySelector('[data-k="trading.base_amount"]');
-          if (inp) inp.value = lastBase;
-          $("calc-status").textContent = `✅ Применено: trading.base_amount = $${lastBase.toFixed(2)}`;
-          $("calc-status").className = "status-line ok";
-        } catch (e) {
-          $("calc-status").textContent = `❌ ${e.message || e}`;
-          $("calc-status").className = "status-line err";
-        }
-      };
-
-      // Авто-расчёт при открытии вкладки
+      // Авто-расчёт при открытии вкладки и при изменении триггеров.
+      // Кнопок ручного «Применить»/«Пересчитать» нет — фактическое
+      // обновление trading.base_amount делает state machine при
+      // срабатывании daily/N-cycles триггера.
       recomputeCalc();
 
       for (const [cat, items] of Object.entries(GLOBAL_SCHEMA)) {

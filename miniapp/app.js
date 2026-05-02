@@ -801,10 +801,30 @@
         refreshTriggersVisibility();
         saveAB({ "trading.auto_base_amount.enabled": $en.checked });
       };
-      $da.onchange = () => saveAB({ "trading.auto_base_amount.daily_recalc": $da.checked });
+      // Триггеры взаимоисключающие: либо daily, либо every_n_cycles.
+      // Включение одного автоматически снимает второй (и сохраняет оба значения).
+      $da.onchange = () => {
+        if ($da.checked) {
+          $cy.checked = false;
+          saveAB({
+            "trading.auto_base_amount.daily_recalc": true,
+            "trading.auto_base_amount.every_n_cycles": 0,
+          });
+        } else {
+          saveAB({ "trading.auto_base_amount.daily_recalc": false });
+        }
+      };
       $cy.onchange = () => {
-        const n = $cy.checked ? Math.max(1, parseInt($cyN.value || 1)) : 0;
-        saveAB({ "trading.auto_base_amount.every_n_cycles": n });
+        if ($cy.checked) {
+          $da.checked = false;
+          const n = Math.max(1, parseInt($cyN.value || 1));
+          saveAB({
+            "trading.auto_base_amount.daily_recalc": false,
+            "trading.auto_base_amount.every_n_cycles": n,
+          });
+        } else {
+          saveAB({ "trading.auto_base_amount.every_n_cycles": 0 });
+        }
       };
       $cyN.onchange = () => {
         if ($cy.checked) {

@@ -32,8 +32,26 @@ runs 24/7 on Hetzner VPS in Docker.
 - **Local secrets**: `~/.po-bot/secrets.env` (chmod 600, NOT in git)
   - Contains: PO_SSID, PO_UID, PO_IS_DEMO, PO_STORAGE_STATE_B64, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID
 
-## How to deploy (the proper way)
+## How to deploy
 
+**Автоматически через GitHub Actions** (по умолчанию):
+```bash
+git push origin main   # → workflow .github/workflows/deploy.yml
+                       # → SSH в VPS, git pull, docker compose down/up --build
+                       # → healthcheck + verify auth (≈2-3 минуты)
+```
+
+История запусков: https://github.com/andreonberegnoy/PO-Sig-BOT-2026/actions
+
+Ручной триггер без коммита:
+```bash
+gh workflow run deploy.yml -R andreonberegnoy/PO-Sig-BOT-2026
+```
+
+Workflow не триггерится при push изменений только в `*.md`, `.github/**`,
+`tools/make_*_pdf.py` (экономия минут GitHub Actions).
+
+**Manual fallback** (если GitHub Actions недоступны / нужно отлаживать):
 ```bash
 ssh root@37.27.13.173 'cd /opt/po-bot && git checkout -- config.yaml && git pull && \
   sed -i "s/^mode: paper/mode: real/" config.yaml && \
@@ -42,7 +60,10 @@ ssh root@37.27.13.173 'cd /opt/po-bot && git checkout -- config.yaml && git pull
 
 The `git checkout -- config.yaml` is critical — mode=real is applied via sed
 after every pull (config.yaml in repo has mode=paper as the safe default).
-Without checkout, git pull conflicts with local mode=real edit.
+Без checkout pull конфликтует с локальной правкой mode=real.
+
+Подробная документация по автодеплою: [.github/DEPLOY_SETUP.md](.github/DEPLOY_SETUP.md)
+(SSH-ключи, GitHub Secrets, откат, отзыв ключа).
 
 ## How to debug when user reports problem
 

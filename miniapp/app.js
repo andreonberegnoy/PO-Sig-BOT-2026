@@ -710,6 +710,222 @@
         }
       };
 
+      // ─── 🧮 Автокалькулятор базовой ставки ──────────────────────────────
+      // base = floor(balance / sum_factor × 10) / 10, где
+      // sum_factor = (q^N − 1) / (q − 1)   — сумма геом. прогрессии MG.
+      // N берём из martingale.cycle_total_limit, q из martingale.coefficient
+      // (динамически — если поменяешь в полях ниже, пересчёт «вживую»).
+      // Базовая ставка фиксируется в trading.base_amount; во время МГ
+      // ничего не пересчитывается — _amount_for_step(step) умножает её на q^step.
+      const calc = document.createElement("div");
+      calc.className = "category";
+      const dailyHour = parseInt(cfg?.telegram?.daily_report_hour ?? 7);
+      const ab = (cfg?.trading?.auto_base_amount) || {};
+      const minAmount = parseFloat(ab.min_amount ?? 1.0);
+      calc.innerHTML = `
+        <div class="category-title">🧮 Автокалькулятор базовой ставки</div>
+        <div class="setting-row" style="flex-direction:column; align-items:stretch; gap:10px">
+          <div class="hint" style="font-size:11px; opacity:0.8">
+            Делит доступный баланс на сумму геом. прогрессии МГ (N циклов × коэффициент).
+            N и коэффициент берутся из «Мартингейл» ниже. Округление вниз до десятых.
+            Минимум по PO: <b>$${minAmount.toFixed(2)}</b>.
+          </div>
+
+          <!-- ── master toggle авто-пересчёта ── -->
+          <label class="multi-opt" style="font-weight:600">
+            <input type="checkbox" id="ab-enabled" ${ab.enabled !== false ? "checked" : ""}/>
+            🔁 Автоматический пересчёт включён
+          </label>
+
+          <!-- ── два независимых триггера ── -->
+          <div id="ab-triggers" style="display:flex; flex-direction:column; gap:6px; padding-left:14px">
+            <label class="multi-opt">
+              <input type="checkbox" id="ab-daily" ${ab.daily_recalc ? "checked" : ""}/>
+              📅 Каждые сутки в <b id="ab-daily-hour">${dailyHour}:00</b>
+              <span style="opacity:0.6; font-size:10px">(час из «telegram.daily_report_hour»)</span>
+            </label>
+            <label class="multi-opt" style="display:flex; align-items:center; gap:6px; flex-wrap:wrap">
+              <input type="checkbox" id="ab-cycles" ${(ab.every_n_cycles || 0) > 0 ? "checked" : ""}/>
+              🔂 Через каждые
+              <input type="number" id="ab-cycles-n" min="1" max="100" step="1"
+                     value="${ab.every_n_cycles || 5}" style="width:60px"/>
+              циклов (WIN-завершений)
+            </label>
+            <div class="hint" style="font-size:10px; opacity:0.7">
+              Выкл master → только ручное «Применить» ниже.
+              Любой триггер срабатывает только когда МГ закрыт; во время цикла — отложено до WIN.
+            </div>
+          </div>
+
+          <hr style="border:none; border-top:1px solid #333; margin:4px 0"/>
+
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:6px; font-size:12px">
+            <div>💼 Баланс: <b id="calc-balance">…</b></div>
+            <div>🎯 N циклов: <b id="calc-n">…</b></div>
+            <div>📐 Коэффициент: <b id="calc-q">…</b></div>
+            <div>Σ-фактор: <b id="calc-sumf">…</b></div>
+          </div>
+          <div style="font-size:13px">
+            👉 Расчётная ставка: <b id="calc-base" style="font-size:16px; color:#22c55e">…</b>
+          </div>
+          <div id="calc-warn" style="display:none; padding:6px 8px; background:#7f1d1d; color:#fecaca; border-radius:4px; font-size:12px"></div>
+          <div id="calc-table" style="font-size:11px; opacity:0.85"></div>
+          <div style="display:flex; gap:6px; flex-wrap:wrap">
+            <button id="btn-calc-refresh" class="btn" type="button">🔄 Пересчитать</button>
+            <button id="btn-calc-apply" class="btn primary" type="button">✅ Применить вручную</button>
+          </div>
+          <div id="calc-status" class="status-line"></div>
+        </div>
+      `;
+      cont.appendChild(calc);
+
+      // ── Сохранение настроек авто-пересчёта (PUT /api/settings) ──
+      async function saveAB(patch) {
+        try {
+          await api("/api/settings", { method: "PUT", body: JSON.stringify(patch) });
+        } catch (e) {
+          console.error("save auto_base_amount failed", e);
+        }
+      }
+      const $en = calc.querySelector("#ab-enabled");
+      const $da = calc.querySelector("#ab-daily");
+      const $cy = calc.querySelector("#ab-cycles");
+      const $cyN = calc.querySelector("#ab-cycles-n");
+      const $trig = calc.querySelector("#ab-triggers");
+      function refreshTriggersVisibility() {
+        $trig.style.opacity = $en.checked ? "1" : "0.4";
+        $trig.style.pointerEvents = $en.checked ? "auto" : "none";
+      }
+      refreshTriggersVisibility();
+      $en.onchange = () => {
+        refreshTriggersVisibility();
+        saveAB({ "trading.auto_base_amount.enabled": $en.checked });
+      };
+      $da.onchange = () => saveAB({ "trading.auto_base_amount.daily_recalc": $da.checked });
+      $cy.onchange = () => {
+        const n = $cy.checked ? Math.max(1, parseInt($cyN.value || 1)) : 0;
+        saveAB({ "trading.auto_base_amount.every_n_cycles": n });
+      };
+      $cyN.onchange = () => {
+        if ($cy.checked) {
+          const n = Math.max(1, parseInt($cyN.value || 1));
+          saveAB({ "trading.auto_base_amount.every_n_cycles": n });
+        }
+      };
+
+      const $ = (id) => calc.querySelector(`#${id}`);
+      const fmt = (v) => (v == null ? "—" : `$${(+v).toFixed(2)}`);
+
+      // Текущее состояние расчёта (нужно для apply)
+      let lastBase = null;
+
+      async function recomputeCalc() {
+        try {
+          const st = await api("/api/status");
+          const liveCfg = await api("/api/settings");
+          const balance = +st.balance || 0;
+          // N и q читаем из ЖИВОГО конфига (а не из инпутов формы выше —
+          // на момент клика юзер мог ещё не сохранить изменение).
+          const N = parseInt(liveCfg?.martingale?.cycle_total_limit ?? 7);
+          const q = parseFloat(liveCfg?.martingale?.coefficient ?? 2.1);
+          if (!(N >= 1 && q > 1)) {
+            $("calc-status").textContent = "⚠️ Некорректные N или коэффициент.";
+            $("calc-status").className = "status-line warn";
+            return;
+          }
+          const sumFactor = (Math.pow(q, N) - 1) / (q - 1);
+          const rawBase = balance / sumFactor;
+          const base = Math.floor(rawBase * 10) / 10;
+          lastBase = base;
+
+          $("calc-balance").textContent = fmt(balance);
+          $("calc-n").textContent = N;
+          $("calc-q").textContent = q.toFixed(2);
+          $("calc-sumf").textContent = sumFactor.toFixed(3);
+          $("calc-base").textContent = fmt(base);
+
+          // ── Красная плашка если расчёт ниже минимума PO ──
+          const minOk = base >= minAmount;
+          $("calc-base").style.color = minOk ? "#22c55e" : "#ef4444";
+          const warn = calc.querySelector("#calc-warn");
+          const applyBtn = calc.querySelector("#btn-calc-apply");
+          if (!minOk) {
+            const minBalNeeded = minAmount * sumFactor;
+            warn.style.display = "block";
+            warn.innerHTML = `
+              ⛔ <b>Невозможно поставить ${N} циклов при q=${q}</b><br/>
+              Расчёт $${base.toFixed(2)} ниже минимума PO ($${minAmount.toFixed(2)}).<br/>
+              Нужен баланс ≥ <b>$${minBalNeeded.toFixed(2)}</b>, либо уменьши N или коэффициент.
+            `;
+            applyBtn.disabled = true;
+            applyBtn.style.opacity = "0.5";
+          } else {
+            warn.style.display = "none";
+            applyBtn.disabled = false;
+            applyBtn.style.opacity = "1";
+          }
+
+          // Таблица сделок (нумерация с 1, как просил юзер)
+          let total = 0;
+          const rows = [];
+          for (let i = 0; i < N; i++) {
+            const amt = base * Math.pow(q, i);
+            total += amt;
+            rows.push(
+              `<tr><td style="padding:1px 8px">${i + 1}</td>` +
+              `<td style="padding:1px 8px; text-align:right">$${amt.toFixed(2)}</td>` +
+              `<td style="padding:1px 8px; text-align:right; opacity:0.7">$${total.toFixed(2)}</td></tr>`
+            );
+          }
+          const margin = balance - total;
+          $("calc-table").innerHTML = `
+            <table style="width:100%; border-collapse:collapse">
+              <thead><tr style="opacity:0.7">
+                <th style="text-align:left; padding:1px 8px">№</th>
+                <th style="text-align:right; padding:1px 8px">Ставка</th>
+                <th style="text-align:right; padding:1px 8px">Накопл.</th>
+              </tr></thead>
+              <tbody>${rows.join("")}</tbody>
+            </table>
+            <div style="margin-top:4px">
+              При полной серии LOSS: <b>$${total.toFixed(2)}</b> из $${balance.toFixed(2)} →
+              буфер <b style="color:${margin >= 0 ? '#22c55e' : '#ef4444'}">$${margin.toFixed(2)}</b>
+            </div>
+          `;
+          $("calc-status").textContent = "";
+          $("calc-status").className = "status-line";
+        } catch (e) {
+          $("calc-status").textContent = `❌ ${e.message || e}`;
+          $("calc-status").className = "status-line err";
+        }
+      }
+
+      $("btn-calc-refresh").onclick = recomputeCalc;
+      $("btn-calc-apply").onclick = async () => {
+        if (lastBase == null || lastBase <= 0) {
+          $("calc-status").textContent = "⚠️ Сначала пересчитай.";
+          $("calc-status").className = "status-line warn";
+          return;
+        }
+        try {
+          await api("/api/settings", {
+            method: "PUT",
+            body: JSON.stringify({ "trading.base_amount": lastBase }),
+          });
+          // Обновим инпут в форме ниже, если он уже отрендерился.
+          const inp = cont.querySelector('[data-k="trading.base_amount"]');
+          if (inp) inp.value = lastBase;
+          $("calc-status").textContent = `✅ Применено: trading.base_amount = $${lastBase.toFixed(2)}`;
+          $("calc-status").className = "status-line ok";
+        } catch (e) {
+          $("calc-status").textContent = `❌ ${e.message || e}`;
+          $("calc-status").className = "status-line err";
+        }
+      };
+
+      // Авто-расчёт при открытии вкладки
+      recomputeCalc();
+
       for (const [cat, items] of Object.entries(GLOBAL_SCHEMA)) {
         const div = document.createElement("div");
         div.className = "category";
@@ -816,6 +1032,17 @@
             await api("/api/settings", { method: "PUT", body: JSON.stringify({ [key]: opts }) });
             flashSetting(el, true);
           } catch (e) { flashSetting(el, false); console.error(e); }
+        });
+      });
+      // ── Live-пересчёт калькулятора при смене N или коэффициента ──
+      // Когда юзер крутит «Общий лимит сделок в цикле» или «Множитель»,
+      // автокалькулятор должен мгновенно обновить расчёт + красную плашку.
+      ["martingale.cycle_total_limit", "martingale.coefficient"].forEach((k) => {
+        const el = cont.querySelector(`[data-k="${k}"]`);
+        if (el) el.addEventListener("input", () => {
+          // даём 200мс на сохранение в /api/settings (handler выше),
+          // потом перечитываем через recomputeCalc.
+          setTimeout(() => recomputeCalc(), 250);
         });
       });
     } catch (e) {

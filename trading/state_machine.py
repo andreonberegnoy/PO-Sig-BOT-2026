@@ -14,6 +14,7 @@ fresh cycle, preserve journal.
 
 import asyncio
 import logging
+import math
 import time
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
@@ -116,6 +117,16 @@ class StateMachine:
         # Не путать с self.state.losses_streak_on_pair: тот сбрасывается
         # _reset_cycle() на WIN, этот — только на WIN текущей пары.
         self._live_loss_streak: dict[str, int] = {}
+
+        # Авто-пересчёт base_amount от живого баланса (см. config.trading.auto_base_amount).
+        # Счётчик циклов с момента последнего успешного пересчёта (инкрементится на WIN).
+        self._cycles_since_recalc: int = 0
+        # YYYY-MM-DD (в локальной TZ) последнего daily-пересчёта, чтобы не дёргать
+        # больше раза в сутки.
+        self._last_daily_recalc_date: Optional[str] = None
+        # Если триггер сработал во время МГ — сюда складываем причину;
+        # как только цикл закроется (WIN → mg_step=0) — выполнится.
+        self._pending_recalc_reason: Optional[str] = None
 
         # Strategy registry — replaceable at runtime via Mini App
         self.registry = None   # set externally by main.py if available
@@ -1167,6 +1178,18 @@ class StateMachine:
                     continue
                 continue
 
+            # ── daily-триггер авто-пересчёта base_amount ──
+            # Проверяем КАЖДЫЙ тик (~1с), но `_check_daily_recalc_due()`
+            # сам гарантирует не более 1 срабатывания в сутки. Если МГ идёт —
+            # _recalc_base_from_balance отложит до WIN.
+            if self._check_daily_recalc_due():
+                try:
+                    await self._recalc_base_from_balance(
+                        f"ежедневный пересчёт ({self._last_daily_recalc_date})"
+                    )
+                except Exception:
+                    logger.exception("daily auto-recalc failed")
+
             now = time.time()
 
             # NOTE: глобальный day_off механизм удалён в этапе 3+. Per-pair
@@ -1793,6 +1816,22 @@ class StateMachine:
             self.state.losses_streak_on_pair = 0
             self._reset_cycle()
             self._persist()
+            # ── авто-пересчёт base_amount (если включён) ──
+            self._cycles_since_recalc += 1
+            ab_cfg = (self.cfg.get("trading", {}).get("auto_base_amount") or {})
+            try:
+                # 1) Отложенный пересчёт (например, daily-триггер сработал во время МГ)
+                if ab_cfg.get("enabled", True) and self._pending_recalc_reason:
+                    await self._recalc_base_from_balance(self._pending_recalc_reason)
+                # 2) Триггер «каждые N циклов»
+                elif ab_cfg.get("enabled", True):
+                    every_n = int(ab_cfg.get("every_n_cycles", 0) or 0)
+                    if every_n > 0 and self._cycles_since_recalc >= every_n:
+                        await self._recalc_base_from_balance(
+                            f"каждые {every_n} циклов (счётчик={self._cycles_since_recalc})"
+                        )
+            except Exception:
+                logger.exception("auto-recalc on WIN failed")
             base_msg = (
                 f"✅ <b>WIN {opened.asset}</b>  +${gained:.2f}\n"
                 f"💼 Баланс: ${bal_after:.2f}   📉 Потери сессии: ${self.state.session_loss:.2f}\n"
@@ -1845,6 +1884,143 @@ class StateMachine:
                 f"💼 Баланс: ${bal_after:.2f}   ↻ Повторяю тот же шаг (MG{self.state.mg_step})."
             )
             self._tick_event.set()
+
+    # ─── Авто-пересчёт base_amount от живого баланса ───────────────────
+    def _persist_setting_override(self, key: str, value):
+        """Записать setting в journal.settings_overrides (как делает
+        PUT /api/settings). Гарантирует что значение переживёт деплой
+        (config.yaml перезаписывается при git pull, а journal на volume)."""
+        try:
+            overrides = self.journal.get("settings_overrides") or {}
+            overrides[key] = value
+            self.journal.set("settings_overrides", overrides)
+        except Exception:
+            logger.exception("persist setting override %s failed", key)
+
+    def _is_safe_for_recalc(self) -> bool:
+        """Безопасно ли применить пересчёт ставки прямо сейчас?
+        Можно только когда цикл закрыт И нет открытой/pending-сделки."""
+        if self.state.mg_step != 0:
+            return False
+        if self.state.pending_trade:
+            return False
+        if self.state.waiting_resume:
+            return False
+        return True
+
+    async def _recalc_base_from_balance(self, reason: str) -> bool:
+        """Пересчитать trading.base_amount от живого баланса.
+        Если небезопасно сейчас — отложить (будет применено после WIN).
+        Возвращает True если применили, False иначе.
+        """
+        ab_cfg = (self.cfg.get("trading", {}).get("auto_base_amount") or {})
+        if not bool(ab_cfg.get("enabled", True)):
+            return False
+
+        # Защита: только в чистом состоянии. Если МГ активен — отложим.
+        if not self._is_safe_for_recalc():
+            self._pending_recalc_reason = reason
+            logger.info("recalc deferred (mg_step=%d, pending=%s): %s",
+                        self.state.mg_step, bool(self.state.pending_trade), reason)
+            return False
+
+        mg_cfg = self.cfg.get("martingale") or {}
+        N = int(mg_cfg.get("cycle_total_limit", mg_cfg.get("max_steps", 7)))
+        q = float(mg_cfg.get("coefficient", 2.1))
+        min_amount = float(ab_cfg.get("min_amount", 1.0))
+        if N < 1 or q <= 1:
+            logger.warning("recalc skipped: invalid N=%s or q=%s", N, q)
+            return False
+
+        balance = float(self.feed.balance() or 0.0)
+        sum_factor = (q ** N - 1.0) / (q - 1.0)
+        raw_base = balance / sum_factor if sum_factor > 0 else 0.0
+        # floor до десятых: 3.347 → 3.3
+        new_base = math.floor(raw_base * 10.0) / 10.0
+        old_base = float(self.cfg.get("trading", {}).get("base_amount", 1.0))
+
+        if new_base < min_amount:
+            # Ставка слишком мала — НЕ применяем, шлём алерт.
+            min_balance_needed = min_amount * sum_factor
+            logger.warning(
+                "recalc rejected: new_base=$%.2f < min=$%.2f (balance=$%.2f, N=%d, q=%.2f)",
+                new_base, min_amount, balance, N, q,
+            )
+            try:
+                await self._notify(
+                    f"⛔ <b>Авто-пересчёт ставки отклонён</b>\n"
+                    f"Расчёт: ${new_base:.2f} &lt; мин ${min_amount:.2f}\n"
+                    f"Баланс ${balance:.2f}, цикл N={N}, q={q}\n"
+                    f"Базовая осталась <b>${old_base:.2f}</b>.\n"
+                    f"Для запуска нужен баланс ≥ <b>${min_balance_needed:.2f}</b> "
+                    f"либо уменьшить N/q.\n"
+                    f"<i>Триггер: {reason}</i>"
+                )
+            except Exception:
+                pass
+            # Сбрасываем счётчик циклов всё равно — иначе на каждый WIN будет повтор алерта.
+            self._cycles_since_recalc = 0
+            self._pending_recalc_reason = None
+            return False
+
+        if abs(new_base - old_base) < 1e-6:
+            # Без изменений — тихо сбрасываем триггеры, без TG-спама.
+            self._cycles_since_recalc = 0
+            self._pending_recalc_reason = None
+            return False
+
+        # Применяем
+        self.cfg.setdefault("trading", {})["base_amount"] = new_base
+        self._persist_setting_override("trading.base_amount", new_base)
+        self._cycles_since_recalc = 0
+        self._pending_recalc_reason = None
+
+        delta = new_base - old_base
+        sign = "📈" if delta > 0 else "📉"
+        try:
+            await self._notify(
+                f"🧮 <b>Авто-пересчёт ставки</b> {sign}\n"
+                f"${old_base:.2f} → <b>${new_base:.2f}</b>\n"
+                f"Баланс ${balance:.2f}, цикл N={N}, q={q}\n"
+                f"<i>Триггер: {reason}</i>"
+            )
+        except Exception:
+            pass
+        logger.info("recalc applied: %.2f → %.2f (balance=%.2f, reason=%s)",
+                    old_base, new_base, balance, reason)
+        return True
+
+    def _check_daily_recalc_due(self) -> bool:
+        """True если нужно сейчас сработать daily-триггер (час совпал, ещё
+        не делали сегодня)."""
+        ab = (self.cfg.get("trading", {}).get("auto_base_amount") or {})
+        if not bool(ab.get("enabled", True)):
+            return False
+        if not bool(ab.get("daily_recalc", False)):
+            return False
+        try:
+            tz_name = self.cfg.get("telegram", {}).get("daily_report_timezone", "UTC")
+            target_hour = int(self.cfg.get("telegram", {}).get("daily_report_hour", 7))
+        except Exception:
+            return False
+        try:
+            import pytz
+            tz = pytz.timezone(tz_name)
+        except Exception:
+            tz = None
+        if tz is None:
+            now_local = datetime.utcnow()
+        else:
+            now_local = datetime.now(tz)
+        if now_local.hour != target_hour:
+            return False
+        date_str = now_local.strftime("%Y-%m-%d")
+        if self._last_daily_recalc_date == date_str:
+            return False  # уже делали сегодня
+        # Помечаем дату ДО фактического выполнения, чтобы не дёргать
+        # повторно если запуск отложен (МГ идёт).
+        self._last_daily_recalc_date = date_str
+        return True
 
     async def _maybe_pause_on_live_streak(self, symbol: str):
         """Сравнивает live-серию LOSS-ов на паре с историческим

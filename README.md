@@ -89,8 +89,10 @@ tools/
   └─ aiogram упал → перезапуск через 5-60с (exponential backoff)
 
 Слой 7 — Task Supervisor (main.py)
-  ├─ каждые 30с: проверяет что state_machine/daily_report/health_watchdog живы
-  └─ упала задача → уведомление в TG + автоматический рестарт через 5с
+  ├─ каждые 30с: проверяет что state_machine/daily_report/health_watchdog/periodic_report живы
+  ├─ упала задача → уведомление в TG + автоматический рестарт через 5с
+  └─ NB: daily_report при periodic_report.enabled=true уходит в idle (await Event().wait())
+     — задача жива, supervisor не считает её dead, дубль-отчётов нет
 
 Слой 8 — Top-level supervisor (main.py)
   ├─ while True вокруг asyncio.run(run(...))

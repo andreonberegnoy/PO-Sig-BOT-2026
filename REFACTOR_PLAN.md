@@ -497,6 +497,10 @@ Backwards-compat: старый `filter.day_off_hours` в state_kv override ав�
 - Mini App: pin через `tg.disableVerticalSwipes()` + `enableClosingConfirmation()`
 - Rescan каждые 60с (раньше 300с) + ручной триггер «🔄 Обновить»
 - Periodic report: единый `periodic_report.hour` без зависимости от schedule
+- Fix двойного отчёта: при `periodic_report.enabled=true` старый `daily_report_loop`
+  не должен слать второй отчёт. Решение — задача уходит в `await asyncio.Event().wait()`
+  (idle forever), не возвращает `return`. Иначе supervisor (main.py, каждые 30с)
+  считает задачу dead и спамит «🚨 Задача daily_report упала» в TG бесконечно.
 
 ### Удаление `consecutive_losses_switch`
 По запросу юзера: триггер «N минусов подряд → switch» избыточен в типовой

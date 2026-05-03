@@ -19,10 +19,17 @@ from __future__ import annotations
 
 import logging
 import os
+import time
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Tuple
 
 import yaml
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    ZoneInfo = None  # type: ignore
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
@@ -41,6 +48,47 @@ def _set(cfg: dict, key: str, value: Any) -> None:
             cur[p] = {}
         cur = cur[p]
     cur[parts[-1]] = value
+
+
+def trading_day_window(cfg: dict, now_ts: Optional[int] = None) -> Tuple[int, int]:
+    """Окно «торгового дня» для аналитики max_no_trade_gap.
+
+    Логика:
+      - Если schedule.enabled с заданным [start_hour, end_hour) → окно равно
+        [start_hour, min(now, end_hour)] для текущих суток в TZ из
+        telegram.daily_report_timezone. Если now < start_hour сегодня —
+        отдаём предыдущие торговые сутки (вчера start..end).
+      - Иначе (24/7) → rolling 24h: (now - 86400, now). При срабатывании
+        периодического отчёта это естественно совпадает с интервалом «между
+        двумя отчётами».
+
+    Возвращает (since_ts, until_ts) в UTC unix-секундах.
+    """
+    now_ts = int(now_ts if now_ts is not None else time.time())
+    sched = (cfg.get("schedule") or {})
+    if not bool(sched.get("enabled")):
+        return now_ts - 86400, now_ts
+    try:
+        start_hour = int(sched.get("start_hour", 0))
+        end_hour = int(sched.get("end_hour", 24))
+    except Exception:
+        return now_ts - 86400, now_ts
+    tz_name = ((cfg.get("telegram") or {}).get("daily_report_timezone") or "UTC")
+    try:
+        tz = ZoneInfo(tz_name) if ZoneInfo else None
+    except Exception:
+        tz = None
+    now_local = datetime.fromtimestamp(now_ts, tz=tz) if tz else datetime.utcfromtimestamp(now_ts)
+    today_start = now_local.replace(hour=start_hour, minute=0, second=0, microsecond=0)
+    today_end = now_local.replace(hour=end_hour % 24, minute=0, second=0, microsecond=0)
+    if end_hour >= 24:
+        today_end = today_end + timedelta(days=1)
+    if now_local < today_start:
+        # ещё не открылось сегодня — показываем вчерашний день
+        today_start -= timedelta(days=1)
+        today_end -= timedelta(days=1)
+    until_local = min(now_local, today_end)
+    return int(today_start.timestamp()), int(until_local.timestamp())
 
 
 def _save_yaml(cfg: dict, path: str) -> None:
@@ -85,6 +133,21 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
             banned_count = len(journal.active_bans()) if journal else 0
         except Exception:
             banned_count = 0
+        # ── max no-trade gap в окне текущего торгового дня ──
+        no_trade_gap_s = 0
+        no_trade_window = None
+        try:
+            if journal:
+                since_ts, until_ts = trading_day_window(cfg)
+                no_trade_gap_s = int(journal.max_no_trade_gap(
+                    since_ts, until_ts, cfg.get("mode") or "real",
+                ))
+                no_trade_window = {
+                    "since_ts": since_ts, "until_ts": until_ts,
+                    "schedule_enabled": bool((cfg.get("schedule") or {}).get("enabled")),
+                }
+        except Exception:
+            logger.exception("max_no_trade_gap failed")
         return {
             "mode": cfg.get("mode"),
             "balance": balance,
@@ -116,6 +179,8 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
                 journal and registry and
                 ((journal.signal_filter_get(registry.active_name) or {}).get("enabled"))
             ),
+            "max_no_trade_gap_seconds": no_trade_gap_s,
+            "no_trade_window": no_trade_window,
         }
 
     # ─── settings ───

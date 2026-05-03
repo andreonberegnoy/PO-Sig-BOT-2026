@@ -944,8 +944,22 @@ class TelegramBot:
 
     async def _send_periodic_report(self):
         if not self.journal: return
-        since = int(time.time()) - 86400
+        now_ts = int(time.time())
+        since = now_ts - 86400
         d = self.journal.daily_summary(since, self.cfg["mode"])
+        # Макс. промежуток без торговли — окно как у status (торговый день
+        # при schedule.enabled, иначе rolling 24h до момента отчёта).
+        try:
+            from api.server import trading_day_window
+            gap_since, gap_until = trading_day_window(self.cfg, now_ts)
+            no_trade_gap_s = int(self.journal.max_no_trade_gap(
+                gap_since, gap_until, self.cfg["mode"],
+            ))
+            wnd_label = "торговый день" if (self.cfg.get("schedule") or {}).get("enabled") else "24ч"
+        except Exception:
+            logger.exception("max_no_trade_gap for periodic report failed")
+            no_trade_gap_s = 0
+            wnd_label = "24ч"
         bal = self.feed.balance() if self.feed else "?"
         signals = int(d.get("wins", 0)) + int(d.get("losses", 0)) + int(d.get("draws", 0))
         # Минимальный payout среди WIN-сделок что закрыли цикл после ≥1 минуса.
@@ -979,6 +993,20 @@ class TelegramBot:
         bans_24h = d.get("bans_24h", 0)
         wins = d.get("wins", 0)
         losses = d.get("losses", 0)
+        # Формат «Xч Yм» / «Xд Yч» / «Xм»
+        def _fmt_dur(sec: int) -> str:
+            sec = max(0, int(sec))
+            if sec < 60: return f"{sec}с"
+            d_, rem = divmod(sec, 86400)
+            h_, rem = divmod(rem, 3600)
+            m_ = rem // 60
+            if d_ > 0: return f"{d_}д {h_}ч"
+            if h_ > 0: return f"{h_}ч {m_}м"
+            return f"{m_}м"
+        gap_line = (
+            f"\n⏱️ Макс. без торговли: {_fmt_dur(no_trade_gap_s)} ({wnd_label})"
+            if no_trade_gap_s > 0 else ""
+        )
         text = (
             f"📋 Сводка ({self.cfg['mode']})\n"
             f"\n"
@@ -990,5 +1018,6 @@ class TelegramBot:
             f"🚫 Банов за сутки: {bans_24h}\n"
             f"📡 Сигналов: {signals}"
             f"{recovered_line}"
+            f"{gap_line}"
         )
         await self.notify(text)

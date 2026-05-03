@@ -723,7 +723,17 @@ class TelegramBot:
     # ---------- daily report ----------
 
     async def daily_report_loop(self):
-        """Sends a summary once per day at daily_report_hour local time."""
+        """Legacy daily report at telegram.daily_report_hour local time.
+
+        ⚠ Если periodic_report.enabled=True — этот loop **полностью пропускает
+        отправку**, чтобы не дублировать periodic_report (юзер не хочет два
+        отчёта в сутки). Periodic_report покрывает все те же метрики и
+        конфигурируется по часу через UI.
+        """
+        if (self.cfg.get("periodic_report") or {}).get("enabled"):
+            logger.info("daily_report_loop: skipped (periodic_report.enabled=true)")
+            return  # exit loop entirely — periodic_report выполнит роль
+
         tz = pytz.timezone(self.cfg["telegram"]["daily_report_timezone"])
         target_hour = int(self.cfg["telegram"]["daily_report_hour"])
         while True:
@@ -734,6 +744,11 @@ class TelegramBot:
             sleep_s = (next_run - now).total_seconds()
             logger.info("daily report in %.0fs", sleep_s)
             await asyncio.sleep(sleep_s)
+
+            # Re-check каждый раз — юзер мог включить periodic_report пока ждали
+            if (self.cfg.get("periodic_report") or {}).get("enabled"):
+                logger.info("daily_report: skipped (periodic_report стал enabled)")
+                continue
 
             # If bot is in the middle of a trade cycle, delay until WIN
             while self.sm and self.sm.state.mg_step > 0:
@@ -916,12 +931,20 @@ class TelegramBot:
                 f"\n🎯 Min выплата при +: {min_win_p}%   "
                 f"(вытащено циклов: {recovered_n})"
             )
+        wr = d.get("win_rate", 0)
+        pair_switches = d.get("pair_switches", 0)
+        bans_24h = d.get("bans_24h", 0)
+        wins = d.get("wins", 0)
+        losses = d.get("losses", 0)
         text = (
             f"📋 Сводка ({self.cfg['mode']})\n"
             f"\n"
             f"💳 Текущий баланс: ${bal}\n"
             f"💰 Заработано за сутки: *${d['net_profit']:+.2f}*\n"
+            f"🎯 WR: {wr}%   (✅ {wins} / ❌ {losses})\n"
             f"📉 Макс. минусов подряд: {d['max_loss_streak']}\n"
+            f"🔄 Смен пар: {pair_switches}\n"
+            f"🚫 Банов за сутки: {bans_24h}\n"
             f"📡 Сигналов: {signals}"
             f"{recovered_line}"
         )

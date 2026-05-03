@@ -842,6 +842,44 @@ class Journal:
             "bans_24h": bans_24h,
         }
 
+    def max_no_trade_gap(self, since_ts: int, until_ts: int, mode: str) -> int:
+        """Максимальный непрерывный промежуток БЕЗ сделок в окне [since_ts, until_ts]
+        (секунды). Учитывает:
+          - gap до первой сделки (since → first.open_ts)
+          - gap-ы между сделками (prev.close_ts → next.open_ts)
+          - текущий gap (last.close_ts → until_ts)
+        Если сделок не было вовсе → возвращает (until - since).
+        Если until <= since → возвращает 0.
+        """
+        if until_ts <= since_ts:
+            return 0
+        cur = self.conn.execute(
+            "SELECT open_ts, close_ts FROM trades "
+            "WHERE close_ts >= ? AND close_ts <= ? AND mode = ? "
+            "ORDER BY open_ts",
+            (since_ts, until_ts, mode),
+        )
+        rows = cur.fetchall()
+        if not rows:
+            return until_ts - since_ts
+        max_gap = 0
+        prev_close = since_ts
+        for r in rows:
+            o = int(r[0] or r[1])  # если open_ts NULL — fallback на close_ts
+            c = int(r[1] or 0)
+            if o < prev_close:
+                # перекрытие (например параллельная сделка) — не считаем
+                continue
+            gap = o - prev_close
+            if gap > max_gap:
+                max_gap = gap
+            prev_close = max(prev_close, c)
+        # last open gap до сейчас
+        last_gap = until_ts - prev_close
+        if last_gap > max_gap:
+            max_gap = last_gap
+        return max(0, int(max_gap))
+
     def close(self):
         try: self.conn.close()
         except Exception: pass

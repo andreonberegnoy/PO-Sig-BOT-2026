@@ -192,6 +192,18 @@
     }
   }
 
+  // Формат длительности: 6234s → "1ч 43м"; <60s → "Xс"; >24h → "Xд Yч"
+  function fmtDur(sec) {
+    sec = Math.max(0, Math.floor(+sec || 0));
+    if (sec < 60) return `${sec}с`;
+    const d = Math.floor(sec / 86400);
+    const h = Math.floor((sec % 86400) / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    if (d > 0) return `${d}д ${h}ч`;
+    if (h > 0) return `${h}ч ${m}м`;
+    return `${m}м`;
+  }
+
   async function loadStatus() {
     try {
       const s = await api("/api/status");
@@ -224,6 +236,14 @@
       document.getElementById("m-expiry").textContent = s.expiry_seconds != null ? `${s.expiry_seconds} сек` : "—";
       document.getElementById("m-mg").textContent = s.mg_step ?? 0;
       document.getElementById("m-loss").textContent = `$${(+(s.session_loss || 0)).toFixed(2)}`;
+      // Макс. промежуток без торговли — формат «Хч Yм»
+      const ntEl = document.getElementById("m-no-trade-gap");
+      if (ntEl) {
+        const sec = Math.max(0, +(s.max_no_trade_gap_seconds || 0));
+        const w = s.no_trade_window || {};
+        const wnd = w.schedule_enabled ? "торговый день" : "24h";
+        ntEl.textContent = sec > 0 ? `${fmtDur(sec)} (${wnd})` : `0м (${wnd})`;
+      }
       document.getElementById("m-paused").textContent = s.paused ? "ДА" : "нет";
       const inCycle = (s.mg_step ?? 0) > 0;
       const ca = document.getElementById("cycle-actions");

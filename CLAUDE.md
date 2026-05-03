@@ -94,6 +94,16 @@ after every pull (config.yaml in repo has mode=paper as the safe default).
   ПЕРЕД pull. Уже встроено в Deploy кнопку HTML панели.
 - **Mini App не видит изменения** — Telegram cache. Решение: BotFather → Edit
   menu URL с `?v=N+1` в конце для cache-bust.
+- **Supervisor спамит «🚨 Задача X упала»** — task supervisor (main.py, каждые
+  30с) считает любую завершившуюся задачу dead и рестартит с TG-алертом.
+  Если задаче нечего делать (например `daily_report_loop` при включённом
+  `periodic_report.enabled=true`) — НЕ делать `return`, а
+  `await asyncio.Event().wait()` (idle forever). Тогда задача жива,
+  supervisor спокоен, отчёт шлёт только `periodic_report_loop`.
+- **Двойной daily-отчёт** — историческая ошибка: одновременно работали
+  `daily_report_loop` (старый, schedule.daily_report_hour) и
+  `periodic_report_loop` (новый, periodic_report.hour). Сейчас при
+  `periodic_report.enabled=true` старый уходит в idle (см. выше).
 
 ## Architecture you should already know
 

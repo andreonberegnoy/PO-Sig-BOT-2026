@@ -731,8 +731,13 @@ class TelegramBot:
         конфигурируется по часу через UI.
         """
         if (self.cfg.get("periodic_report") or {}).get("enabled"):
-            logger.info("daily_report_loop: skipped (periodic_report.enabled=true)")
-            return  # exit loop entirely — periodic_report выполнит роль
+            logger.info("daily_report_loop: idle (periodic_report.enabled=true) — задача "
+                        "остаётся живой но ничего не отправляет, чтобы supervisor не "
+                        "перезапускал её бесконечно с TG-алертами")
+            # Не делаем return — иначе supervisor видит «задача упала» и спамит
+            # 🚨 Задача daily_report упала — перезапускаю. Висим вечно вместо exit.
+            await asyncio.Event().wait()  # never sets — sleep forever
+            return
 
         tz = pytz.timezone(self.cfg["telegram"]["daily_report_timezone"])
         target_hour = int(self.cfg["telegram"]["daily_report_hour"])

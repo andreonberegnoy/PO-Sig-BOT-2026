@@ -584,8 +584,15 @@ class TelegramBot:
                                                        reply_markup=_build_control_keyboard())
                 since = int(time.time()) - 86400
                 d = self.journal.daily_summary(since, self.cfg["mode"])
+                try:
+                    max_rec = self.journal.max_recovered_losses_24h(since, self.cfg["mode"])
+                except Exception:
+                    max_rec = None
                 signals = int(d.get("wins", 0)) + int(d.get("losses", 0)) + int(d.get("draws", 0))
                 bal = self.feed.balance() if self.feed else "?"
+                streak_line = ""
+                if max_rec is not None and max_rec > 0:
+                    streak_line = f"📉 Макс. минусов подряд: {max_rec} (МГ{max_rec}→WIN)\n"
                 text = (
                     f"💰 <b>Сегодня (24ч)</b>\n\n"
                     f"📊 Сигналов: {signals}\n"
@@ -593,7 +600,7 @@ class TelegramBot:
                     f"🎯 WR: {d.get('win_rate', 0)}%\n"
                     f"💵 Чистая прибыль: <b>${d.get('net_profit', 0):+.2f}</b>\n"
                     f"🔄 Смен пар: {d.get('pair_switches', 0)}\n"
-                    f"📉 Макс. минусов подряд: {d.get('max_loss_streak', 0)}\n"
+                    f"{streak_line}"
                     f"🚫 Банов за сутки: {d.get('bans_24h', 0)}\n"
                     f"💳 Баланс: ${bal}"
                 )
@@ -1020,8 +1027,12 @@ class TelegramBot:
             f"\n📉 Мин. payout за сутки: {min_payout_24h}%"
             if min_payout_24h is not None else ""
         )
+        # «Макс. минусов подряд» = глубина МГ-восстановления (mg_step у WIN).
+        # DRAW не сбрасывает счётчик и не считается LOSS-ом — после refund бот
+        # повторяет тот же шаг. Поэтому считаем именно по mg_step, а не по
+        # хронологической цепочке LOSS-в-подряд из daily_summary.
         recovered_line2 = (
-            f"\n🎯 Макс. вытянутых минусов: {max_recovered_24h} (МГ{max_recovered_24h}→WIN)"
+            f"\n📉 Макс. минусов подряд: {max_recovered_24h} (МГ{max_recovered_24h}→WIN)"
             if max_recovered_24h is not None and max_recovered_24h > 0 else ""
         )
         text = (
@@ -1030,7 +1041,6 @@ class TelegramBot:
             f"💳 Текущий баланс: ${bal}\n"
             f"💰 Заработано за сутки: *${d['net_profit']:+.2f}*\n"
             f"🎯 WR: {wr}%   (✅ {wins} / ❌ {losses})\n"
-            f"📉 Макс. минусов подряд: {d['max_loss_streak']}\n"
             f"🔄 Смен пар: {pair_switches}\n"
             f"🚫 Банов за сутки: {bans_24h}\n"
             f"📡 Сигналов: {signals}"

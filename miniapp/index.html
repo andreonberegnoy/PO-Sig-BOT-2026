@@ -40,7 +40,7 @@
         <tr><td>Потери сессии:</td><td id="m-loss">—</td></tr>
         <tr><td title="Самый длинный непрерывный промежуток без открытых сделок в рамках текущего торгового дня (или 24h если 24/7). Обновляется онлайн.">⏱️ Макс. без торговли:</td><td id="m-no-trade-gap">—</td></tr>
         <tr><td title="Самый низкий payout(%) среди сделок открытых за последние 24 часа. Учитываются все исходы (WIN/LOSS/DRAW).">📉 Мин. payout за сутки:</td><td id="m-min-payout">—</td></tr>
-        <tr><td title="Максимальная глубина восстановления цикла за сутки — сколько минусов подряд бот вытянул мартингейлом до WIN. Например 3 = был цикл LOSS→LOSS→LOSS→WIN.">🎯 Макс. вытянутых минусов:</td><td id="m-max-recovered">—</td></tr>
+        <tr><td title="Максимальное число минусов подряд в одном цикле, который закончился WIN (т.е. бот вытянул цикл мартингейлом). DRAW (refund) не считается LOSS-ом и не сбрасывает цикл. Пример: 3 = был цикл LOSS→LOSS→LOSS→WIN.">📉 Макс. минусов подряд:</td><td id="m-max-recovered">—</td></tr>
         <tr><td>Пауза:</td><td id="m-paused">—</td></tr>
       </table>
       <div class="actions">
@@ -229,6 +229,6 @@
 </main>
 
 <!-- Cache-bust: bump v=YYYYMMDD when app.js changes. -->
-<script src="/miniapp/app.js?v=20260604"></script>
+<script src="/miniapp/app.js?v=20260605"></script>
 </body>
 </html>

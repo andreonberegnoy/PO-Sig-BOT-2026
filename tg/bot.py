@@ -960,6 +960,15 @@ class TelegramBot:
             logger.exception("max_no_trade_gap for periodic report failed")
             no_trade_gap_s = 0
             wnd_label = "24ч"
+        # Доп. метрики за 24h
+        try:
+            min_payout_24h = self.journal.min_payout_24h(since, self.cfg["mode"])
+        except Exception:
+            min_payout_24h = None
+        try:
+            max_recovered_24h = self.journal.max_recovered_losses_24h(since, self.cfg["mode"])
+        except Exception:
+            max_recovered_24h = None
         bal = self.feed.balance() if self.feed else "?"
         signals = int(d.get("wins", 0)) + int(d.get("losses", 0)) + int(d.get("draws", 0))
         # Минимальный payout среди WIN-сделок что закрыли цикл после ≥1 минуса.
@@ -1007,6 +1016,14 @@ class TelegramBot:
             f"\n⏱️ Макс. без торговли: {_fmt_dur(no_trade_gap_s)} ({wnd_label})"
             if no_trade_gap_s > 0 else ""
         )
+        min_payout_line = (
+            f"\n📉 Мин. payout за сутки: {min_payout_24h}%"
+            if min_payout_24h is not None else ""
+        )
+        recovered_line2 = (
+            f"\n🎯 Макс. вытянутых минусов: {max_recovered_24h} (МГ{max_recovered_24h}→WIN)"
+            if max_recovered_24h is not None and max_recovered_24h > 0 else ""
+        )
         text = (
             f"📋 Сводка ({self.cfg['mode']})\n"
             f"\n"
@@ -1019,5 +1036,7 @@ class TelegramBot:
             f"📡 Сигналов: {signals}"
             f"{recovered_line}"
             f"{gap_line}"
+            f"{min_payout_line}"
+            f"{recovered_line2}"
         )
         await self.notify(text)

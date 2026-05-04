@@ -880,6 +880,32 @@ class Journal:
             max_gap = last_gap
         return max(0, int(max_gap))
 
+    def max_recovered_losses_24h(self, since_ts: int, mode: str) -> Optional[int]:
+        """Максимальная глубина восстановления цикла за сутки. Это mg_step
+        WIN-сделки — сколько минусов цикл вытянул до плюса.
+        Пример: цикл LOSS→LOSS→LOSS→WIN ⇒ recovered_losses=3 (WIN на mg_step=3).
+        Берётся максимум среди WIN-сделок за окно. None если нет WIN."""
+        cur = self.conn.execute(
+            "SELECT MAX(mg_step) FROM trades "
+            "WHERE close_ts >= ? AND mode = ? AND result = 'WIN'",
+            (since_ts, mode),
+        )
+        v = cur.fetchone()[0]
+        return int(v) if v is not None else None
+
+    def min_payout_24h(self, since_ts: int, mode: str) -> Optional[int]:
+        """Минимальный payout (%) среди сделок открытых за последние сутки
+        (close_ts >= since_ts). None если сделок не было.
+        Учитываются ВСЕ исходы (WIN/LOSS/DRAW) — это «худший процент по которому
+        бот вообще согласился войти», полезно для контроля payout-floor."""
+        cur = self.conn.execute(
+            "SELECT MIN(payout) FROM trades "
+            "WHERE close_ts >= ? AND mode = ? AND payout IS NOT NULL",
+            (since_ts, mode),
+        )
+        v = cur.fetchone()[0]
+        return int(v) if v is not None else None
+
     def close(self):
         try: self.conn.close()
         except Exception: pass

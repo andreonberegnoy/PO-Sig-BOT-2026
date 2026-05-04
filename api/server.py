@@ -54,13 +54,13 @@ def trading_day_window(cfg: dict, now_ts: Optional[int] = None) -> Tuple[int, in
     """Окно «торгового дня» для аналитики max_no_trade_gap.
 
     Логика:
-      - Если schedule.enabled с заданным [start_hour, end_hour) → окно равно
-        [start_hour, min(now, end_hour)] для текущих суток в TZ из
-        telegram.daily_report_timezone. Если now < start_hour сегодня —
-        отдаём предыдущие торговые сутки (вчера start..end).
-      - Иначе (24/7) → rolling 24h: (now - 86400, now). При срабатывании
-        периодического отчёта это естественно совпадает с интервалом «между
-        двумя отчётами».
+      - schedule.enabled=true → окно [today's start_hour, min(now, end_hour)]
+        в TZ из telegram.daily_report_timezone. Если now < start_hour сегодня —
+        отдаём предыдущие торговые сутки (вчера start..end). Метрика покажет
+        максимум простоя ТОЛЬКО в рабочих часах, ночь игнорируется.
+      - schedule.enabled=false → rolling 24h: (now - 86400, now). При
+        срабатывании периодического отчёта это естественно совпадает с
+        интервалом «между двумя отчётами».
 
     Возвращает (since_ts, until_ts) в UTC unix-секундах.
     """
@@ -133,6 +133,17 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
             banned_count = len(journal.active_bans()) if journal else 0
         except Exception:
             banned_count = 0
+        # ── минимальный payout + макс. глубина восстановления за 24h ──
+        min_payout_24h = None
+        max_recovered_24h = None
+        try:
+            if journal:
+                _since = int(time.time()) - 86400
+                _mode = cfg.get("mode") or "real"
+                min_payout_24h = journal.min_payout_24h(_since, _mode)
+                max_recovered_24h = journal.max_recovered_losses_24h(_since, _mode)
+        except Exception:
+            logger.exception("24h analytics failed")
         # ── max no-trade gap в окне текущего торгового дня ──
         no_trade_gap_s = 0
         no_trade_window = None
@@ -181,6 +192,8 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
             ),
             "max_no_trade_gap_seconds": no_trade_gap_s,
             "no_trade_window": no_trade_window,
+            "min_payout_24h": min_payout_24h,
+            "max_recovered_losses_24h": max_recovered_24h,
         }
 
     # ─── settings ───

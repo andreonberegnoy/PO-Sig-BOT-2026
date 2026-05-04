@@ -244,6 +244,16 @@
         const wnd = w.schedule_enabled ? "торговый день" : "24h";
         ntEl.textContent = sec > 0 ? `${fmtDur(sec)} (${wnd})` : `0м (${wnd})`;
       }
+      const mpEl = document.getElementById("m-min-payout");
+      if (mpEl) {
+        mpEl.textContent = (s.min_payout_24h != null) ? `${s.min_payout_24h}%` : "—";
+      }
+      const mrEl = document.getElementById("m-max-recovered");
+      if (mrEl) {
+        mrEl.textContent = (s.max_recovered_losses_24h != null)
+          ? (s.max_recovered_losses_24h > 0 ? `${s.max_recovered_losses_24h} (МГ${s.max_recovered_losses_24h}→WIN)` : "0 (без догонов)")
+          : "—";
+      }
       document.getElementById("m-paused").textContent = s.paused ? "ДА" : "нет";
       const inCycle = (s.mg_step ?? 0) > 0;
       const ca = document.getElementById("cycle-actions");

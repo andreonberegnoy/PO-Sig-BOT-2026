@@ -409,14 +409,17 @@ async def run(cfg: dict, config_path: str = "config.yaml"):
     sm = StateMachine(cfg, feed, tc, journal, notify=tg.notify, send_chart=tg.send_chart)
     sm.registry = registry   # wire active-strategy switch in
 
-    # Wire feed's relogin safe-check to state machine: don't re-login during
-    # an active MG cycle (would lose WS mid-trade), an in-flight trade
-    # (pending_trade set), or when paused.
+    # Wire feed's relogin safe-check to state machine: блокируем relogin
+    # ТОЛЬКО когда есть риск потерять WS в момент торговой активности —
+    # активный МГ-цикл (mg_step>0) или открытая/pending сделка. paused и
+    # waiting_resume — БЕЗОПАСНЫЕ состояния (никакая сделка не активна),
+    # relogin в них обязателен иначе бот зависает в петле «session
+    # NotAuthorized → relogin deferred» когда сессия протухает в нерабочие
+    # часы (schedule auto-pause) или после stop_sum.
     def _safe_to_relogin():
         try:
             s = sm.state
-            return (s.mg_step == 0 and s.pending_trade is None
-                    and not s.paused and not s.waiting_resume)
+            return (s.mg_step == 0 and s.pending_trade is None)
         except Exception:
             return True
     feed_relogin_safe_check = _safe_to_relogin

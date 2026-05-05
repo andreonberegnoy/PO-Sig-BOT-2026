@@ -232,6 +232,26 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
                 logger.exception("failed to persist settings_overrides to journal")
         else:
             logger.warning("PUT /api/settings: no journal — change will NOT survive deploy")
+        # ── авто-пересчёт base_amount при изменении N/q/auto_base_amount.enabled ──
+        # Юзерская логика: «если меняю N/коэф — хочу СРАЗУ увидеть новую ставку»,
+        # без ожидания 5-ти WIN-ов. Если бот в активном МГ или сделке — recalc
+        # сам отложит до WIN (через _is_safe_for_recalc → _pending_recalc_reason).
+        recalc_keys = {
+            "martingale.cycle_total_limit",
+            "martingale.max_steps",
+            "martingale.coefficient",
+            "trading.auto_base_amount.enabled",
+        }
+        triggered = [k for k in payload.keys() if k in recalc_keys]
+        if triggered and sm and bool(((cfg.get("trading") or {}).get("auto_base_amount") or {}).get("enabled", True)):
+            try:
+                import asyncio as _aio
+                _aio.create_task(sm._recalc_base_from_balance(
+                    f"ручное изменение настроек ({', '.join(triggered)})"
+                ))
+                logger.info("PUT /api/settings: scheduled base_amount recalc (triggered by %s)", triggered)
+            except Exception:
+                logger.exception("failed to schedule base_amount recalc")
         return {"updated": list(payload.keys()), "cfg": cfg}
 
     # ─── strategies ───

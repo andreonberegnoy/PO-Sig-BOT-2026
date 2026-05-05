@@ -355,8 +355,10 @@ docker compose up -d --build
 **3 топ-таба** с группировкой по логическим зонам:
 
 1. **🏠 Главная (Status)** — режим, баланс, **список tracked-пар по именам**,
-   текущая пара (или "🔍 поиск"), MG-шаг, потери. Кнопки Pause/Resume +
-   Switch/Reset Cycle.
+   текущая пара (или "🔍 поиск"), MG-шаг, потери. Live-метрики за сутки:
+   ⏱️ макс. без торговли (по торговому дню при `schedule.enabled` или 24h),
+   📉 мин. payout, 📉 макс. минусов подряд (через mg_step→WIN, DRAW не
+   сбрасывает счётчик). Кнопки Pause/Resume + Switch/Reset Cycle.
 
 2. **⚙️ Настройки бота** — только общие настройки:
    - 🔍 Фильтр пар (asset_categories, min_payout, общая/recent проходимость, ban_hours / temp_pause_hours / pause_minutes)

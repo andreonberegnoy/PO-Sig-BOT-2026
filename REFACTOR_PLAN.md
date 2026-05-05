@@ -501,6 +501,21 @@ Backwards-compat: старый `filter.day_off_hours` в state_kv override ав�
   не должен слать второй отчёт. Решение — задача уходит в `await asyncio.Event().wait()`
   (idle forever), не возвращает `return`. Иначе supervisor (main.py, каждые 30с)
   считает задачу dead и спамит «🚨 Задача daily_report упала» в TG бесконечно.
+- 3 live-метрики на Главной Mini App + в TG-отчёте/`/control` «Сегодня»:
+  - **Макс. без торговли** (`journal.max_no_trade_gap`): max gap между сделками
+    в окне `trading_day_window(cfg)`. При `schedule.enabled=true` — окно сужается
+    до `[start_hour, end_hour]` (ночь игнорируется), иначе rolling 24h.
+  - **Мин. payout за сутки** (`journal.min_payout_24h`): MIN payout трейдов
+    за последние 24h.
+  - **Макс. минусов подряд** (`journal.max_recovered_losses_24h`): MAX(mg_step)
+    среди WIN-сделок. DRAW не сбрасывает цикл (refund → повтор того же шага),
+    поэтому считается через mg_step, а не chronological LOSS-streak. Старая
+    `daily_summary.max_loss_streak` всё ещё в БД-методе, но юзеру не показывается.
+- Fix relogin loop в paused: `_safe_to_relogin` в main.py больше не блокирует
+  relogin в paused/waiting_resume — только при `mg_step>0` или `pending_trade`.
+  Раньше после schedule auto-pause сессия PO протухала, relogin откладывался
+  навсегда из-за `not s.paused` в условии — бот зависал в петле «NotAuthorized
+  → relogin deferred» до ручного рестарта (commit 83e9302).
 
 ### Удаление `consecutive_losses_switch`
 По запросу юзера: триггер «N минусов подряд → switch» избыточен в типовой

@@ -104,6 +104,20 @@ after every pull (config.yaml in repo has mode=paper as the safe default).
   `daily_report_loop` (старый, schedule.daily_report_hour) и
   `periodic_report_loop` (новый, periodic_report.hour). Сейчас при
   `periodic_report.enabled=true` старый уходит в idle (см. выше).
+- **Бот залип в петле «session NotAuthorized → relogin deferred»** — баг
+  `_safe_to_relogin` в `main.py`. Условие включало `not s.paused and not
+  s.waiting_resume` — relogin блокировался когда бот в паузе по расписанию
+  или после stop_sum. Сессия PO протухала ночью, relogin не запускался
+  никогда, бот зависал. Фикс (commit 83e9302): оставили только
+  `mg_step == 0 and pending_trade is None` — paused/waiting безопасны для
+  relogin (нет активных сделок). Признак бага в логах: `relogin deferred
+  (reason=NotAuthorized) — unsafe state (MG cycle?)` каждые 30с подряд при
+  фактическом mg_step=0.
+- **WS открыт 24/7** — бот не закрывает WS-соединение в paused/waiting/day-off,
+  только не открывает сделки. Аналитика (`_record_signals_phase`) пишется
+  всегда независимо от паузы — это сознательное решение чтобы не терять
+  ночные сигналы для market snapshot фильтрации (этап 2). PO видит активную
+  сессию постоянно — это нормально (как открытая вкладка у юзера), не палево.
 
 ## Architecture you should already know
 
@@ -121,6 +135,19 @@ after every pull (config.yaml in repo has mode=paper as the safe default).
 - **Sticky current_pair**: пара которая в активном цикле (mg_step > 0) принудительно остаётся в `_tracked` даже если её score ухудшился во время цикла. Цикл должен довестись до WIN/stop_sum.
 - **Asset categories**: forex / crypto / stocks / indices / commodities — multi-checkbox в Mini App
 - **NB**: глобальный «day_off» механизм удалён в этапе 3+. Если все пары не прошли — main loop крутится впустую, рескан раз в 60с автоматически освобождает пары когда форма улучшится.
+- **3 live-метрики на Главной Mini App + в TG-отчёте** (поверх daily_summary):
+  - **⏱️ Макс. без торговли** — самый длинный непрерывный gap между сделками.
+    Окно зависит от `schedule.enabled`: при `true` = текущий торговый день
+    `[start_hour, end_hour]` в TZ из `telegram.daily_report_timezone` (ночь
+    игнорируется); при `false` = rolling 24h. Helper `trading_day_window(cfg)`
+    в `api/server.py`. Метод `journal.max_no_trade_gap(since, until, mode)`.
+  - **📉 Мин. payout за сутки** — `MIN(payout)` среди сделок последних 24h
+    (rolling, любой исход). Контроль payout-floor.
+  - **📉 Макс. минусов подряд** — `MAX(mg_step)` среди WIN-сделок за 24h.
+    DRAW не считается LOSS-ом и не сбрасывает цикл (refund → бот повторяет
+    тот же шаг МГ). Поэтому считается через mg_step→WIN, а не через
+    chronological streak (которая в `daily_summary.max_loss_streak` всё ещё
+    есть, но юзеру не показывается).
 
 ## Permissions you have (auto-allow in `.claude/settings.json` если настроено)
 

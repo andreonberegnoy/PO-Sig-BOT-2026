@@ -106,6 +106,25 @@ CREATE INDEX IF NOT EXISTS idx_signals_pending ON signals(settled_at, signal_ts)
 CREATE INDEX IF NOT EXISTS idx_signals_entered ON signals(entered);
 CREATE INDEX IF NOT EXISTS idx_signals_hour    ON signals(hour_local);
 CREATE INDEX IF NOT EXISTS idx_signals_dow     ON signals(day_of_week);
+
+-- Strategy snapshots: версионированные «слепки» аналитических находок.
+-- Каждый snapshot — bundle настроек фильтра, выведенный из анализа БД на дату X.
+-- Только один может быть active=1 одновременно. При активации значения из
+-- filter_config накладываются поверх settings_overrides (с сохранением
+-- backup_config для отката). Signals collector работает независимо — продолжает
+-- писать ВСЕ детектируемые сигналы, не зависит от снимков.
+CREATE TABLE IF NOT EXISTS strategy_snapshots (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    name              TEXT NOT NULL UNIQUE,
+    description       TEXT,                          -- markdown: что нашли, почему такие правки
+    filter_config     TEXT NOT NULL,                 -- JSON {dotted_key: value}
+    backup_config     TEXT,                          -- JSON: то что было в overrides до активации
+    stats_at_creation TEXT,                          -- JSON: общий WR/N на момент создания
+    source_data_until INTEGER,                       -- unix-ts: последний trade включённый в анализ
+    active            INTEGER NOT NULL DEFAULT 0,    -- 0/1
+    created_at        INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_snapshots_active ON strategy_snapshots(active);
 """
 
 
@@ -774,6 +793,140 @@ class Journal:
 
     def delete(self, key: str):
         self.conn.execute("DELETE FROM state_kv WHERE k=?", (key,))
+        self.conn.commit()
+
+    # ---------- strategy snapshots ----------
+    # Версионированные слепки настроек фильтра, выведенные из анализа БД.
+    # Применяются поверх settings_overrides когда active=1. Backup_config хранит
+    # то что было в overrides ДО активации — позволяет откатиться при выключении.
+
+    def snapshot_list(self) -> list:
+        """Все snapshots, сначала активный, потом по дате создания (новые первые)."""
+        self.conn.row_factory = sqlite3.Row
+        rows = self.conn.execute(
+            "SELECT id, name, description, filter_config, stats_at_creation, "
+            "source_data_until, active, created_at FROM strategy_snapshots "
+            "ORDER BY active DESC, created_at DESC"
+        ).fetchall()
+        result = []
+        for r in rows:
+            result.append({
+                "id": r["id"], "name": r["name"], "description": r["description"],
+                "filter_config": json.loads(r["filter_config"]),
+                "stats_at_creation": json.loads(r["stats_at_creation"]) if r["stats_at_creation"] else None,
+                "source_data_until": r["source_data_until"],
+                "active": bool(r["active"]),
+                "created_at": r["created_at"],
+            })
+        return result
+
+    def snapshot_get_active(self) -> dict | None:
+        """Активный snapshot или None если нет."""
+        self.conn.row_factory = sqlite3.Row
+        r = self.conn.execute(
+            "SELECT id, name, description, filter_config, backup_config, "
+            "stats_at_creation, source_data_until, created_at "
+            "FROM strategy_snapshots WHERE active=1 LIMIT 1"
+        ).fetchone()
+        if not r: return None
+        return {
+            "id": r["id"], "name": r["name"], "description": r["description"],
+            "filter_config": json.loads(r["filter_config"]),
+            "backup_config": json.loads(r["backup_config"]) if r["backup_config"] else {},
+            "stats_at_creation": json.loads(r["stats_at_creation"]) if r["stats_at_creation"] else None,
+            "source_data_until": r["source_data_until"],
+            "created_at": r["created_at"],
+        }
+
+    def snapshot_create(self, name: str, description: str, filter_config: dict,
+                        stats_at_creation: dict | None = None,
+                        source_data_until: int | None = None) -> int:
+        """Создать новый snapshot. Возвращает id. Не активирует автоматически."""
+        cur = self.conn.execute(
+            "INSERT INTO strategy_snapshots "
+            "(name, description, filter_config, stats_at_creation, source_data_until, active, created_at) "
+            "VALUES (?, ?, ?, ?, ?, 0, ?)",
+            (name, description, json.dumps(filter_config),
+             json.dumps(stats_at_creation) if stats_at_creation else None,
+             source_data_until, int(time.time()))
+        )
+        self.conn.commit()
+        return cur.lastrowid
+
+    def snapshot_activate(self, snapshot_id: int) -> dict:
+        """Активировать snapshot. Деактивирует другой если был активен.
+        Сохраняет в backup_config текущие значения keys из overrides
+        (чтобы можно было откатить). Накладывает filter_config на overrides.
+        Возвращает {"applied_keys": [...], "snapshot": {...}}.
+        """
+        self.conn.row_factory = sqlite3.Row
+        # Деактивируем все остальные
+        self.conn.execute("UPDATE strategy_snapshots SET active=0 WHERE active=1")
+        # Получаем целевой snapshot
+        r = self.conn.execute(
+            "SELECT filter_config FROM strategy_snapshots WHERE id=?", (snapshot_id,)
+        ).fetchone()
+        if not r:
+            self.conn.commit()
+            raise ValueError(f"snapshot id={snapshot_id} not found")
+        filter_cfg = json.loads(r["filter_config"])
+        # Текущие overrides
+        overrides = self.get("settings_overrides") or {}
+        # Backup тех ключей которые snapshot затрагивает
+        backup = {k: overrides.get(k) for k in filter_cfg.keys()}
+        # Накладываем snapshot на overrides
+        for k, v in filter_cfg.items():
+            overrides[k] = v
+        self.set("settings_overrides", overrides)
+        # Помечаем snapshot активным + сохраняем backup
+        self.conn.execute(
+            "UPDATE strategy_snapshots SET active=1, backup_config=? WHERE id=?",
+            (json.dumps(backup), snapshot_id)
+        )
+        self.conn.commit()
+        return {
+            "applied_keys": list(filter_cfg.keys()),
+            "filter_config": filter_cfg,
+            "backup_config": backup,
+        }
+
+    def snapshot_deactivate(self, snapshot_id: int) -> dict:
+        """Деактивировать snapshot. Восстанавливает значения из backup_config —
+        там где был None (т.е. ключ не был в overrides до активации) — удаляет ключ.
+        """
+        self.conn.row_factory = sqlite3.Row
+        r = self.conn.execute(
+            "SELECT backup_config, filter_config FROM strategy_snapshots "
+            "WHERE id=? AND active=1", (snapshot_id,)
+        ).fetchone()
+        if not r:
+            raise ValueError(f"snapshot id={snapshot_id} not active")
+        backup = json.loads(r["backup_config"]) if r["backup_config"] else {}
+        filter_cfg = json.loads(r["filter_config"])
+        overrides = self.get("settings_overrides") or {}
+        for k in filter_cfg.keys():
+            prev = backup.get(k)
+            if prev is None:
+                overrides.pop(k, None)        # ключа не было — удалить
+            else:
+                overrides[k] = prev           # был какой-то — вернуть
+        self.set("settings_overrides", overrides)
+        self.conn.execute(
+            "UPDATE strategy_snapshots SET active=0, backup_config=NULL WHERE id=?",
+            (snapshot_id,)
+        )
+        self.conn.commit()
+        return {"restored_keys": list(filter_cfg.keys())}
+
+    def snapshot_delete(self, snapshot_id: int) -> None:
+        """Удалить snapshot. Если он активен — сначала деактивирует."""
+        self.conn.row_factory = sqlite3.Row
+        r = self.conn.execute(
+            "SELECT active FROM strategy_snapshots WHERE id=?", (snapshot_id,)
+        ).fetchone()
+        if r and r["active"]:
+            self.snapshot_deactivate(snapshot_id)
+        self.conn.execute("DELETE FROM strategy_snapshots WHERE id=?", (snapshot_id,))
         self.conn.commit()
 
     # ---------- reports ----------

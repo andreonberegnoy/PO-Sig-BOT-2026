@@ -160,10 +160,12 @@
     const tabBtn = document.querySelector(`.subtab[data-subtab="${name}"]`);
     if (tabBtn) tabBtn.classList.add("active");
     const panelId = name === "strategy-settings" ? "sub-strategy-settings"
-      : name === "analytics" ? "sub-analytics" : null;
+      : name === "analytics" ? "sub-analytics"
+      : name === "snapshots" ? "sub-snapshots" : null;
     if (panelId) document.getElementById(panelId)?.classList.add("active");
     if (name === "strategy-settings") loadStrategyParams();
     if (name === "analytics") loadAnalytics();
+    if (name === "snapshots") loadSnapshots();
   }
   document.querySelectorAll(".subtab").forEach((sub) => {
     sub.addEventListener("click", () => gotoSubtab(sub.dataset.subtab));
@@ -739,165 +741,6 @@
           qStatus.className = "status-line err";
         }
       };
-
-      // ─── 🧠 Аналитический снимок стратегии ──────────────────────────────
-      // Snapshot = bundle настроек фильтра выведенный из анализа БД на дату X.
-      // Применяется поверх обычных overrides. Signals collector работает
-      // независимо — собирает ВСЕ детектируемые сигналы. Это позволяет ужесточить
-      // фильтр сейчас, но не потерять разнообразие данных для переанализов
-      // через 2-3 месяца. Описание + статистика на момент создания хранятся
-      // в БД (table strategy_snapshots).
-      const snap = document.createElement("div");
-      snap.className = "category";
-      snap.innerHTML = `
-        <div class="category-title">🧠 Аналитический снимок стратегии</div>
-        <div class="setting-row" style="flex-direction:column; align-items:stretch; gap:10px">
-          <div class="hint" style="font-size:11px; opacity:0.8">
-            Слепок настроек фильтра выведенный из анализа БД на конкретную дату.
-            Применяется поверх обычных настроек.
-            <b>Сбор сигналов в БД идёт независимо</b> — данные не теряются,
-            можно переанализировать через месяцы.
-          </div>
-
-          <div id="snapshot-active-block" style="background:#1f2937; padding:10px; border-radius:6px">
-            <div id="snapshot-active-name" style="font-weight:600; font-size:14px">Загрузка…</div>
-            <div id="snapshot-active-meta" style="font-size:11px; opacity:0.7; margin-top:2px"></div>
-            <div id="snapshot-active-desc" style="font-size:12px; margin-top:8px; display:none;
-                 white-space:pre-wrap; line-height:1.4; padding:6px; background:#0f172a; border-radius:4px"></div>
-            <div style="display:flex; gap:6px; margin-top:8px">
-              <button id="btn-snapshot-toggle-desc" class="btn" type="button"
-                      style="font-size:11px; padding:4px 10px">Подробнее ▾</button>
-              <button id="btn-snapshot-deactivate" type="button"
-                      style="display:none; font-size:11px; padding:4px 10px;
-                             background:#7f1d1d; color:#fecaca; border:none; border-radius:4px;
-                             cursor:pointer">Выключить</button>
-            </div>
-          </div>
-
-          <details id="snapshot-history-details" style="font-size:12px">
-            <summary style="cursor:pointer; padding:4px 0">
-              📜 История версий <span id="snapshot-count" style="opacity:0.6"></span>
-            </summary>
-            <div id="snapshot-list" style="margin-top:8px; display:flex; flex-direction:column; gap:6px"></div>
-          </details>
-
-          <div id="snapshot-status" class="status-line" style="font-size:11px"></div>
-        </div>
-      `;
-      cont.appendChild(snap);
-
-      // ── Загрузка и отрисовка снимков ──
-      async function loadSnapshots() {
-        const status = snap.querySelector("#snapshot-status");
-        const nameEl = snap.querySelector("#snapshot-active-name");
-        const metaEl = snap.querySelector("#snapshot-active-meta");
-        const descEl = snap.querySelector("#snapshot-active-desc");
-        const btnDesc = snap.querySelector("#btn-snapshot-toggle-desc");
-        const btnDeact = snap.querySelector("#btn-snapshot-deactivate");
-        const listEl = snap.querySelector("#snapshot-list");
-        const countEl = snap.querySelector("#snapshot-count");
-        try {
-          const data = await api("/api/snapshots");
-          const all = data.snapshots || [];
-          const active = data.active;
-
-          // Активный блок
-          if (active) {
-            nameEl.textContent = `✅ ${active.name}`;
-            const created = new Date(active.created_at * 1000).toLocaleString("ru-RU");
-            const sd = active.source_data_until
-              ? new Date(active.source_data_until * 1000).toLocaleDateString("ru-RU")
-              : "—";
-            const keysCount = Object.keys(active.filter_config || {}).length;
-            metaEl.innerHTML = `Создан: ${created} · По данным до: ${sd} · Меняет ключей: ${keysCount}`;
-            descEl.textContent = active.description || "(описания нет)";
-            btnDeact.style.display = "";
-            btnDeact.onclick = async () => {
-              if (!confirm(`Выключить снимок «${active.name}»? Настройки откатятся к baseline.`)) return;
-              status.textContent = "Выключаю…"; status.className = "status-line info";
-              try {
-                await api(`/api/snapshots/${active.id}/deactivate`, { method: "PUT" });
-                status.textContent = "✓ Снимок выключен. Настройки откачены."; status.className = "status-line ok";
-                await loadSnapshots();
-              } catch (e) {
-                status.textContent = `❌ ${e.message || e}`; status.className = "status-line err";
-              }
-            };
-          } else {
-            nameEl.textContent = "❌ Снимок не активирован";
-            metaEl.textContent = "Используются обычные настройки фильтра (baseline).";
-            descEl.textContent = "";
-            btnDeact.style.display = "none";
-          }
-
-          btnDesc.onclick = () => {
-            const open = descEl.style.display !== "none";
-            descEl.style.display = open ? "none" : "block";
-            btnDesc.textContent = open ? "Подробнее ▾" : "Свернуть ▴";
-          };
-
-          // Список всех
-          countEl.textContent = `(${all.length})`;
-          listEl.innerHTML = "";
-          if (all.length === 0) {
-            listEl.innerHTML = `<div style="opacity:0.6; font-size:11px">Снимков пока нет — будут появляться по мере анализа.</div>`;
-          }
-          all.forEach((s) => {
-            const item = document.createElement("div");
-            item.style.cssText = "padding:8px; background:#111827; border-radius:4px; "
-              + `border-left:3px solid ${s.active ? "#22c55e" : "#374151"};`;
-            const created = new Date(s.created_at * 1000).toLocaleString("ru-RU");
-            const sd = s.source_data_until
-              ? new Date(s.source_data_until * 1000).toLocaleDateString("ru-RU")
-              : "—";
-            item.innerHTML = `
-              <div style="display:flex; justify-content:space-between; gap:6px; align-items:center">
-                <div style="font-weight:600; font-size:12px">${s.active ? "● " : ""}${s.name}</div>
-                <div style="display:flex; gap:4px">
-                  ${s.active ? "" : `<button class="btn" data-act="${s.id}" type="button"
-                    style="font-size:10px; padding:3px 8px">Активировать</button>`}
-                  ${s.active ? "" : `<button class="btn" data-del="${s.id}" type="button"
-                    style="font-size:10px; padding:3px 8px; background:#374151">×</button>`}
-                </div>
-              </div>
-              <div style="font-size:10px; opacity:0.65; margin-top:2px">
-                ${created} · по данным до ${sd} · ${Object.keys(s.filter_config || {}).length} ключ(ей)
-              </div>
-            `;
-            listEl.appendChild(item);
-          });
-          // Hookup activate/delete
-          listEl.querySelectorAll("[data-act]").forEach((b) => {
-            b.onclick = async () => {
-              const id = b.dataset.act;
-              if (!confirm("Активировать этот снимок? Текущие значения соответствующих ключей сохранятся в backup и применятся настройки снимка.")) return;
-              status.textContent = "Активирую…"; status.className = "status-line info";
-              try {
-                const r = await api(`/api/snapshots/${id}/activate`, { method: "PUT" });
-                status.textContent = `✓ Применено ${r.applied_keys.length} ключ(ей).`; status.className = "status-line ok";
-                await loadSnapshots();
-              } catch (e) {
-                status.textContent = `❌ ${e.message || e}`; status.className = "status-line err";
-              }
-            };
-          });
-          listEl.querySelectorAll("[data-del]").forEach((b) => {
-            b.onclick = async () => {
-              if (!confirm("Удалить этот снимок? (откатить нельзя)")) return;
-              try {
-                await api(`/api/snapshots/${b.dataset.del}`, { method: "DELETE" });
-                await loadSnapshots();
-              } catch (e) {
-                status.textContent = `❌ ${e.message || e}`; status.className = "status-line err";
-              }
-            };
-          });
-        } catch (e) {
-          status.textContent = `Ошибка загрузки: ${e.message || e}`;
-          status.className = "status-line err";
-        }
-      }
-      loadSnapshots();
 
       // ─── 🧮 Автокалькулятор базовой ставки ──────────────────────────────
       // base = floor(balance / sum_factor × 10) / 10, где
@@ -1479,6 +1322,120 @@
     }
     if (dows.length > 0 && dows.length < 7) params.set("dow", dows.join(","));
     return { params, days, hf, ht, dows };
+  }
+
+  // ─── 🧠 Snapshots — versioned strategy filter bundles ───────────────────
+  // Snapshot = bundle настроек фильтра выведенный из анализа БД на дату X.
+  // Применяется поверх обычных overrides. Signals collector работает независимо
+  // — собирает ВСЕ детектируемые сигналы. Это позволяет ужесточить фильтр
+  // сейчас, но не потерять разнообразие данных для переанализов через 2-3 месяца.
+  async function loadSnapshots() {
+    const status = document.getElementById("snapshot-status");
+    const nameEl = document.getElementById("snapshot-active-name");
+    const metaEl = document.getElementById("snapshot-active-meta");
+    const descEl = document.getElementById("snapshot-active-desc");
+    const btnDesc = document.getElementById("btn-snapshot-toggle-desc");
+    const btnDeact = document.getElementById("btn-snapshot-deactivate");
+    const listEl = document.getElementById("snapshot-list");
+    const countEl = document.getElementById("snapshot-count");
+    if (!status) return; // вкладка ещё не отрендерена в DOM
+    try {
+      const data = await api("/api/snapshots");
+      const all = data.snapshots || [];
+      const active = data.active;
+
+      if (active) {
+        nameEl.textContent = `✅ ${active.name}`;
+        const created = new Date(active.created_at * 1000).toLocaleString("ru-RU");
+        const sd = active.source_data_until
+          ? new Date(active.source_data_until * 1000).toLocaleDateString("ru-RU")
+          : "—";
+        const keysCount = Object.keys(active.filter_config || {}).length;
+        metaEl.innerHTML = `Создан: ${created} · По данным до: ${sd} · Меняет ключей: ${keysCount}`;
+        descEl.textContent = active.description || "(описания нет)";
+        btnDeact.style.display = "";
+        btnDeact.onclick = async () => {
+          if (!confirm(`Выключить снимок «${active.name}»? Настройки откатятся к baseline.`)) return;
+          status.textContent = "Выключаю…"; status.className = "status-line info";
+          try {
+            await api(`/api/snapshots/${active.id}/deactivate`, { method: "PUT" });
+            status.textContent = "✓ Снимок выключен. Настройки откачены."; status.className = "status-line ok";
+            await loadSnapshots();
+          } catch (e) {
+            status.textContent = `❌ ${e.message || e}`; status.className = "status-line err";
+          }
+        };
+      } else {
+        nameEl.textContent = "❌ Снимок не активирован";
+        metaEl.textContent = "Используются обычные настройки фильтра (baseline).";
+        descEl.textContent = "";
+        btnDeact.style.display = "none";
+      }
+
+      btnDesc.onclick = () => {
+        const open = descEl.style.display !== "none";
+        descEl.style.display = open ? "none" : "block";
+        btnDesc.textContent = open ? "Подробнее ▾" : "Свернуть ▴";
+      };
+
+      countEl.textContent = `(${all.length})`;
+      listEl.innerHTML = "";
+      if (all.length === 0) {
+        listEl.innerHTML = `<div style="opacity:0.6; font-size:11px">Снимков пока нет — будут появляться по мере анализа.</div>`;
+      }
+      all.forEach((s) => {
+        const item = document.createElement("div");
+        item.style.cssText = "padding:8px; background:#111827; border-radius:4px; "
+          + `border-left:3px solid ${s.active ? "#22c55e" : "#374151"};`;
+        const created = new Date(s.created_at * 1000).toLocaleString("ru-RU");
+        const sd = s.source_data_until
+          ? new Date(s.source_data_until * 1000).toLocaleDateString("ru-RU")
+          : "—";
+        item.innerHTML = `
+          <div style="display:flex; justify-content:space-between; gap:6px; align-items:center">
+            <div style="font-weight:600; font-size:12px">${s.active ? "● " : ""}${s.name}</div>
+            <div style="display:flex; gap:4px">
+              ${s.active ? "" : `<button class="btn" data-act="${s.id}" type="button"
+                style="font-size:10px; padding:3px 8px">Активировать</button>`}
+              ${s.active ? "" : `<button class="btn" data-del="${s.id}" type="button"
+                style="font-size:10px; padding:3px 8px; background:#374151">×</button>`}
+            </div>
+          </div>
+          <div style="font-size:10px; opacity:0.65; margin-top:2px">
+            ${created} · по данным до ${sd} · ${Object.keys(s.filter_config || {}).length} ключ(ей)
+          </div>
+        `;
+        listEl.appendChild(item);
+      });
+      listEl.querySelectorAll("[data-act]").forEach((b) => {
+        b.onclick = async () => {
+          const id = b.dataset.act;
+          if (!confirm("Активировать этот снимок? Текущие значения соответствующих ключей сохранятся в backup и применятся настройки снимка.")) return;
+          status.textContent = "Активирую…"; status.className = "status-line info";
+          try {
+            const r = await api(`/api/snapshots/${id}/activate`, { method: "PUT" });
+            status.textContent = `✓ Применено ${r.applied_keys.length} ключ(ей).`; status.className = "status-line ok";
+            await loadSnapshots();
+          } catch (e) {
+            status.textContent = `❌ ${e.message || e}`; status.className = "status-line err";
+          }
+        };
+      });
+      listEl.querySelectorAll("[data-del]").forEach((b) => {
+        b.onclick = async () => {
+          if (!confirm("Удалить этот снимок? (откатить нельзя)")) return;
+          try {
+            await api(`/api/snapshots/${b.dataset.del}`, { method: "DELETE" });
+            await loadSnapshots();
+          } catch (e) {
+            status.textContent = `❌ ${e.message || e}`; status.className = "status-line err";
+          }
+        };
+      });
+    } catch (e) {
+      status.textContent = `Ошибка загрузки: ${e.message || e}`;
+      status.className = "status-line err";
+    }
   }
 
   async function loadAnalytics() {

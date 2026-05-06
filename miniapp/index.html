@@ -159,6 +159,7 @@
       <div class="subtabs">
         <button class="subtab active" data-subtab="strategy-settings">⚙️ Настройки</button>
         <button class="subtab" data-subtab="analytics">📊 Аналитика</button>
+        <button class="subtab" data-subtab="snapshots">🧠 Снимки</button>
       </div>
 
       <!-- Подвкладка: Настройки стратегии (indicator params) -->
@@ -224,11 +225,46 @@
           <div id="an-hourly" style="display:none; margin-top: 12px;"></div>
         </div>
       </div>
+
+      <!-- Подвкладка: Снимки фильтра (versioned strategy snapshots) -->
+      <div id="sub-snapshots" class="subtab-panel">
+        <div class="card">
+          <p class="hint" style="font-size:11px; opacity:0.85">
+            Слепки настроек фильтра, выведенные из анализа БД на конкретную дату.
+            Применяются поверх обычных настроек. <b>Сбор сигналов в БД идёт независимо</b>
+            — данные не теряются, можно переанализировать через месяцы.
+          </p>
+
+          <div id="snapshot-active-block" style="background:#1f2937; padding:10px; border-radius:6px; margin-top:8px">
+            <div id="snapshot-active-name" style="font-weight:600; font-size:14px">Загрузка…</div>
+            <div id="snapshot-active-meta" style="font-size:11px; opacity:0.7; margin-top:2px"></div>
+            <div id="snapshot-active-desc" style="font-size:12px; margin-top:8px; display:none;
+                 white-space:pre-wrap; line-height:1.4; padding:8px; background:#0f172a; border-radius:4px"></div>
+            <div style="display:flex; gap:6px; margin-top:8px">
+              <button id="btn-snapshot-toggle-desc" class="btn" type="button"
+                      style="font-size:11px; padding:4px 10px">Подробнее ▾</button>
+              <button id="btn-snapshot-deactivate" type="button"
+                      style="display:none; font-size:11px; padding:4px 10px;
+                             background:#7f1d1d; color:#fecaca; border:none; border-radius:4px;
+                             cursor:pointer">Выключить</button>
+            </div>
+          </div>
+
+          <details id="snapshot-history-details" style="font-size:12px; margin-top:10px">
+            <summary style="cursor:pointer; padding:4px 0">
+              📜 История версий <span id="snapshot-count" style="opacity:0.6"></span>
+            </summary>
+            <div id="snapshot-list" style="margin-top:8px; display:flex; flex-direction:column; gap:6px"></div>
+          </details>
+
+          <div id="snapshot-status" class="status-line" style="font-size:11px; margin-top:8px"></div>
+        </div>
+      </div>
     </div>
   </section>
 </main>
 
 <!-- Cache-bust: bump v=YYYYMMDD when app.js changes. -->
-<script src="/miniapp/app.js?v=20260606"></script>
+<script src="/miniapp/app.js?v=20260607"></script>
 </body>
 </html>

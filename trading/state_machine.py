@@ -1176,6 +1176,21 @@ class StateMachine:
                     self._persist()
                     await self._notify("☀️ Доброе утро. Рабочее окно открылось — возвращаюсь к торговле.")
                     continue
+                # ── Rescan даже в paused/waiting_resume ──
+                # Иначе _pair_scores замерзает на старых score'ах (включая старые
+                # значения max_losses_in_row, min_wr1 и т.д.), и UI показывает
+                # «tracked»-пары которые уже должны быть забанены по новым
+                # настройкам. Скан безопасен — не открывает сделок, только
+                # обновляет _pair_scores + tracked-set + кладёт новые баны.
+                now = time.time()
+                if self._force_rescan or now - last_scan > 60:
+                    self._force_rescan = False
+                    last_scan = now
+                    try:
+                        await self._rescan_pairs()
+                        self.journal.prune_bans()
+                    except Exception:
+                        logger.exception("rescan in paused/waiting failed")
                 continue
 
             # ── daily-триггер авто-пересчёта base_amount ──

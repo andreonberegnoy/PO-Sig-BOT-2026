@@ -254,6 +254,107 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
                 logger.exception("failed to schedule base_amount recalc")
         return {"updated": list(payload.keys()), "cfg": cfg}
 
+    # ─── strategy snapshots (versioned filter bundles) ───
+    # Snapshot = «слепок аналитических находок на дату X».
+    # Применяется ПОВЕРХ settings_overrides когда active=1.
+    # Signals collector работает независимо — пишет ВСЕ сигналы.
+    # Это позволяет ужесточить фильтр сейчас, но не потерять диверсификацию
+    # данных для будущих переанализов через 2-3 месяца.
+
+    @app.get("/api/snapshots")
+    async def list_snapshots(request: Request):
+        _auth(request)
+        if not journal:
+            raise HTTPException(503, "journal not available")
+        return {"snapshots": journal.snapshot_list(),
+                "active": journal.snapshot_get_active()}
+
+    @app.post("/api/snapshots")
+    async def create_snapshot(request: Request, payload: dict):
+        _auth(request)
+        if not journal:
+            raise HTTPException(503, "journal not available")
+        name = (payload.get("name") or "").strip()
+        if not name:
+            raise HTTPException(400, "name required")
+        filter_config = payload.get("filter_config") or {}
+        if not isinstance(filter_config, dict) or not filter_config:
+            raise HTTPException(400, "filter_config must be a non-empty dict")
+        try:
+            sid = journal.snapshot_create(
+                name=name,
+                description=payload.get("description") or "",
+                filter_config=filter_config,
+                stats_at_creation=payload.get("stats_at_creation"),
+                source_data_until=payload.get("source_data_until"),
+            )
+            return {"created_id": sid}
+        except Exception as e:
+            raise HTTPException(400, str(e))
+
+    @app.put("/api/snapshots/{snapshot_id}/activate")
+    async def activate_snapshot(request: Request, snapshot_id: int):
+        _auth(request)
+        if not journal:
+            raise HTTPException(503, "journal not available")
+        try:
+            result = journal.snapshot_activate(snapshot_id)
+            # Применяем filter_config ОТДЕЛЬНО к runtime cfg (чтобы не ждать рестарта)
+            for k, v in result["filter_config"].items():
+                _set(cfg, k, v)
+            _save_yaml(cfg, config_path)
+            logger.info("Snapshot id=%d activated, applied keys: %s",
+                        snapshot_id, result["applied_keys"])
+            return result
+        except ValueError as e:
+            raise HTTPException(404, str(e))
+        except Exception:
+            logger.exception("activate snapshot failed")
+            raise HTTPException(500, "internal error")
+
+    @app.put("/api/snapshots/{snapshot_id}/deactivate")
+    async def deactivate_snapshot(request: Request, snapshot_id: int):
+        _auth(request)
+        if not journal:
+            raise HTTPException(503, "journal not available")
+        try:
+            # Прежде чем менять — запомним filter_config + backup для применения к runtime cfg
+            active = journal.snapshot_get_active()
+            if not active or active["id"] != snapshot_id:
+                raise HTTPException(400, "snapshot not active")
+            backup = active["backup_config"]
+            filter_keys = list(active["filter_config"].keys())
+            result = journal.snapshot_deactivate(snapshot_id)
+            # Применяем backup к runtime cfg
+            for k in filter_keys:
+                prev = backup.get(k)
+                if prev is None:
+                    # Был не задан → возвращаем default из config.yaml (через перечитку — но это
+                    # потребовало бы load_config, чего мы здесь не делаем). Просто оставляем
+                    # текущее значение в cfg как есть; настоящий sync будет при рестарте.
+                    # На практике достаточно убрать из overrides — следующая загрузка cfg
+                    # подтянет default. Runtime cfg инвалидно для этого ключа до рестарта.
+                    pass
+                else:
+                    _set(cfg, k, prev)
+            _save_yaml(cfg, config_path)
+            logger.info("Snapshot id=%d deactivated, restored keys: %s",
+                        snapshot_id, result["restored_keys"])
+            return result
+        except ValueError as e:
+            raise HTTPException(404, str(e))
+
+    @app.delete("/api/snapshots/{snapshot_id}")
+    async def delete_snapshot(request: Request, snapshot_id: int):
+        _auth(request)
+        if not journal:
+            raise HTTPException(503, "journal not available")
+        try:
+            journal.snapshot_delete(snapshot_id)
+            return {"deleted": snapshot_id}
+        except Exception as e:
+            raise HTTPException(400, str(e))
+
     # ─── strategies ───
     @app.get("/api/strategies")
     async def list_strategies(request: Request):

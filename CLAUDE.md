@@ -127,6 +127,14 @@ after every pull (config.yaml in repo has mode=paper as the safe default).
   - **PAUSE** (60 мин) — провалена ТОЛЬКО проходимость последних свечей
   - **TEMP_PAUSE** (6ч default) — обе проходимости провалены одновременно. Per-pair, не глобальный.
   - **BAN** (6ч/12ч default) — серия LOSS-ов > max_losses_in_row
+- **Trade mode (OTC / regular / mixed)** — `filter.trade_mode`. Контролирует
+  только ТОРГОВЛЮ (открытие реальных сделок). Аналитика (signals в БД через
+  `_record_signals_phase`) пишется по ОБОИМ типам всегда — это broad pool для
+  будущих переанализов. Per-pair payout-порог: `filter.min_payout` для OTC,
+  `filter.min_payout_regular` для обычных (default 80, обычно ниже).
+  Helper `_pair_matches_trade_mode(sym)` в state_machine, врезки в
+  `_free_scan_step`, `_in_cycle_search_step`, `_open_and_track` (safety guard).
+  Дефолт `trade_mode=otc` сохраняет старое поведение.
 - **Двойной фильтр проходимости**:
   - **Общая проходимость** (`min_wr1`, default 60%) — % первой плюсовой сделки за 1000 свечей
   - **Проходимость последних свечей** (`min_wr1_recent`, default 75%) — то же за 200 свечей

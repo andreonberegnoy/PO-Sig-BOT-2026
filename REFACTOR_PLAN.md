@@ -516,6 +516,22 @@ Backwards-compat: старый `filter.day_off_hours` в state_kv override ав�
   Раньше после schedule auto-pause сессия PO протухала, relogin откладывался
   навсегда из-за `not s.paused` в условии — бот зависал в петле «NotAuthorized
   → relogin deferred» до ручного рестарта (commit 83e9302).
+- Strategy snapshots — версионированные слепки фильтра. Table `strategy_snapshots`
+  в state.db: name, description (markdown), filter_config (JSON), backup_config,
+  stats_at_creation, active. API GET/POST/PUT/DELETE `/api/snapshots`. Mini App
+  блок «🧠 Снимки» в подвкладке Стратегии. При активации snapshot.filter_config
+  накладывается на settings_overrides с сохранением backup для отката. Только
+  один может быть active=1. Один snapshot не привязан к конкретной стратегии
+  (в текущей реализации) — это глобальный bundle filter-настроек.
+- Trade mode (OTC / regular / mixed): `filter.trade_mode` контролирует ТОРГОВЛЮ,
+  аналитика (signals collector) пишется по ОБОИМ типам пар всегда. Per-pair
+  payout-порог: `filter.min_payout` для OTC, `filter.min_payout_regular` (default 80)
+  для не-OTC. Hard-filter `info["is_otc"]` убран из `scan_all_pairs` — теперь
+  scan возвращает broad pool. Решение «торговать или нет» принимает
+  `_pair_matches_trade_mode(sym)` в state_machine с врезками в `_free_scan_step`,
+  `_in_cycle_search_step`, `_open_and_track` (safety guard). `_eligible_for_new_cycle`
+  тоже использует per-pair payout-порог. Backward-compat: дефолт `trade_mode=otc`
+  → старое поведение для существующих установок.
 
 ### Удаление `consecutive_losses_switch`
 По запросу юзера: триггер «N минусов подряд → switch» избыточен в типовой

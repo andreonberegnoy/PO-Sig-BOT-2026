@@ -410,16 +410,25 @@ async def run(cfg: dict, config_path: str = "config.yaml"):
     sm.registry = registry   # wire active-strategy switch in
 
     # Wire feed's relogin safe-check to state machine: блокируем relogin
-    # ТОЛЬКО когда есть риск потерять WS в момент торговой активности —
-    # активный МГ-цикл (mg_step>0) или открытая/pending сделка. paused и
-    # waiting_resume — БЕЗОПАСНЫЕ состояния (никакая сделка не активна),
-    # relogin в них обязателен иначе бот зависает в петле «session
-    # NotAuthorized → relogin deferred» когда сессия протухает в нерабочие
-    # часы (schedule auto-pause) или после stop_sum.
+    # ТОЛЬКО когда есть риск потерять WS в момент торговой активности.
+    # Реальный риск — pending_trade (открытая сделка ждёт результата) ИЛИ
+    # активный МГ-цикл вне паузы (бот может вот-вот открыть следующую сделку).
+    # paused и waiting_resume — БЕЗОПАСНЫЕ состояния даже при mg_step>0:
+    # никакой сделки в полёте нет, новая не откроется до /resume → можно
+    # relogin без потерь. Без этого бот залипает в «NotAuthorized → relogin
+    # deferred» когда сессия протухает в waiting_resume после stop_sum
+    # (типичный сценарий — слил, дальше сессия PO через час протухает,
+    # relogin блокируется бесконечно, нужен ручной рестарт).
     def _safe_to_relogin():
         try:
             s = sm.state
-            return (s.mg_step == 0 and s.pending_trade is None)
+            if s.pending_trade is not None:
+                return False
+            # mg_step>0 опасно ТОЛЬКО когда бот реально может открыть сделку.
+            # В паузе или waiting_resume — нет, relogin безопасен.
+            if s.mg_step != 0 and not (s.paused or s.waiting_resume):
+                return False
+            return True
         except Exception:
             return True
     feed_relogin_safe_check = _safe_to_relogin

@@ -203,25 +203,53 @@ async def run(cfg: dict, config_path: str = "config.yaml"):
         po_email = os.environ.get("PO_EMAIL")
         po_password = os.environ.get("PO_PASSWORD")
 
-        if po_state_b64:
-            from feed.auto_relogin import fetch_fresh_ssid_via_state
-            async def _relogin():
-                fresh = await fetch_fresh_ssid_via_state(po_state_b64, is_demo=is_demo)
+        # Cascaded relogin: state_b64 → credentials → fail.
+        # Раньше было if/elif — если storage_state протухал, credentials никогда
+        # не пробовались. Теперь: пробуем state первым (быстрее, обходит
+        # Cloudflare challenge), если не сработал — fallback к form-login через
+        # email+password (создаёт свежие cookies bound to VPS-IP, что важно
+        # когда state был создан на другой машине / IP).
+        from feed.auto_relogin import (
+            fetch_fresh_ssid_via_state, fetch_fresh_ssid,
+        )
+        has_state = bool(po_state_b64)
+        has_creds = bool(po_email and po_password)
+
+        async def _relogin():
+            fresh = None
+            # 1) Сначала пробуем storage_state (быстро, без Cloudflare challenge)
+            if has_state:
+                try:
+                    fresh = await fetch_fresh_ssid_via_state(po_state_b64, is_demo=is_demo)
+                except Exception:
+                    log.exception("auto-relogin via state: unexpected error")
                 if fresh:
                     consecutive_failures["n"] = 0
-                else:
-                    consecutive_failures["n"] += 1
-                    if consecutive_failures["n"] == 2:   # notify once after second fail
-                        await _notify_session_expired()
-                return fresh
+                    return fresh
+                log.warning("auto-relogin: state-based attempt failed%s",
+                            " — trying credentials fallback…" if has_creds else "")
+            # 2) Fallback на form-login если есть credentials
+            if has_creds:
+                try:
+                    fresh = await fetch_fresh_ssid(po_email, po_password, is_demo=is_demo)
+                except Exception:
+                    log.exception("auto-relogin via credentials: unexpected error")
+                if fresh:
+                    consecutive_failures["n"] = 0
+                    log.info("auto-relogin: credentials login SUCCESS — fresh session "
+                             "bound to current egress IP")
+                    return fresh
+            # 3) Оба способа провалились
+            consecutive_failures["n"] += 1
+            if consecutive_failures["n"] == 2:
+                await _notify_session_expired()
+            return None
+
+        if has_state or has_creds:
             relogin_cb = _relogin
-            log.info("auto-relogin enabled via storage_state (cookie-based)")
-        elif po_email and po_password:
-            from feed.auto_relogin import fetch_fresh_ssid
-            async def _relogin():
-                return await fetch_fresh_ssid(po_email, po_password, is_demo=is_demo)
-            relogin_cb = _relogin
-            log.info("auto-relogin enabled via email/password (may be blocked by Cloudflare)")
+            log.info("auto-relogin enabled: state=%s, credentials=%s",
+                     "yes" if has_state else "no",
+                     "yes" if has_creds else "no")
 
         # Will be wired to state_machine.state.mg_step==0 once sm exists
         feed_relogin_safe_check = lambda: True

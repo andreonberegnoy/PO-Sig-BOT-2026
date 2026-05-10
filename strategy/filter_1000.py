@@ -199,6 +199,10 @@ async def scan_all_pairs(
     if "stats_lookback_bars" in f_cfg:
         ind_cfg["statsLookbackBars"] = f_cfg["stats_lookback_bars"]
     min_payout = f_cfg["min_payout"]
+    # Отдельный payout-порог для не-OTC пар (обычные Forex/stocks). Если не задан
+    # — fallback на min_payout. Это позволяет включить обычные пары в analytics-pool
+    # с более низкой выплатой (обычно у них payout ниже чем у OTC).
+    min_payout_regular = int(f_cfg.get("min_payout_regular", min_payout) or min_payout)
     max_losses = f_cfg["max_losses_in_row"]
     min_wr1 = float(f_cfg.get("min_wr1", 0) or 0)
     min_wr1_recent = float(f_cfg.get("min_wr1_recent", 0) or 0)
@@ -210,15 +214,23 @@ async def scan_all_pairs(
     limit = f_cfg["history_candles"]
     tf = f_cfg["tf"]
 
-    # Pick candidates from assets
+    # Pick candidates from assets. Берём ОБА типа пар (OTC + regular) — узкий
+    # фильтр по trade_mode применяется уже на этапе ОТКРЫТИЯ сделки в
+    # state_machine, не здесь. Это даёт broad pool для analytics: signals
+    # пишутся по обоим типам всегда (см. _record_signals_phase).
+    def _passes_payout(info):
+        threshold = min_payout if info.get("is_otc") else min_payout_regular
+        return info["payout"] >= threshold
     candidates = symbols or [
         s for s, info in feed.assets.items()
-        if info["payout"] >= min_payout and info["is_otc"]   # OTC only for weekend-stable trading
+        if _passes_payout(info)
         and (not allowed_cats or categorize_symbol(s, info) in allowed_cats)
     ]
     cat_msg = f", categories={sorted(allowed_cats)}" if allowed_cats else ""
-    logger.info("scanning %d candidate pairs (min_payout=%d%%%s)",
-                len(candidates), min_payout, cat_msg)
+    payout_msg = (f"min_payout=OTC:{min_payout}%/regular:{min_payout_regular}%"
+                  if min_payout != min_payout_regular else f"min_payout={min_payout}%")
+    logger.info("scanning %d candidate pairs (%s%s)",
+                len(candidates), payout_msg, cat_msg)
 
     scores: dict[str, PairScore] = {}
     # Run fetches concurrently but bounded

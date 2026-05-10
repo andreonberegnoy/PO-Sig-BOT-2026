@@ -490,6 +490,28 @@ class StateMachine:
             logger.exception("user_filter check failed for %s — propagating signal", symbol)
         return action
 
+    def _pair_matches_trade_mode(self, sym: str) -> bool:
+        """True если пара разрешена для ТОРГОВЛИ в текущем filter.trade_mode.
+        Analytics-collection (_record_signals_phase) этот метод НЕ дёргает —
+        она пишет сигналы по всему self._tracked независимо от trade_mode.
+
+        Режимы:
+          • "otc"     (default) — открываем только на _otc парах
+          • "regular" — только на обычных (без суффикса _otc)
+          • "mixed"   — обе категории
+        Неизвестный mode → пропускаем (failsafe — не блокировать торговлю при
+        опечатке в конфиге)."""
+        mode = (self.cfg.get("filter") or {}).get("trade_mode", "otc")
+        if mode == "mixed":
+            return True
+        info = self.feed.assets.get(sym) or {}
+        is_otc = bool(info.get("is_otc"))
+        if mode == "otc":
+            return is_otc
+        if mode == "regular":
+            return not is_otc
+        return True
+
     def _reclassify_current_pair_now(self):
         """Этап 3: real-time бан/пере-фильтрация. Берёт cached candles
         текущей пары, прогоняет filter_1000.classify(), обновляет
@@ -993,8 +1015,14 @@ class StateMachine:
         if self.journal.is_banned(symbol): return False
         sc = self._pair_scores.get(symbol)
         if not sc or not sc.allowed: return False
-        payout = int(self.feed.assets.get(symbol, {}).get("payout", 0))
-        if payout < self.cfg["filter"]["min_payout"]: return False
+        info = self.feed.assets.get(symbol) or {}
+        payout = int(info.get("payout", 0))
+        # Per-pair payout-порог: OTC → min_payout, обычные → min_payout_regular
+        f_cfg = self.cfg.get("filter") or {}
+        threshold = (int(f_cfg.get("min_payout", 0)) if info.get("is_otc")
+                     else int(f_cfg.get("min_payout_regular", f_cfg.get("min_payout", 0)) or
+                              f_cfg.get("min_payout", 0)))
+        if payout < threshold: return False
         # Asset-category whitelist (e.g. only forex+crypto, no stocks/indices)
         allowed_cats = set((self.cfg.get("filter") or {}).get("asset_categories") or [])
         if allowed_cats:
@@ -1319,6 +1347,8 @@ class StateMachine:
             ),
         )
         for sym in sorted_tracked:
+            if not self._pair_matches_trade_mode(sym):
+                continue  # отфильтровано по filter.trade_mode (OTC/regular/mixed)
             if not self._eligible_for_new_cycle(sym):
                 continue
             buf = self._candles.get(sym)
@@ -1563,7 +1593,9 @@ class StateMachine:
         tf = self.cfg["filter"]["tf"]
         MAX_STALENESS = 25
         now_ts = int(time.time())
-        min_payout = self.cfg["filter"]["min_payout"]
+        f_cfg = self.cfg.get("filter") or {}
+        min_payout = int(f_cfg.get("min_payout", 0))
+        min_payout_regular = int(f_cfg.get("min_payout_regular", min_payout) or min_payout)
 
         # Расширенный candidate-set: ВСЕ пары из _pair_scores (не только tracked).
         # Включает pairs которые сейчас в pause/temp_pause — их recent WR1
@@ -1587,15 +1619,21 @@ class StateMachine:
             # Skip pairs already used in this cycle (anti-bounce)
             if sym in self.state.switched_pairs:
                 continue
+            # Skip pairs не подходящие текущему режиму торговли (OTC/regular/mixed)
+            if not self._pair_matches_trade_mode(sym):
+                continue
             # Skip ТОЛЬКО жёсткий бан (max_loss_streak > N) — деструктивные пары
             score = self._pair_scores.get(sym)
             if score is None or score.ban:
                 continue
             # NB: НЕ пропускаем score.pause / score.temp_pause / score.allowed=False —
             # в режиме SEARCH цикла нам важно добить, форма пары вторична.
-            # Skip low payout — без выгоды нет смысла торговать
-            payout = int(self.feed.assets.get(sym, {}).get("payout", 0))
-            if payout < min_payout:
+            # Skip low payout — без выгоды нет смысла торговать.
+            # Per-pair payout-порог: OTC vs regular.
+            info = self.feed.assets.get(sym) or {}
+            payout = int(info.get("payout", 0))
+            threshold = min_payout if info.get("is_otc") else min_payout_regular
+            if payout < threshold:
                 continue
             # NOTE: hour-whitelist gate был удалён в этапе 1 рефакторинга.
             buf = self._candles.get(sym)
@@ -1642,6 +1680,16 @@ class StateMachine:
 
     # ---------- trade open / close flow ----------
     async def _open_and_track(self, sym: str, action: str, amount: float):
+        # Defense-in-depth: на случай если вход прошёл через нестандартный путь
+        # (manual switch, кастомная стратегия и т.д.) ещё раз проверим что пара
+        # подходит trade_mode. Основная фильтрация уже в _free_scan_step /
+        # _in_cycle_search_step — этот guard страхует от регрессий.
+        if not self._pair_matches_trade_mode(sym):
+            logger.warning(
+                "BLOCKED open: %s не соответствует trade_mode=%s — abort",
+                sym, (self.cfg.get("filter") or {}).get("trade_mode"),
+            )
+            return
         expiry = int(self.cfg["trading"]["expiry_seconds"])
         # NOTE: hour_expiry_overrides был удалён в этапе 1 рефакторинга.
         # В этапе 2 будет переработан как часть новой Аналитики

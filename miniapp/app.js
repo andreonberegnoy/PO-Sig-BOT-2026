@@ -608,12 +608,22 @@
   // Только общие настройки. Indicator params живут в «Стратегия → Настройки».
   const GLOBAL_SCHEMA = {
     "🔍 Фильтр пар": [
+      { k: "filter.trade_mode", t: "choice",
+        options: [
+          { v: "otc",     label: "Только OTC (24/7)" },
+          { v: "regular", label: "Только обычные (рабочие часы)" },
+          { v: "mixed",   label: "Смешанный (обе)" },
+        ],
+        label: "Режим торговли",
+        desc: "Какие пары бот РЕАЛЬНО торгует. Аналитика (запись signals в БД) ВСЕГДА идёт по обоим типам — это поле влияет только на открытие сделок. Обычные Forex закрыты на выходных; stocks — только в сессию NYSE." },
       { k: "filter.asset_categories", t: "multi",
         options: ["forex", "crypto", "stocks", "indices", "commodities", "other"],
         label: "Категории активов (пусто = все)",
         desc: "какие типы активов разрешены к торговле; пусто = все доступные" },
-      { k: "filter.min_payout", t: "int", min: 50, max: 95, label: "Мин. payout для первой сделки (%)",
-        desc: "минимальная выплата чтобы зайти в ПЕРВУЮ сделку нового цикла" },
+      { k: "filter.min_payout", t: "int", min: 50, max: 95, label: "Мин. payout для OTC-пар (%)",
+        desc: "минимальная выплата чтобы зайти в ПЕРВУЮ сделку нового цикла на OTC-паре" },
+      { k: "filter.min_payout_regular", t: "int", min: 50, max: 95, label: "Мин. payout для обычных пар (%)",
+        desc: "минимальная выплата для не-OTC пар (обычно ниже чем у OTC). Применяется в режиме «обычные» или «смешанный»." },
       { k: "filter.payout_floor", t: "int", min: 50, max: 90, label: "Порог смены пары при падении payout (%)",
         desc: "если выплата на текущей паре упала ниже — бот меняет пару (не для последней пары цикла)" },
       { k: "filter.max_losses_in_row", t: "int", min: 1, max: 10, label: "Макс. минусов до бана",
@@ -963,8 +973,13 @@
           if (it.t === "bool") {
             input = `<input type="checkbox" data-k="${it.k}" data-t="bool" ${v ? "checked" : ""}/>`;
           } else if (it.t === "choice") {
+            // Options могут быть строками ["a","b"] ИЛИ объектами [{v:"a",label:"A"}].
             input = `<select data-k="${it.k}" data-t="choice">` +
-              it.options.map((o) => `<option value="${o}" ${o === v ? "selected" : ""}>${o}</option>`).join("") +
+              it.options.map((o) => {
+                const val = (typeof o === "object" && o !== null) ? o.v : o;
+                const lbl = (typeof o === "object" && o !== null) ? (o.label || o.v) : o;
+                return `<option value="${val}" ${val === v ? "selected" : ""}>${lbl}</option>`;
+              }).join("") +
               `</select>`;
           } else if (it.t === "multi") {
             const arr = Array.isArray(v) ? v : [];

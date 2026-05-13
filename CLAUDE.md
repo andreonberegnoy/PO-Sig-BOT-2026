@@ -71,8 +71,9 @@ after every pull (config.yaml in repo has mode=paper as the safe default).
 2. Check container status: `cd /opt/po-bot/deploy && docker compose ps`
 3. Last logs: `docker compose logs --tail=80 po-bot | grep -v "GET /api"`
 4. Check git: `cd /opt/po-bot && git log -1 --oneline`
-5. Health: `curl -sI http://localhost:8080/health`
-6. Tunnel: `grep trycloudflare.com /var/log/cloudflared.log | tail -1`
+5. Health: `curl -sI http://localhost:8080/health` (или публично `curl -sI https://po-bot.duckdns.org/health`)
+6. HTTPS reverse-proxy: контейнер `flycycle_caddy` (Caddyfile `/root/bots/flycycle/Caddyfile`). Mini App URL: `https://po-bot.duckdns.org/miniapp/`. Cert auto-renew Let's Encrypt/ZeroSSL, без вмешательства.
+7. DuckDNS auto-update: cron `/etc/cron.d/duckdns-po-bot` каждое воскресенье 04:00 UTC. Log: `/var/log/duckdns.log`.
 
 ## Common issues we've already solved (don't re-debug)
 

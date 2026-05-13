@@ -304,8 +304,8 @@ Stop-sum ($1000) или max_steps (10) → waiting_resume → /resume
 - 🔄 **Restart container**
 - 📜 **Last 50 logs** (с фильтром шума)
 - 🩺 **Status check** — ps, /health, git, disk, ram
-- 🌐 **Mini App URL** — текущий tunnel URL
-- 🔁 **Restart Mini App tunnel** ⚠️ (URL изменится)
+- 🌐 **Mini App URL** — постоянный URL Mini App (`https://po-bot.duckdns.org/miniapp/`) + healthcheck
+- 🔁 **Reload Caddy** — перечитать Caddyfile в контейнере `flycycle_caddy` без рестарта
 - 💾 **Backup data/**
 - 🔥 **Force rebuild --no-cache** ⚠️
 - 👁 **Live logs (10 sec)**

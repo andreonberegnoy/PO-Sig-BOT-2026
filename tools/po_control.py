@@ -107,31 +107,28 @@ ACTIONS = [
         "icon": "🌐",
         "color": "ghost",
         "confirm": False,
-        "tooltip": "Показать текущий URL Cloudflare Tunnel который ведёт на Mini App. "
-                   "Этот URL вставлять в BotFather → Menu Button.",
+        "tooltip": "Постоянный URL Mini App (Caddy + DuckDNS). Никогда не меняется.",
         "command": (
-            "echo '=== Current tunnel URL ===' && "
-            "grep 'trycloudflare.com' /var/log/cloudflared.log | tail -1 && "
-            "echo '' && echo '=== cloudflared process ===' && "
-            "ps aux | grep cloudflared | grep -v grep || echo 'NOT RUNNING'"
+            "echo '=== Mini App URL (стабильный) ===' && "
+            "echo 'https://po-bot.duckdns.org/miniapp/' && "
+            "echo '' && echo '=== HTTPS healthcheck ===' && "
+            "curl -sI https://po-bot.duckdns.org/health | head -3 && "
+            "echo '' && echo '=== Caddy container ===' && "
+            "docker ps --filter name=flycycle_caddy --format '{{.Names}}: {{.Status}}'"
         ),
     },
     {
-        "id": "tunnel_restart",
-        "label": "Restart Mini App tunnel",
+        "id": "caddy_reload",
+        "label": "Reload Caddy",
         "icon": "🔁",
         "color": "warning",
         "confirm": True,
-        "tooltip": "ВНИМАНИЕ: URL изменится! Перезапустить cloudflared. "
-                   "После — нужно обновить Menu Button в BotFather с новым URL и ?v=N+1.",
+        "tooltip": "Перечитать /root/bots/flycycle/Caddyfile без рестарта контейнера. "
+                   "Делать после правки конфига reverse-proxy.",
         "command": (
-            "pkill cloudflared 2>/dev/null; sleep 2; "
-            "nohup cloudflared tunnel --url http://127.0.0.1:8080 "
-            "> /var/log/cloudflared.log 2>&1 & "
-            "sleep 6; "
-            "echo '=== New tunnel URL ===' && "
-            "grep 'trycloudflare.com' /var/log/cloudflared.log | tail -1 && "
-            "echo '' && echo 'PASTE THIS URL INTO BotFather (with ?v=N)'"
+            "docker exec flycycle_caddy caddy reload --config /etc/caddy/Caddyfile && "
+            "echo '=== Caddy reloaded ===' && "
+            "curl -sI https://po-bot.duckdns.org/health | head -3"
         ),
     },
     {

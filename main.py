@@ -452,6 +452,13 @@ async def run(cfg: dict, config_path: str = "config.yaml"):
             s = sm.state
             if s.pending_trade is not None:
                 return False
+            # Stage 3 parallel mode: проверяем pair_cycles на pending trades.
+            # Если хоть один parallel-цикл имеет открытую сделку — relogin рвёт
+            # WS и теряет результат сделки. Только paused/waiting_resume снимает.
+            if not (s.paused or s.waiting_resume):
+                for cycle in (s.pair_cycles or {}).values():
+                    if cycle.get("pending_trade"):
+                        return False
             # mg_step>0 опасно ТОЛЬКО когда бот реально может открыть сделку.
             # В паузе или waiting_resume — нет, relogin безопасен.
             if s.mg_step != 0 and not (s.paused or s.waiting_resume):

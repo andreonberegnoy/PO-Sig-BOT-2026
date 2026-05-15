@@ -123,6 +123,9 @@ class StateMachine:
         # WR-based blacklist кэш: (sym -> (wr_pct_or_None, computed_at_ts)).
         # Пере-расчёт раз в 10 минут — SQL по 1500+ signals не моментальный.
         self._pair_wr_cache: dict[str, tuple] = {}
+        # Stage 3: defensive flag — один лог-warning про orphan pair_cycles
+        # при переключении parallel→legacy mode, чтобы не спамить.
+        self._warned_orphan_cycles: bool = False
 
         self._running = False
         self._tick_event = asyncio.Event()
@@ -1190,7 +1193,28 @@ class StateMachine:
     async def _resume_pending_trade(self):
         """If state has a pending_trade (bot was restarted mid-trade), wait
         for the trade to expire and classify the result via balance delta.
-        Then update mg_step / cycle as normal."""
+        Then update mg_step / cycle as normal.
+
+        Stage 3: при рестарте в parallel mode могут быть orphan pending_trade
+        в pair_cycles. Реcurency resolution для них пока не реализован — но
+        мы должны ОЧИСТИТЬ их при старте, иначе phase 1 будет вечно ждать
+        (cycle.get('pending_trade') → True → skip). Очищаем + логируем.
+        """
+        # Stage 3 cleanup: clear orphaned parallel pending_trades
+        if self.state.pair_cycles:
+            orphaned = []
+            for sym, cycle in list(self.state.pair_cycles.items()):
+                if cycle.get("pending_trade"):
+                    orphaned.append(sym)
+                    cycle["pending_trade"] = None
+            if orphaned:
+                logger.warning(
+                    "parallel: cleared %d orphaned pending_trades from pair_cycles "
+                    "on resume (cannot recover after restart): %s",
+                    len(orphaned), orphaned,
+                )
+                self._persist()
+
         pt = self.state.pending_trade
         if not pt:
             return
@@ -1476,7 +1500,21 @@ class StateMachine:
                 if bool((self.cfg.get("trading") or {}).get("parallel_pairs", False)):
                     await self._parallel_step()
                 else:
-                    # Legacy single-pair mode (backwards-compat default)
+                    # Legacy single-pair mode (backwards-compat default).
+                    # WARN если есть orphan parallel cycles (юзер отключил
+                    # parallel_pairs при активных циклах) — они не будут
+                    # обрабатываться. Не удаляем автоматически (потенциальная
+                    # потеря денег) — юзер должен явно /reset_cycle.
+                    if self.state.pair_cycles and not self._warned_orphan_cycles:
+                        logger.warning(
+                            "parallel_pairs=False, но в state остались %d "
+                            "активных pair_cycles: %s. Они НЕ обрабатываются "
+                            "в legacy режиме. Включи parallel_pairs обратно "
+                            "или сделай /reset_cycle.",
+                            len(self.state.pair_cycles),
+                            list(self.state.pair_cycles.keys()),
+                        )
+                        self._warned_orphan_cycles = True
                     if self.state.mg_step > 0:
                         if self.state.current_pair:
                             await self._in_cycle_step()
@@ -1865,24 +1903,60 @@ class StateMachine:
           2. Если ёмкость есть (active < max_par) — ищет новые сигналы на
              tracked парах и открывает новые циклы.
         """
+        # Migration guard: если перешли в parallel mode при активном legacy
+        # цикле (current_pair + mg_step>0) — переносим его в pair_cycles
+        # чтобы цикл не «тленел» без обработки. После миграции сбрасываем
+        # legacy поля.
+        if (self.state.current_pair and self.state.mg_step > 0
+                and self.state.current_pair not in self.state.pair_cycles):
+            logger.warning(
+                "parallel migration: legacy cycle %s @ MG%d → pair_cycles",
+                self.state.current_pair, self.state.mg_step,
+            )
+            # last_eval_bar: берём из _last_closed_bar_time legacy чтобы phase 1
+                # сразу не открывал ещё одну сделку на том же баре где legacy
+                # уже сделал свою попытку.
+            cur_sym = self.state.current_pair
+            self.state.pair_cycles[cur_sym] = {
+                "direction": self.state.direction or "call",
+                "mg_step": self.state.mg_step,
+                "cycle_loss": 0.0,  # ← начинаем считать с 0; реальные потери уже в session_loss
+                "pending_trade": self.state.pending_trade,
+                "losses_streak": self.state.losses_streak_on_pair,
+                "started_at": int(time.time()),
+                "trades_count": self.state.trades_on_pair,
+                "active": True,
+                "last_eval_bar": int(self._last_closed_bar_time.get(cur_sym, 0)),
+            }
+            # Сбрасываем legacy поля чтобы они не мешали
+            self.state.current_pair = None
+            self.state.original_pair = None
+            self.state.mg_step = 0
+            self.state.pending_trade = None
+            self.state.losses_streak_on_pair = 0
+            self.state.trades_on_pair = 0
+            self._persist()
+
         # Stop conditions
         if self.state.paused or self.state.waiting_resume:
             return
-        # Global stop_sum guard (общий для всех parallel cycles)
-        stop_sum = float((self.cfg.get("martingale") or {}).get("stop_sum", 1e9))
-        if self.state.session_loss >= stop_sum:
+        # Global stop_sum guard (общий для всех parallel cycles).
+        # stop_sum=0 → отключено (как и в legacy).
+        stop_sum = float((self.cfg.get("martingale") or {}).get("stop_sum", 0) or 0)
+        if stop_sum > 0 and self.state.session_loss >= stop_sum:
             self.state.waiting_resume = True
             self._persist()
             await self._notify(
-                f"🛑 Достигнут stop_sum ({stop_sum}$). Все parallel-циклы остановлены. "
+                f"🛑 Достигнут stop_sum (${stop_sum:.2f}). Все parallel-циклы остановлены. "
                 f"Жду /resume."
             )
             return
 
-        max_par = int((self.cfg.get("trading") or {}).get("max_parallel_pairs", 3))
+        # Defensive: clamp max_par >= 1 (юзер мог через API поставить 0)
+        max_par = max(1, int((self.cfg.get("trading") or {})
+                              .get("max_parallel_pairs", 3) or 3))
         cycle_limit = int((self.cfg.get("martingale") or {})
                             .get("cycle_total_limit", 5))
-        tf = int(self.cfg.get("filter", {}).get("tf", 60))
 
         # ── 1. Обрабатываем активные циклы (ищем сигнал для следующего MG-шага) ──
         # snapshot keys, потому что pair_cycles может меняться внутри (close)
@@ -2154,10 +2228,29 @@ class StateMachine:
                 f"🔄 Цикл на {sym} закрыт (был MG{prev_step}). "
                 f"Активных циклов: {len(self.state.pair_cycles)}"
             )
+            # Auto-pause при закрытии последнего цикла в нерабочие часы.
+            # Согласуется с legacy: после WIN-цикла если рабочее окно закрылось →
+            # paused=True до утра. В parallel mode проверяем когда последний
+            # cycle закрылся (pair_cycles пуст).
+            if not self.state.pair_cycles and not self._within_working_hours():
+                self.state.paused = True
+                self.state.auto_paused_schedule = True
+                self._persist()
+                await self._notify(
+                    "🌙 Все parallel-циклы закрыты, рабочее окно закончилось. "
+                    "Жду рабочее окно (или /resume)."
+                )
         elif closed.result == "LOSS":
             self.state.session_loss += opened.amount
             cycle["cycle_loss"] = cycle.get("cycle_loss", 0.0) + opened.amount
             cycle["losses_streak"] = cycle.get("losses_streak", 0) + 1
+            # Stage 3: live-streak защита (как в legacy). Если на этой паре
+            # серия LOSS превысила исторический max_loss_streak_to_win × multiplier
+            # → temp-pause через bans (отдельно от cycle_total_limit).
+            try:
+                await self._maybe_pause_on_live_streak(sym)
+            except Exception:
+                logger.exception("parallel: live-streak check failed for %s", sym)
             mg_enabled = bool(self.cfg["martingale"].get("enabled", True))
             cycle_limit = int((self.cfg.get("martingale") or {})
                                 .get("cycle_total_limit", 5))
@@ -2533,13 +2626,23 @@ class StateMachine:
 
     def _is_safe_for_recalc(self) -> bool:
         """Безопасно ли применить пересчёт ставки прямо сейчас?
-        Можно только когда цикл закрыт И нет открытой/pending-сделки."""
+        Можно только когда цикл закрыт И нет открытой/pending-сделки.
+
+        Stage 3: также проверяем что нет активных parallel-циклов. Recalc
+        меняет base_amount, и если в этот момент в parallel-цикле уже
+        прошли LOSS-ы, следующие MG-шаги будут считаться от НОВОЙ базы —
+        recovery математика ломается."""
         if self.state.mg_step != 0:
             return False
         if self.state.pending_trade:
             return False
         if self.state.waiting_resume:
             return False
+        # Stage 3: блокируем recalc если есть активные parallel-циклы
+        # (mg_step>0 ИЛИ есть pending_trade в любом цикле)
+        for cycle in (self.state.pair_cycles or {}).values():
+            if cycle.get("mg_step", 0) > 0 or cycle.get("pending_trade"):
+                return False
         return True
 
     async def _recalc_base_from_balance(self, reason: str) -> bool:

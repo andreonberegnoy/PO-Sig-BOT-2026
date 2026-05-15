@@ -2799,27 +2799,38 @@ class StateMachine:
             return False
 
         balance = float(self.feed.balance() or 0.0)
+        # NEW: процент от баланса который выделяется НА ОДИН ЦИКЛ.
+        # default 100 = используется весь баланс (старое поведение, backwards-compat).
+        # Юзер может выставить 10-14% чтобы каждый цикл рисковал только частью депо.
+        # Полезно особенно в parallel mode где N циклов одновременно: 3 цикла × 14% = 42% риска.
+        balance_pct = float(ab_cfg.get("balance_pct", 100) or 100)
+        balance_pct = max(1.0, min(100.0, balance_pct))   # clamp 1..100
+        effective_budget = balance * balance_pct / 100.0
         sum_factor = (q ** N - 1.0) / (q - 1.0)
-        raw_base = balance / sum_factor if sum_factor > 0 else 0.0
+        raw_base = effective_budget / sum_factor if sum_factor > 0 else 0.0
         # floor до десятых: 3.347 → 3.3
         new_base = math.floor(raw_base * 10.0) / 10.0
         old_base = float(self.cfg.get("trading", {}).get("base_amount", 1.0))
 
         if new_base < min_amount:
             # Ставка слишком мала — НЕ применяем, шлём алерт.
-            min_balance_needed = min_amount * sum_factor
+            # min_balance_needed считается с учётом процента: нужен такой полный
+            # баланс, чтобы (balance × pct/100) ≥ min_amount × sum_factor.
+            min_balance_needed = (min_amount * sum_factor * 100.0) / balance_pct
             logger.warning(
                 "recalc rejected: new_base=$%.2f < min=$%.2f (balance=$%.2f, N=%d, q=%.2f)",
                 new_base, min_amount, balance, N, q,
             )
             try:
+                pct_note = (f" (бюджет {balance_pct:.0f}% = ${effective_budget:.2f})"
+                              if balance_pct < 100 else "")
                 await self._notify(
                     f"⛔ <b>Авто-пересчёт ставки отклонён</b>\n"
                     f"Расчёт: ${new_base:.2f} &lt; мин ${min_amount:.2f}\n"
-                    f"Баланс ${balance:.2f}, цикл N={N}, q={q}\n"
+                    f"Баланс ${balance:.2f}{pct_note}, цикл N={N}, q={q}\n"
                     f"Базовая осталась <b>${old_base:.2f}</b>.\n"
                     f"Для запуска нужен баланс ≥ <b>${min_balance_needed:.2f}</b> "
-                    f"либо уменьшить N/q.\n"
+                    f"либо уменьшить N/q/процент бюджета.\n"
                     f"<i>Триггер: {reason}</i>"
                 )
             except Exception:
@@ -2844,10 +2855,12 @@ class StateMachine:
         delta = new_base - old_base
         sign = "📈" if delta > 0 else "📉"
         try:
+            pct_note = (f" → бюджет {balance_pct:.0f}% = ${effective_budget:.2f}"
+                         if balance_pct < 100 else "")
             await self._notify(
                 f"🧮 <b>Авто-пересчёт ставки</b> {sign}\n"
                 f"${old_base:.2f} → <b>${new_base:.2f}</b>\n"
-                f"Баланс ${balance:.2f}, цикл N={N}, q={q}\n"
+                f"Баланс ${balance:.2f}{pct_note}, цикл N={N}, q={q}\n"
                 f"<i>Триггер: {reason}</i>"
             )
         except Exception:

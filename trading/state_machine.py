@@ -64,6 +64,15 @@ class RuntimeState:
     # триггер switch (consec убран по запросу юзера) — оставлено как
     # внутренний счётчик для возможной аналитики и логирования.
     losses_streak_on_pair: int = 0
+    # ── Stage 3: parallel trading ─────────────────────────────────────────
+    # Когда trading.parallel_pairs=True, бот ведёт НЕЗАВИСИМЫЕ MG-циклы на
+    # нескольких парах одновременно (до trading.max_parallel_pairs штук).
+    # Каждый ключ = symbol, значение = PairCycle.to_dict() форма:
+    #   {direction, mg_step, cycle_loss, pending_trade, losses_streak,
+    #    started_at, trades_count}
+    # current_pair / mg_step / pending_trade выше — НЕ используются в parallel
+    # mode (резервируются под одиночный legacy режим для backwards-compat).
+    pair_cycles: dict = field(default_factory=dict)
 
     def to_dict(self): return asdict(self)
 
@@ -1104,6 +1113,12 @@ class StateMachine:
         # на этом скане. Цикл должен довестись до WIN/stop_sum на этой паре.
         if self.state.current_pair and self.state.mg_step > 0:
             wanted.add(self.state.current_pair)
+        # Stage 3: то же правило для parallel mode — пары с активными
+        # циклами должны оставаться в _tracked чтобы live candles обновлялись
+        # и _parallel_step мог искать сигнал для следующего MG-шага.
+        if self.state.pair_cycles:
+            for cycle_sym in self.state.pair_cycles.keys():
+                wanted.add(cycle_sym)
 
         # Drop pairs we no longer track — unsubscribe from WS if supported.
         to_drop = self._tracked - wanted
@@ -1453,13 +1468,22 @@ class StateMachine:
                 #  • IN-CYCLE SEARCHING: cycle active but pair switched out
                 #    (payout drop, max_trades hit) → scan ALL eligible pairs,
                 #    first signal becomes new locked pair (preserves mg_step)
-                if self.state.mg_step > 0:
-                    if self.state.current_pair:
-                        await self._in_cycle_step()
-                    else:
-                        await self._in_cycle_search_step()
+                #
+                # Stage 3 (parallel mode): если trading.parallel_pairs=True →
+                # независимые MG-циклы на нескольких парах одновременно.
+                # Полностью отдельный путь _parallel_step (использует
+                # state.pair_cycles вместо current_pair/mg_step).
+                if bool((self.cfg.get("trading") or {}).get("parallel_pairs", False)):
+                    await self._parallel_step()
                 else:
-                    await self._free_scan_step()
+                    # Legacy single-pair mode (backwards-compat default)
+                    if self.state.mg_step > 0:
+                        if self.state.current_pair:
+                            await self._in_cycle_step()
+                        else:
+                            await self._in_cycle_search_step()
+                    else:
+                        await self._free_scan_step()
 
             except asyncio.CancelledError:
                 raise   # propagate cancellation — bot is shutting down
@@ -1821,6 +1845,370 @@ class StateMachine:
                                 payout, pre_balance_now)
         await self._open_and_track(sym, action, next_amt)
 
+    # ════════════════════════════════════════════════════════════════════
+    # ─────────── STAGE 3: PARALLEL TRADING (max N pairs) ────────────────
+    # ════════════════════════════════════════════════════════════════════
+    # Параллельный режим: бот ведёт независимые MG-циклы на нескольких парах
+    # одновременно, до trading.max_parallel_pairs штук. Каждая пара = отдельный
+    # PairCycle в self.state.pair_cycles. Активируется через trading.parallel_pairs=True.
+    # Legacy single-pair код (current_pair/mg_step) НЕ используется в этом режиме.
+
+    def _parallel_amount_for_step(self, step: int) -> float:
+        """Аналог _amount_for_step но для parallel mode. Идентично — base*coef^step."""
+        return self._amount_for_step(step)
+
+    async def _parallel_step(self):
+        """Main loop tick для parallel mode. Выполняется при parallel_pairs=True
+        вместо free_scan/in_cycle. Делает 2 вещи:
+          1. Обрабатывает существующие циклы — открывает следующий шаг MG
+             для каждой активной пары если на ней появился свежий сигнал.
+          2. Если ёмкость есть (active < max_par) — ищет новые сигналы на
+             tracked парах и открывает новые циклы.
+        """
+        # Stop conditions
+        if self.state.paused or self.state.waiting_resume:
+            return
+        # Global stop_sum guard (общий для всех parallel cycles)
+        stop_sum = float((self.cfg.get("martingale") or {}).get("stop_sum", 1e9))
+        if self.state.session_loss >= stop_sum:
+            self.state.waiting_resume = True
+            self._persist()
+            await self._notify(
+                f"🛑 Достигнут stop_sum ({stop_sum}$). Все parallel-циклы остановлены. "
+                f"Жду /resume."
+            )
+            return
+
+        max_par = int((self.cfg.get("trading") or {}).get("max_parallel_pairs", 3))
+        cycle_limit = int((self.cfg.get("martingale") or {})
+                            .get("cycle_total_limit", 5))
+        tf = int(self.cfg.get("filter", {}).get("tf", 60))
+
+        # ── 1. Обрабатываем активные циклы (ищем сигнал для следующего MG-шага) ──
+        # snapshot keys, потому что pair_cycles может меняться внутри (close)
+        for sym in list(self.state.pair_cycles.keys()):
+            cycle = self.state.pair_cycles.get(sym)
+            if not cycle:
+                continue
+            # Если на этой паре сделка в полёте — ждём её результата
+            if cycle.get("pending_trade"):
+                continue
+            # Если mg_step==0 — цикл только что закрылся WIN-ом (или новый, ещё
+            # ничего не открывали). Удаляем закрытые (signal_at_open=False) — они уже
+            # ушли через _on_trade_closed_parallel. Здесь не должны быть, но safety.
+            if cycle.get("mg_step", 0) == 0 and not cycle.get("active"):
+                # Свежесозданный цикл с mg_step=0 — будет открыт в фазе #2
+                continue
+            # mg_step > 0 — цикл активен, ждём сигнал на этой же паре чтобы
+            # сделать следующее перекрытие.
+            buf = self._candles.get(sym)
+            if not buf or len(buf) < 200:
+                continue
+            last_closed_t = int(buf[-2]["time"])
+            last_eval_t = cycle.get("last_eval_bar", 0)
+            if last_closed_t <= last_eval_t:
+                continue
+            cycle["last_eval_bar"] = last_closed_t
+
+            try:
+                meta = self._check_signal_with_meta(sym)
+            except Exception:
+                logger.exception("parallel_step: signal check failed for %s", sym)
+                continue
+            if not meta:
+                continue
+            action, _sig, _params, _strat = meta
+
+            # Направление цикла зафиксировано на первом входе — следующие шаги
+            # должны иметь то же направление (иначе это уже не recovery, а новый
+            # цикл). Если сигнал поменял направление — пропускаем (ждём next bar).
+            if action != cycle.get("direction"):
+                continue
+
+            # Проверяем что не превысили cycle_total_limit
+            if cycle["mg_step"] >= cycle_limit:
+                # Bust — этот цикл лопнул, баним пару на ban_hours
+                ban_hours = int((self.cfg.get("filter") or {}).get("ban_hours", 12))
+                try:
+                    self.journal.ban(sym, hours=ban_hours,
+                                      reason=f"parallel cycle_total_limit MG{cycle_limit}")
+                except Exception:
+                    logger.exception("parallel: ban after limit failed for %s", sym)
+                logger.warning("parallel %s: cycle_total_limit (%d) reached → bust, removing",
+                                sym, cycle_limit)
+                # session_loss уже включал потери — НЕ удваиваем
+                self._cleanup_pair_cycle(sym)
+                continue
+
+            next_amt = self._parallel_amount_for_step(cycle["mg_step"])
+            payout = int((self.feed.assets.get(sym) or {}).get("payout", 0))
+            pre_balance = float(self.feed.balance() or 0.0)
+            self._notify_open_async(sym, action, next_amt, cycle["mg_step"],
+                                    payout, pre_balance)
+            await self._open_parallel_trade(sym, action, next_amt)
+
+        # ── 2. Открываем новые циклы если есть ёмкость ──
+        active_count = len(self.state.pair_cycles)
+        if active_count >= max_par:
+            return
+        if not self._tracked:
+            return
+
+        # Pre-cooldown — после WIN не сразу же открывать на той же паре
+        # (избегаем «двойного входа» когда сигнал на той же свече).
+        # Используем _last_signal_record_bar для дедупа.
+
+        sorted_tracked = sorted(
+            self._tracked,
+            key=lambda s: (
+                (self._pair_scores.get(s).priority if self._pair_scores.get(s) else 999),
+                -int((self.feed.assets.get(s) or {}).get("payout", 0)),
+            ),
+        )
+        for sym in sorted_tracked:
+            if active_count >= max_par:
+                break
+            # Пара уже в активном цикле — пропускаем
+            if sym in self.state.pair_cycles:
+                continue
+            if not self._pair_matches_trade_mode(sym):
+                continue
+            if not self._eligible_for_new_cycle(sym):
+                continue
+            buf = self._candles.get(sym)
+            if not buf or len(buf) < 200:
+                continue
+            last_closed_t = int(buf[-2]["time"])
+            # Использует общий _last_closed_bar_time чтобы не открывать дважды на одной свече
+            if last_closed_t <= self._last_closed_bar_time.get(sym, 0):
+                continue
+            self._last_closed_bar_time[sym] = last_closed_t
+
+            try:
+                meta = self._check_signal_with_meta(sym)
+            except Exception:
+                logger.exception("parallel_step: free-scan signal check failed for %s", sym)
+                continue
+            if not meta:
+                continue
+            action, _sig, _params, _strat = meta
+
+            # Открываем новый цикл
+            self.state.pair_cycles[sym] = {
+                "direction": action,
+                "mg_step": 0,
+                "cycle_loss": 0.0,
+                "pending_trade": None,
+                "losses_streak": 0,
+                "started_at": int(time.time()),
+                "trades_count": 0,
+                "active": True,
+                "last_eval_bar": last_closed_t,
+            }
+            self._persist()
+            amount = self._parallel_amount_for_step(0)
+            payout = int((self.feed.assets.get(sym) or {}).get("payout", 0))
+            pre_balance = float(self.feed.balance() or 0.0)
+            logger.info("parallel: NEW cycle started on %s (action=%s, base=$%.2f) "
+                        "[%d/%d active]",
+                        sym, action, amount, active_count + 1, max_par)
+            self._notify_open_async(sym, action, amount, 0, payout, pre_balance)
+            await self._open_parallel_trade(sym, action, amount)
+            active_count += 1
+
+    async def _open_parallel_trade(self, sym: str, action: str, amount: float):
+        """Аналог _open_and_track но для parallel mode. Записывает pending_trade
+        в pair_cycles[sym], не в self.state.pending_trade."""
+        if not self._pair_matches_trade_mode(sym):
+            logger.warning("BLOCKED parallel open: %s не соответствует trade_mode", sym)
+            return
+        cycle = self.state.pair_cycles.get(sym)
+        if not cycle:
+            logger.error("parallel: pair_cycles[%s] missing на открытии trade — abort", sym)
+            return
+
+        # Auto-expiry (как в _open_and_track)
+        expiry = int(self.cfg["trading"]["expiry_seconds"])
+        tf_sec = int(self.cfg["filter"].get("tf", 60))
+        if (self.cfg.get("filter") or {}).get("auto_expiry_enabled", True):
+            try:
+                from strategy.expiry_optimizer import pair_hour_expiry_lookup
+                try:
+                    tz_name = (self.cfg.get("telegram") or {}).get(
+                        "daily_report_timezone") or "Europe/Kyiv"
+                    tz = pytz.timezone(tz_name)
+                    current_hour = datetime.fromtimestamp(int(time.time()), tz=tz).hour
+                except Exception:
+                    current_hour = datetime.utcfromtimestamp(int(time.time())).hour
+                opt = pair_hour_expiry_lookup(self.journal, sym, current_hour)
+                if opt:
+                    new_expiry = int(opt["bars"]) * tf_sec
+                    if new_expiry != expiry:
+                        logger.info("parallel auto-expiry: %s @%dh → %d bars (was %ds → %ds)",
+                                    sym, current_hour, opt["bars"], expiry, new_expiry)
+                        expiry = new_expiry
+            except Exception:
+                logger.debug("parallel auto-expiry lookup failed for %s", sym)
+
+        # Subscribe (idempotent)
+        try:
+            if hasattr(self.feed, "subscribe"):
+                await self.feed.subscribe(sym, int(self.cfg["filter"]["tf"]))
+        except Exception:
+            logger.exception("parallel: subscribe failed for %s", sym)
+
+        # Записываем pending_trade в cycle
+        pre_balance = float(self.feed.balance() or 0.0)
+        cycle["pending_trade"] = {
+            "asset": sym,
+            "action": action,
+            "amount": amount,
+            "pre_balance": pre_balance,
+            "open_ts": int(time.time()),
+            "expiry_sec": expiry,
+        }
+        self._persist()
+
+        try:
+            ok = await self.tc.open_trade(sym, amount, action, expiry)
+        except Exception:
+            logger.exception("parallel: open_trade exception %s", sym)
+            cycle["pending_trade"] = None
+            self._persist()
+            return
+        if not ok:
+            logger.warning("parallel: open_trade returned False for %s", sym)
+            cycle["pending_trade"] = None
+            self._persist()
+
+    def _cleanup_pair_cycle(self, sym: str):
+        """Удаляет cycle из pair_cycles после WIN/bust."""
+        if sym in self.state.pair_cycles:
+            del self.state.pair_cycles[sym]
+            self._persist()
+
+    async def _on_trade_closed_parallel(self, opened, closed):
+        """Parallel-mode обработка закрытия сделки. Обновляет ТОЛЬКО state
+        своего pair_cycle, остальные циклы не трогает.
+
+        Глобальный state (session_loss, base_amount recalc) обновляется как
+        обычно — это нормально, депо одно на всех.
+        """
+        sym = opened.asset
+        cycle = self.state.pair_cycles.get(sym)
+        if not cycle:
+            logger.warning("parallel close: no cycle for %s — falling back to legacy", sym)
+            return False  # caller fallback to legacy
+
+        # Trade resolved
+        cycle["pending_trade"] = None
+        cycle["trades_count"] = cycle.get("trades_count", 0) + 1
+        open_ts_actual = opened.open_time or int(time.time())
+        self.journal.log_trade({
+            "trade_id": closed.trade_id,
+            "symbol": opened.asset,
+            "action": opened.action,
+            "amount": opened.amount,
+            "profit": closed.profit,
+            "result": closed.result,
+            "payout": opened.payout,
+            "mg_step": cycle.get("mg_step", 0),
+            "open_ts": open_ts_actual,
+            "close_ts": closed.close_time or int(time.time()),
+            "balance_after": self.feed.balance(),
+            "mode": self.cfg["mode"],
+        })
+
+        bal_after = float(self.feed.balance() or 0.0)
+        prev_step = cycle.get("mg_step", 0)
+
+        # Live loss-streak (общий с legacy — используем _live_loss_streak dict)
+        if closed.result == "WIN":
+            self._live_loss_streak.pop(sym, None)
+        elif closed.result == "LOSS":
+            self._live_loss_streak[sym] = self._live_loss_streak.get(sym, 0) + 1
+
+        if closed.result == "WIN":
+            gained = closed.profit - opened.amount
+            self.state.session_loss = max(0.0, self.state.session_loss - gained)
+            # Закрываем цикл — удаляем pair_cycle
+            self._cleanup_pair_cycle(sym)
+            self._persist()
+            # Auto-recalc base_amount (если включено)
+            self._cycles_since_recalc += 1
+            ab_cfg = (self.cfg.get("trading", {}).get("auto_base_amount") or {})
+            try:
+                if ab_cfg.get("enabled", True) and self._pending_recalc_reason:
+                    await self._recalc_base_from_balance(self._pending_recalc_reason)
+                elif ab_cfg.get("enabled", True):
+                    every_n = int(ab_cfg.get("every_n_cycles", 0) or 0)
+                    if every_n > 0 and self._cycles_since_recalc >= every_n:
+                        await self._recalc_base_from_balance(
+                            f"каждые {every_n} циклов (parallel WIN на {sym})"
+                        )
+            except Exception:
+                logger.exception("parallel: auto-recalc on WIN failed")
+            await self._notify(
+                f"✅ <b>WIN {sym}</b> (parallel) +${gained:.2f}\n"
+                f"💼 Баланс: ${bal_after:.2f}   📉 Сессия: ${self.state.session_loss:.2f}\n"
+                f"🔄 Цикл на {sym} закрыт (был MG{prev_step}). "
+                f"Активных циклов: {len(self.state.pair_cycles)}"
+            )
+        elif closed.result == "LOSS":
+            self.state.session_loss += opened.amount
+            cycle["cycle_loss"] = cycle.get("cycle_loss", 0.0) + opened.amount
+            cycle["losses_streak"] = cycle.get("losses_streak", 0) + 1
+            mg_enabled = bool(self.cfg["martingale"].get("enabled", True))
+            cycle_limit = int((self.cfg.get("martingale") or {})
+                                .get("cycle_total_limit", 5))
+            if mg_enabled:
+                cycle["mg_step"] = cycle.get("mg_step", 0) + 1
+                self._persist()
+                if cycle["mg_step"] >= cycle_limit:
+                    # Bust — удаляем cycle И баним пару на ban_hours чтобы не
+                    # открыть на ней сразу следующий цикл (та же причина что
+                    # legacy при стоп-сумме — пара показала себя плохо).
+                    ban_hours = int((self.cfg.get("filter") or {}).get("ban_hours", 12))
+                    try:
+                        self.journal.ban(sym, hours=ban_hours,
+                                          reason=f"parallel bust MG{cycle_limit}, "
+                                                 f"cycle_loss=${cycle['cycle_loss']:.2f}")
+                    except Exception:
+                        logger.exception("parallel: ban after bust failed for %s", sym)
+                    await self._notify(
+                        f"💥 <b>BUST {sym}</b> (parallel) — достигнут лимит MG{cycle_limit}\n"
+                        f"💼 Баланс: ${bal_after:.2f}   📉 Cycle loss: ${cycle['cycle_loss']:.2f}\n"
+                        f"🚫 Пара забанена на {ban_hours}ч. Активных циклов: "
+                        f"{len(self.state.pair_cycles)-1}"
+                    )
+                    self._cleanup_pair_cycle(sym)
+                else:
+                    await self._notify(
+                        f"❌ <b>LOSS {sym}</b> (parallel) -${opened.amount:.2f}\n"
+                        f"💼 Баланс: ${bal_after:.2f}   📉 Сессия: ${self.state.session_loss:.2f}\n"
+                        f"📈 MG-шаг → MG{cycle['mg_step']} на {sym}"
+                    )
+            else:
+                # MG отключён — закрываем цикл
+                self._cleanup_pair_cycle(sym)
+                self._persist()
+                await self._notify(
+                    f"❌ <b>LOSS {sym}</b> (parallel, no MG) -${opened.amount:.2f}\n"
+                    f"💼 Баланс: ${bal_after:.2f}"
+                )
+        else:  # DRAW
+            # DRAW в parallel — refund, mg_step не меняется, цикл не закрывается
+            self._persist()
+            await self._notify(
+                f"➖ <b>DRAW {sym}</b> (parallel)\n"
+                f"💼 Баланс: ${bal_after:.2f}   ↻ MG{cycle.get('mg_step', 0)} остаётся."
+            )
+        return True
+
+    # ════════════════════════════════════════════════════════════════════
+    # END Stage 3 parallel methods
+    # ════════════════════════════════════════════════════════════════════
+
     # ---------- trade open / close flow ----------
     async def _open_and_track(self, sym: str, action: str, amount: float):
         # Defense-in-depth: на случай если вход прошёл через нестандартный путь
@@ -2002,6 +2390,16 @@ class StateMachine:
         await self._on_trade_closed(opened, closed)
 
     async def _on_trade_closed(self, opened: OpenedTrade, closed: ClosedTrade):
+        # Stage 3: если parallel_pairs включён И эта пара в pair_cycles —
+        # обрабатываем как parallel close, не трогаем legacy state.
+        if bool((self.cfg.get("trading") or {}).get("parallel_pairs", False)):
+            try:
+                handled = await self._on_trade_closed_parallel(opened, closed)
+                if handled:
+                    return
+            except Exception:
+                logger.exception("_on_trade_closed_parallel failed — falling back to legacy")
+        # ── Legacy single-pair handling ──
         # Trade resolved — clear the pending-trade marker so a future restart
         # doesn't try to recover this trade again.
         self.state.pending_trade = None

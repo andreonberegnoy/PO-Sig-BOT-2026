@@ -99,11 +99,21 @@ class StateMachine:
         self._last_closed_bar_time: dict[str, int] = {}
         self._last_refresh: dict[str, float] = {}   # ts of last REST fetch per sym
         self._pair_scores: dict[str, PairScore] = {}
-        self._tracked: set[str] = set()
+        self._tracked: set[str] = set()      # NARROW — пары на которых торгуем (live WS subs)
+        self._scan_pool: set[str] = set()    # BROAD — все пары прошедшие базовый scan
+                                              # (payout + asset_categories), независимо от
+                                              # того allowed/banned/pause. Используется
+                                              # для аналитики через REST-loop (signals
+                                              # пишутся по этому пулу, не только tracked).
+                                              # Юзер: «аналитика должна писаться ВСЕГДА
+                                              # независимо от фильтра».
         # Этап 2: signals collector — сколько сигналов уже записано на символ
         # (по close-time бара). Используется для дедупа `_record_signals_phase`,
         # чтобы не пересчитывать CONSENSUS на одном баре дважды.
         self._last_signal_record_bar: dict[str, int] = {}
+        # WR-based blacklist кэш: (sym -> (wr_pct_or_None, computed_at_ts)).
+        # Пере-расчёт раз в 10 минут — SQL по 1500+ signals не моментальный.
+        self._pair_wr_cache: dict[str, tuple] = {}
 
         self._running = False
         self._tick_event = asyncio.Event()
@@ -848,6 +858,91 @@ class StateMachine:
             except Exception:
                 logger.exception("insert_signal failed for %s", sym)
 
+    async def _record_signals_broad_loop(self):
+        """BROAD-аналитика: раз в 60 сек проходит по парам из _scan_pool которые
+        НЕ в _tracked (т.е. на которых бот не торгует / нет live WS-кэша),
+        REST-fetch свечей и записывает signals в БД если CONSENSUS сработал на
+        последнем закрытом баре.
+
+        Цель — аналитика идёт по ВСЕМ парам прошедшим scan, независимо от того
+        проходит ли пара торговый фильтр. Это даёт broad pool данных для
+        будущих переанализов («что было бы если торговать пары которые сейчас
+        в blacklist»). Решает фундаментальную проблему предыдущей архитектуры
+        где аналитика собиралась только по _tracked.
+
+        Дёшево по нагрузке: ~30-40 REST fetch раз в 60с = 0.5-0.7 запросов/сек
+        к PO. Гораздо меньше чем подписка на ticks для всех этих пар.
+
+        Live tracked пары обрабатываются в _record_signals_phase (через live
+        candle cache, real-time). Этот метод — fallback для broad pool.
+        """
+        from feed.history import fetch_candles as _fetch_candles
+        tf = int(self.cfg.get("filter", {}).get("tf", 60))
+        history_n = int(self.cfg.get("filter", {}).get("history_candles", 1000))
+        # Ограничиваем сколько свечей грузим для broad — нужно ~250 для CONSENSUS
+        broad_history = min(history_n, 250)
+        while self._running:
+            try:
+                await asyncio.sleep(60)
+                # Скан pool - tracked = пары для broad-record (не дублируем _record_signals_phase)
+                broad_pool = list(self._scan_pool - self._tracked)
+                if not broad_pool:
+                    continue
+                params = {**DEFAULT_PARAMS, **(self.cfg.get("indicator") or {})}
+                if self.registry:
+                    try: params = self.registry.get_active().merged_params()
+                    except Exception: pass
+
+                # Ограничиваем параллельность чтобы не утопить PO
+                sem = asyncio.Semaphore(5)
+                async def _record_one(sym: str):
+                    async with sem:
+                        try:
+                            candles = await _fetch_candles(self.feed, sym, period=tf, limit=broad_history)
+                        except Exception:
+                            return  # тихо пропускаем, пара недоступна / WS жмёт
+                        if not candles or len(candles) < 200:
+                            return
+                        last_closed_t = int(candles[-2]["time"])
+                        # Дедупликация — не пишем тот же бар дважды
+                        if last_closed_t <= self._last_signal_record_bar.get(sym, 0):
+                            return
+                        self._last_signal_record_bar[sym] = last_closed_t
+                        try:
+                            # Запускаем стратегию (CONSENSUS или активная user strategy)
+                            tmp_buf = self._candles.get(sym)
+                            try:
+                                # Подсовываем broad-pool candles в _candles чтобы
+                                # _check_signal_with_meta мог работать (он берёт оттуда)
+                                self._candles[sym] = candles
+                                meta = self._check_signal_with_meta(sym)
+                            finally:
+                                # Восстанавливаем оригинальный кэш если был
+                                if tmp_buf is not None:
+                                    self._candles[sym] = tmp_buf
+                                else:
+                                    self._candles.pop(sym, None)
+                        except Exception:
+                            logger.exception("broad: signal check failed for %s", sym)
+                            return
+                        if not meta: return
+                        action, sig, params_used, strat_name = meta
+                        try:
+                            snap = self._market_snapshot(sym, sig, params_used,
+                                                          candles[:-1], strat_name)
+                        except Exception:
+                            return
+                        if not snap: return
+                        try:
+                            self.journal.insert_signal(snap)
+                        except Exception:
+                            logger.exception("broad: insert_signal failed for %s", sym)
+                await asyncio.gather(*[_record_one(s) for s in broad_pool])
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("record_signals_broad_loop crashed")
+
     async def _signals_retention_loop(self):
         """Раз в 24ч удаляет signals старше cfg.retention.signals_days."""
         while self._running:
@@ -939,6 +1034,10 @@ class StateMachine:
             return
 
         scores = await scan_all_pairs(self.feed, self.cfg)
+        # BROAD pool — все пары что прошли базовый payout+categories фильтр.
+        # Используется отдельным _record_signals_broad_loop для записи signals
+        # независимо от того что пара allowed/banned/pause для торговли.
+        self._scan_pool = set(scores.keys())
 
         # Detect total scan failure (WS dropped mid-iteration → all 0 candles).
         # Don't overwrite previous _pair_scores; retry sooner than 5 min default.
@@ -1027,6 +1126,26 @@ class StateMachine:
         allowed_cats = set((self.cfg.get("filter") or {}).get("asset_categories") or [])
         if allowed_cats:
             if categorize_symbol(symbol, self.feed.assets.get(symbol)) not in allowed_cats:
+                return False
+        # WR-based blacklist: пары с историческим WR ниже порога не торгуем.
+        # Использует counterfactual WR из таблицы signals (exp_wins 2-бар).
+        # Аналитика по этим парам ПРОДОЛЖАЕТ писаться (через _record_signals_broad_loop),
+        # просто реальная торговля блокируется. Защита от ловушек DOTUSD-типа
+        # где CONSENSUS даёт ложные сигналы на трендовых движениях.
+        min_pair_wr = float(f_cfg.get("min_pair_wr_actual", 0) or 0)
+        if min_pair_wr > 0:
+            # Кэшируем расчёт WR на 10 минут чтобы не дёргать SQL на каждый тик
+            cached = self._pair_wr_cache.get(symbol)
+            now = time.time()
+            if cached is None or now - cached[1] > 600:
+                wr_val = self.journal.pair_wr_from_signals(
+                    symbol, min_count=30, exp_bar_index=1, days_lookback=30,
+                )
+                self._pair_wr_cache[symbol] = (wr_val, now)
+            else:
+                wr_val = cached[0]
+            # wr_val=None → данных мало, не блокируем (даём шанс)
+            if wr_val is not None and wr_val < min_pair_wr:
                 return False
         # NOTE: hour-whitelist filter был удалён в этапе 1 рефакторинга.
         # В этапе 2 будет переработан как часть новой Аналитики per-strategy.
@@ -1119,6 +1238,16 @@ class StateMachine:
         # Этап 2: settlement loop для exp_wins по записанным signals.
         asyncio.create_task(self._signals_settle_loop(), name="signals_settle")
         asyncio.create_task(self._signals_retention_loop(), name="signals_retention")
+        # Broad analytics — signals по парам в scan_pool но не торгуемым
+        # (REST-based, раз в 60с). Гарантирует что аналитика идёт по всем
+        # парам прошедшим базовый scan, не только активно торгуемым.
+        asyncio.create_task(self._record_signals_broad_loop(), name="signals_broad")
+        # Stage 2: per-pair × hour авто-оптимизация экспирации.
+        # Раз в 4ч пересчитывает оптимальные 1-5 баров для каждой ячейки
+        # (sym, hour) на основе counterfactual exp_wins. Бот в _open_and_track
+        # читает таблицу и использует оптимум вместо дефолтной expiry_seconds.
+        from strategy.expiry_optimizer import expiry_optimizer_loop
+        asyncio.create_task(expiry_optimizer_loop(self.journal), name="expiry_optimizer")
         # Resume any in-flight trade interrupted by the previous restart
         await self._resume_pending_trade()
 
@@ -1691,9 +1820,29 @@ class StateMachine:
             )
             return
         expiry = int(self.cfg["trading"]["expiry_seconds"])
-        # NOTE: hour_expiry_overrides был удалён в этапе 1 рефакторинга.
-        # В этапе 2 будет переработан как часть новой Аналитики
-        # (применяется per-strategy через filter в Аналитике).
+        tf_sec = int(self.cfg["filter"].get("tf", 60))
+        # Per-pair × hour экспирация (Stage 2 авто-оптимизация).
+        # Бот раз в 4ч пересчитывает оптимум 1-5 баров для каждой ячейки
+        # (sym, hour). Если есть данные — используем оптимум, иначе fallback
+        # на дефолтную expiry_seconds. Управляется через
+        # filter.auto_expiry_enabled (default true).
+        if (self.cfg.get("filter") or {}).get("auto_expiry_enabled", True):
+            try:
+                from strategy.expiry_optimizer import pair_hour_expiry_lookup
+                current_hour = int(time.strftime("%H", time.gmtime()))
+                opt = pair_hour_expiry_lookup(self.journal, sym, current_hour)
+                if opt:
+                    optimum_bars = int(opt["bars"])
+                    new_expiry = optimum_bars * tf_sec
+                    if new_expiry != expiry:
+                        logger.info(
+                            "auto-expiry: %s @%dh → %d bars (was %ds → %ds, WR=%s%%, N=%d)",
+                            sym, current_hour, optimum_bars,
+                            expiry, new_expiry, opt["wr"], opt["n"],
+                        )
+                        expiry = new_expiry
+            except Exception:
+                logger.exception("auto-expiry lookup failed for %s (using default)", sym)
         # Clear any stale pending_trade from a prior aborted attempt (otherwise
         # a restart could resume the wrong trade).
         if self.state.pending_trade:

@@ -772,11 +772,12 @@
       const dailyHour = parseInt(cfg?.telegram?.daily_report_hour ?? 7);
       const ab = (cfg?.trading?.auto_base_amount) || {};
       const minAmount = parseFloat(ab.min_amount ?? 1.0);
+      const balancePct = parseInt(ab.balance_pct ?? 100);
       calc.innerHTML = `
         <div class="category-title">🧮 Автокалькулятор базовой ставки</div>
         <div class="setting-row" style="flex-direction:column; align-items:stretch; gap:10px">
           <div class="hint" style="font-size:11px; opacity:0.8">
-            Делит доступный баланс на сумму геом. прогрессии МГ (N циклов × коэффициент).
+            Делит выделенный бюджет на сумму геом. прогрессии МГ (N циклов × коэффициент).
             N и коэффициент берутся из «Мартингейл» ниже. Округление вниз до десятых.
             Минимум по PO: <b>$${minAmount.toFixed(2)}</b>.
           </div>
@@ -786,6 +787,21 @@
             <input type="checkbox" id="ab-enabled" ${ab.enabled !== false ? "checked" : ""}/>
             🔁 Автоматический пересчёт включён
           </label>
+
+          <!-- ── ПРОЦЕНТ депо на цикл ── -->
+          <div style="display:flex; flex-direction:column; gap:4px; padding-left:14px">
+            <label class="multi-opt" style="display:flex; align-items:center; gap:8px; flex-wrap:wrap">
+              💰 <b>Бюджет на цикл:</b>
+              <input type="number" id="ab-pct" min="1" max="100" step="1"
+                     value="${balancePct}" style="width:65px"/>
+              % от баланса
+            </label>
+            <div class="hint" style="font-size:10px; opacity:0.7">
+              100 = весь баланс (старое поведение). Установи 10-14% чтобы каждый
+              цикл рисковал только частью депо. <b>Особенно важно в parallel-режиме:</b>
+              N параллельных циклов × процент = суммарный риск депо одновременно.
+            </div>
+          </div>
 
           <!-- ── два независимых триггера ── -->
           <div id="ab-triggers" style="display:flex; flex-direction:column; gap:6px; padding-left:14px">
@@ -881,6 +897,23 @@
         }
       };
 
+      // ── balance_pct handler (новое) ──
+      const $pct = calc.querySelector("#ab-pct");
+      const savePct = async () => {
+        let v = parseInt($pct.value);
+        if (!Number.isFinite(v) || v < 1) v = 1;
+        if (v > 100) v = 100;
+        $pct.value = v;
+        await saveAB({ "trading.auto_base_amount.balance_pct": v });
+        // Live preview обновляется автоматически на следующем тике recomputeCalc
+        if (typeof recomputeCalc === "function") recomputeCalc();
+      };
+      $pct.onchange = savePct;
+      // Также live-обновление preview при input (без сохранения, для удобства)
+      $pct.oninput = () => {
+        if (typeof recomputeCalc === "function") recomputeCalc();
+      };
+
       const $ = (id) => calc.querySelector(`#${id}`);
       const fmt = (v) => (v == null ? "—" : `$${(+v).toFixed(2)}`);
 
@@ -899,10 +932,15 @@
             return;
           }
           const sumFactor = (Math.pow(q, N) - 1) / (q - 1);
-          const rawBase = balance / sumFactor;
+          // ПРОЦЕНТ депо: читаем из input формы (live preview) или из cfg
+          const pctFromForm = parseFloat($("ab-pct")?.value);
+          const pct = Number.isFinite(pctFromForm) ? Math.max(1, Math.min(100, pctFromForm))
+                                                    : parseFloat(liveCfg?.trading?.auto_base_amount?.balance_pct ?? 100);
+          const effectiveBudget = balance * pct / 100;
+          const rawBase = effectiveBudget / sumFactor;
           const base = Math.floor(rawBase * 10) / 10;
 
-          $("calc-balance").textContent = fmt(balance);
+          $("calc-balance").textContent = fmt(balance) + (pct < 100 ? ` (бюджет ${pct.toFixed(0)}% = $${effectiveBudget.toFixed(2)})` : "");
           $("calc-n").textContent = N;
           $("calc-q").textContent = q.toFixed(2);
           $("calc-sumf").textContent = sumFactor.toFixed(3);
@@ -913,12 +951,12 @@
           $("calc-base").style.color = minOk ? "#22c55e" : "#ef4444";
           const warn = calc.querySelector("#calc-warn");
           if (!minOk) {
-            const minBalNeeded = minAmount * sumFactor;
+            const minBalNeeded = (minAmount * sumFactor * 100) / pct;
             warn.style.display = "block";
             warn.innerHTML = `
-              ⛔ <b>Невозможно поставить ${N} циклов при q=${q}</b><br/>
+              ⛔ <b>Невозможно поставить ${N} циклов при q=${q}, бюджет ${pct.toFixed(0)}%</b><br/>
               Расчёт $${base.toFixed(2)} ниже минимума PO ($${minAmount.toFixed(2)}).<br/>
-              Нужен баланс ≥ <b>$${minBalNeeded.toFixed(2)}</b>, либо уменьши N или коэффициент.<br/>
+              Нужен баланс ≥ <b>$${minBalNeeded.toFixed(2)}</b>, либо уменьши N/q или увеличь % бюджета.<br/>
               <i>Авто-пересчёт не сработает (значение игнорируется).</i>
             `;
           } else {

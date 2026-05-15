@@ -877,13 +877,23 @@ class StateMachine:
         candle cache, real-time). Этот метод — fallback для broad pool.
         """
         from feed.history import fetch_candles as _fetch_candles
-        tf = int(self.cfg.get("filter", {}).get("tf", 60))
-        history_n = int(self.cfg.get("filter", {}).get("history_candles", 1000))
-        # Ограничиваем сколько свечей грузим для broad — нужно ~250 для CONSENSUS
-        broad_history = min(history_n, 250)
         while self._running:
             try:
                 await asyncio.sleep(60)
+                # BUG-FIX (re-review #2): tf и broad_history читаем ВНУТРИ loop —
+                # если юзер изменит filter.tf или filter.history_candles через
+                # Mini App, broad-loop подхватит на следующей итерации.
+                tf = int(self.cfg.get("filter", {}).get("tf", 60))
+                history_n = int(self.cfg.get("filter", {}).get("history_candles", 1000))
+                # 250 свечей хватает для CONSENSUS (нужно ~200 для прогрева
+                # индикаторов). Меньше нагрузки на REST чем 1000.
+                broad_history = min(history_n, 250)
+                # BUG-FIX (re-review #2): guard feed_ready — если WS down,
+                # все fetch_candles будут падать тихо, бессмысленно тратить
+                # CPU/сеть на 30+ failed REST-вызовов. Лучше пропустить итерацию.
+                feed_ready = getattr(self.feed, "_ready", None)
+                if feed_ready is not None and not feed_ready.is_set():
+                    continue
                 # Скан pool - tracked = пары для broad-record (не дублируем _record_signals_phase)
                 broad_pool = list(self._scan_pool - self._tracked)
                 if not broad_pool:
@@ -898,8 +908,13 @@ class StateMachine:
                     async with sem:
                         try:
                             candles = await _fetch_candles(self.feed, sym, period=tf, limit=broad_history)
-                        except Exception:
-                            return  # тихо пропускаем, пара недоступна / WS жмёт
+                        except Exception as e:
+                            # BUG-FIX (re-review #2): был silent return — мешало
+                            # дебагу. Логируем на DEBUG чтобы можно было увидеть
+                            # при необходимости (--log-level=DEBUG), но не спамим
+                            # на INFO/WARN при штатных тайм-аутах PO.
+                            logger.debug("broad: fetch_candles failed for %s: %s", sym, e)
+                            return
                         if not candles or len(candles) < 200:
                             return
                         last_closed_t = int(candles[-2]["time"])

@@ -54,8 +54,10 @@ filter:
 # ---- торговля ----
 trading:
   base_amount: 1             # базовая сумма входа ($)
-  expiry_seconds: 120        # экспирация сделки (120 = 2 минуты)
-  one_trade_at_a_time: true  # не открывать параллельные сделки
+  expiry_seconds: 120        # экспирация сделки (120 = 2 минуты). При вкл auto_expiry — fallback.
+  one_trade_at_a_time: true  # legacy флаг (не используется в parallel_pairs=true)
+  parallel_pairs: false      # Stage 3: параллельные MG-циклы на нескольких парах (default off)
+  max_parallel_pairs: 3      # макс. одновременно активных циклов когда parallel_pairs=true
   # Авто-пересчёт base_amount от живого баланса.
   # Формула: floor(balance / sum_factor × 10) / 10, где
   # sum_factor = (q^N − 1) / (q − 1)  — сумма геом. прогрессии МГ.

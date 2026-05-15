@@ -183,9 +183,27 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
             "direction": getattr(s, "direction", None),
             "trades_on_pair": getattr(s, "trades_on_pair", 0),
             "active_cycle_pairs": (
-                [p for p in [getattr(s, "current_pair", None)] if p]
-                + list(getattr(s, "switched_pairs", []) or [])
-            ) if (getattr(s, "mg_step", 0) > 0 or getattr(s, "current_pair", None)) else [],
+                # Stage 3: в parallel mode возвращаем пары из pair_cycles,
+                # иначе legacy current_pair + switched_pairs.
+                list((getattr(s, "pair_cycles", {}) or {}).keys())
+                if (cfg.get("trading") or {}).get("parallel_pairs", False)
+                else (
+                    [p for p in [getattr(s, "current_pair", None)] if p]
+                    + list(getattr(s, "switched_pairs", []) or [])
+                ) if (getattr(s, "mg_step", 0) > 0 or getattr(s, "current_pair", None)) else []
+            ),
+            # Parallel cycles details — для UI чтобы показать N активных циклов
+            "parallel_mode": bool((cfg.get("trading") or {}).get("parallel_pairs", False)),
+            "parallel_cycles": (
+                {sym: {"mg_step": c.get("mg_step", 0),
+                       "direction": c.get("direction"),
+                       "cycle_loss": round(c.get("cycle_loss", 0.0), 2),
+                       "trades_count": c.get("trades_count", 0),
+                       "has_pending": bool(c.get("pending_trade"))}
+                 for sym, c in (getattr(s, "pair_cycles", {}) or {}).items()}
+            ),
+            "max_parallel_pairs": int((cfg.get("trading") or {})
+                                       .get("max_parallel_pairs", 3) or 3),
             "filter_active": bool(
                 journal and registry and
                 ((journal.signal_filter_get(registry.active_name) or {}).get("enabled"))

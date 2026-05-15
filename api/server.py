@@ -259,6 +259,8 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
             "martingale.max_steps",
             "martingale.coefficient",
             "trading.auto_base_amount.enabled",
+            "trading.auto_base_amount.balance_pct",  # юзер: «выставил 14% → хочу видеть базу сразу»
+            "trading.auto_base_amount.min_amount",
         }
         triggered = [k for k in payload.keys() if k in recalc_keys]
         if triggered and sm and bool(((cfg.get("trading") or {}).get("auto_base_amount") or {}).get("enabled", True)):

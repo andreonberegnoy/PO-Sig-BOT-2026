@@ -230,15 +230,28 @@ class StateMachine:
     def force_reset_cycle(self):
         """Принудительный сброс цикла в FREE-режим.
         МГ-шаг → 0, пара → None, потери сессии сохраняются (деньги потрачены).
-        Бот сразу начинает искать новый сигнал на любой паре."""
+        Бот сразу начинает искать новый сигнал на любой паре.
+
+        Stage 3: также сбрасывает ВСЕ parallel-циклы (pair_cycles → {}).
+        Pending parallel trades тоже сбрасываются — их результаты придут
+        через PO close-event но не будут обработаны (cycle нет). Это
+        приемлемо т.к. /reset_cycle — emergency action, юзер явно знает что
+        теряет track активных сделок."""
         old_pair = self.state.current_pair
         old_step = self.state.mg_step
+        # Stage 3: cleanup parallel cycles
+        old_parallel = list((self.state.pair_cycles or {}).keys())
+        if old_parallel:
+            logger.info("FORCE RESET CYCLE: also clearing %d parallel cycles: %s",
+                        len(old_parallel), old_parallel)
+            self.state.pair_cycles = {}
         self._reset_cycle()
         self.state.day_off_until = 0   # снять day-off если он был
         self._persist()
         self._force_rescan = True
         self._tick_event.set()
-        logger.info("FORCE RESET CYCLE: was %s MG%d → FREE", old_pair, old_step)
+        logger.info("FORCE RESET CYCLE: was %s MG%d → FREE (parallel cleared: %d)",
+                    old_pair, old_step, len(old_parallel))
 
     async def force_switch_pair(self) -> str | None:
         """Принудительная смена пары — переход в SEARCH режим.
@@ -248,7 +261,16 @@ class StateMachine:
         в этом цикле).
 
         Возвращает 'SEARCH' если режим активирован, или None если нет
-        активного цикла / нет tracked-пар."""
+        активного цикла / нет tracked-пар.
+
+        Stage 3: в parallel mode этот концепт не применим — каждый цикл
+        ведётся на СВОЕЙ паре, нет глобальной 'current_pair' которую можно
+        свитчить. Если юзер хочет принудительно закрыть конкретный цикл —
+        используй /reset_cycle (закроет ВСЕ parallel-циклы)."""
+        if bool((self.cfg.get("trading") or {}).get("parallel_pairs", False)):
+            logger.warning("force_switch_pair: not applicable in parallel mode "
+                            "(use force_reset_cycle to clear all parallel cycles)")
+            return None
         if self.state.mg_step == 0:
             logger.warning("force_switch_pair: no active MG cycle to switch")
             return None
@@ -2092,13 +2114,21 @@ class StateMachine:
 
     async def _open_parallel_trade(self, sym: str, action: str, amount: float):
         """Аналог _open_and_track но для parallel mode. Записывает pending_trade
-        в pair_cycles[sym], не в self.state.pending_trade."""
+        в pair_cycles[sym]. Возвращается сразу после успешного открытия — close
+        отслеживается фоновой задачей _watch_parallel_close (fire-and-forget),
+        чтобы _parallel_step мог продолжать работу с другими циклами.
+        """
         if not self._pair_matches_trade_mode(sym):
             logger.warning("BLOCKED parallel open: %s не соответствует trade_mode", sym)
             return
         cycle = self.state.pair_cycles.get(sym)
         if not cycle:
             logger.error("parallel: pair_cycles[%s] missing на открытии trade — abort", sym)
+            return
+        # Double-check paused/waiting (бот мог быть приостановлен между phase 2
+        # detection и непосредственным open call).
+        if self.state.paused or self.state.waiting_resume:
+            logger.info("parallel: skip open %s — paused/waiting_resume", sym)
             return
 
         # Auto-expiry (как в _open_and_track)
@@ -2124,36 +2154,135 @@ class StateMachine:
             except Exception:
                 logger.debug("parallel auto-expiry lookup failed for %s", sym)
 
-        # Subscribe (idempotent)
+        # Subscribe (idempotent) — КРИТИЧНО: должна работать, иначе live ticks
+        # не пойдут → close event не дойдёт до _closed_deals_index → trade
+        # никогда не закроется. Abort если subscribe упал.
         try:
             if hasattr(self.feed, "subscribe"):
                 await self.feed.subscribe(sym, int(self.cfg["filter"]["tf"]))
         except Exception:
-            logger.exception("parallel: subscribe failed for %s", sym)
+            logger.exception("parallel: subscribe failed for %s — abort open", sym)
+            return  # не открываем trade без подписки на live ticks
 
-        # Записываем pending_trade в cycle
+        # CRITICAL: capture balance BEFORE tc.open_trade (как в legacy)
         pre_balance = float(self.feed.balance() or 0.0)
+        try:
+            opened = await self.tc.open_trade(sym, amount, action, expiry)
+        except Exception:
+            logger.exception("parallel: open_trade exception %s", sym)
+            return
+        if not opened:
+            logger.warning("parallel: open_trade returned None/False for %s", sym)
+            return
+
+        # Записываем pending_trade в cycle (с trade_id для recovery)
         cycle["pending_trade"] = {
             "asset": sym,
             "action": action,
-            "amount": amount,
+            "amount": float(amount),
             "pre_balance": pre_balance,
             "open_ts": int(time.time()),
-            "expiry_sec": expiry,
+            "expiry_sec": int(expiry),
+            "trade_id": opened.trade_id,
         }
         self._persist()
+        logger.info("parallel OPEN %s %s $%s exp=%ss trade_id=%s",
+                    sym, action, amount, expiry, opened.trade_id)
 
+        # Mark signal entered (для аналитики связи signal→trade)
         try:
-            ok = await self.tc.open_trade(sym, amount, action, expiry)
+            buf = self._candles.get(sym) or []
+            if len(buf) >= 2:
+                signal_ts = int(buf[-2]["time"])
+                strat_name = (self.registry.get_active().name
+                               if self.registry else "consensus")
+                self.journal.mark_signal_entered(
+                    sym, signal_ts, str(strat_name), str(opened.trade_id),
+                )
         except Exception:
-            logger.exception("parallel: open_trade exception %s", sym)
-            cycle["pending_trade"] = None
-            self._persist()
-            return
-        if not ok:
-            logger.warning("parallel: open_trade returned False for %s", sym)
-            cycle["pending_trade"] = None
-            self._persist()
+            logger.exception("parallel: mark_signal_entered failed for %s", sym)
+
+        # CRITICAL: spawn fire-and-forget task to watch for close event.
+        # Без этого trade откроется но НИКОГДА не закроется (callbacks PO только
+        # пишут в _closed_deals_index, не вызывают _on_trade_closed напрямую).
+        asyncio.create_task(
+            self._watch_parallel_close(sym, opened, amount, pre_balance, expiry),
+            name=f"parallel_close_{sym}_{int(time.time())}",
+        )
+
+    async def _watch_parallel_close(self, sym: str, opened, amount: float,
+                                     pre_balance: float, expiry: int):
+        """Фоновая задача: ждёт expiry+2с, потом polls _closed_deals_index за
+        результатом, конструирует ClosedTrade и вызывает _on_trade_closed.
+        Логика идентична last части legacy _open_and_track."""
+        try:
+            await asyncio.sleep(expiry + 2)
+            # Defensive: opened.open_time может быть None если tc.open_trade
+            # вернул OpenedTrade с timestamp=None (PO иногда так делает).
+            # Fallback на время открытия trade (now - expiry - 2).
+            open_ts = opened.open_time or (int(time.time()) - expiry - 2)
+            deal = None
+            for _ in range(15):
+                for dt in range(-2, 3):
+                    deal = self._closed_deals_index.get(f"{sym}:{open_ts + dt}")
+                    if deal:
+                        break
+                if deal:
+                    break
+                await asyncio.sleep(1.0)
+
+            if deal and "profit" in deal:
+                profit_raw = float(deal.get("profit") or 0)
+                if profit_raw > 0.01:
+                    result = "WIN"
+                    profit = profit_raw + amount
+                elif profit_raw < -0.01:
+                    result = "LOSS"
+                    profit = 0.0
+                else:
+                    result = "DRAW"
+                    profit = amount
+                post_balance = float(self.feed.balance() or 0.0)
+                delta = round(post_balance - pre_balance, 2)
+                logger.info("parallel CLOSE event %s: profit_raw=%.2f → %s",
+                            sym, profit_raw, result)
+            else:
+                # Fallback на balance-delta (как legacy)
+                post_balance = float(self.feed.balance() or 0.0)
+                for _ in range(10):
+                    if abs(post_balance - pre_balance) >= 0.01:
+                        break
+                    await asyncio.sleep(1.0)
+                    post_balance = float(self.feed.balance() or 0.0)
+                delta = round(post_balance - pre_balance, 2)
+                if delta > 0.005:
+                    result = "WIN"
+                    profit = delta + amount
+                elif delta < -0.005:
+                    result = "LOSS"
+                    profit = 0.0
+                else:
+                    result = "DRAW"
+                    profit = amount
+                logger.warning("parallel CLOSE fallback %s: delta=%.2f → %s",
+                                sym, delta, result)
+
+            closed = ClosedTrade(
+                trade_id=opened.trade_id,
+                asset=opened.asset,
+                action=opened.action,
+                amount=opened.amount,
+                profit=profit,
+                result=result,
+                close_time=int(time.time()),
+                raw={"pre_balance": pre_balance, "post_balance": post_balance,
+                      "delta": delta, "parallel": True},
+            )
+            await self._on_trade_closed(opened, closed)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("parallel: _watch_parallel_close crashed for %s", sym)
 
     def _cleanup_pair_cycle(self, sym: str):
         """Удаляет cycle из pair_cycles после WIN/bust."""

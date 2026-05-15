@@ -23,6 +23,7 @@
   else: bars = fallback_bars  # из cfg.trading.expiry_seconds
 """
 from __future__ import annotations
+import asyncio
 import json
 import time
 import logging
@@ -122,8 +123,12 @@ async def expiry_optimizer_loop(journal, sleep_seconds: int = 4 * 3600):
 
     По умолчанию раз в 4 часа. Первый запуск через 60 секунд после старта
     (даём боту прогреться).
+
+    NB: SQL агрегация выполняется СИНХРОННО в event loop (~50-500мс при
+    1.5-30K signals). asyncio.to_thread НЕЛЬЗЯ — sqlite3.Connection создан
+    с check_same_thread=True (default), нельзя использовать из других тредов.
+    Раз в 4 часа короткая блокировка event loop приемлема.
     """
-    import asyncio
     await asyncio.sleep(60)
     while True:
         try:

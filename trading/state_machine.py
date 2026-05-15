@@ -888,10 +888,9 @@ class StateMachine:
                 broad_pool = list(self._scan_pool - self._tracked)
                 if not broad_pool:
                     continue
-                params = {**DEFAULT_PARAMS, **(self.cfg.get("indicator") or {})}
-                if self.registry:
-                    try: params = self.registry.get_active().merged_params()
-                    except Exception: pass
+                # NOTE: params для _check_signal_with_meta не передаются — он
+                # сам подтянет их через self.registry. Поэтому здесь params
+                # вычислять не нужно (раньше был dead code).
 
                 # Ограничиваем параллельность чтобы не утопить PO
                 sem = asyncio.Semaphore(5)
@@ -1829,7 +1828,17 @@ class StateMachine:
         if (self.cfg.get("filter") or {}).get("auto_expiry_enabled", True):
             try:
                 from strategy.expiry_optimizer import pair_hour_expiry_lookup
-                current_hour = int(time.strftime("%H", time.gmtime()))
+                # КРИТИЧНО: hour_local в БД signals хранится в LOCAL TZ (Kyiv/Helsinki),
+                # не в UTC. Должны использовать ту же TZ что _market_snapshot:
+                #   tz_name = telegram.daily_report_timezone (default Europe/Kyiv).
+                # Иначе lookup всегда промахивается (UTC=18 vs Kyiv=20).
+                try:
+                    tz_name = (self.cfg.get("telegram") or {}).get(
+                        "daily_report_timezone") or "Europe/Kyiv"
+                    tz = pytz.timezone(tz_name)
+                    current_hour = datetime.fromtimestamp(int(time.time()), tz=tz).hour
+                except Exception:
+                    current_hour = datetime.utcfromtimestamp(int(time.time())).hour
                 opt = pair_hour_expiry_lookup(self.journal, sym, current_hour)
                 if opt:
                     optimum_bars = int(opt["bars"])

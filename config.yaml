@@ -14,6 +14,12 @@ auth:
 
 # ---- фильтр валютных пар ----
 filter:
+  auto_expiry_enabled: true  # авто-экспирация per-pair × hour (Stage 2)
+                             # бот раз в 4ч пересчитывает оптимум 1-5 баров для каждой
+                             # (sym, hour) из counterfactual exp_wins. См. strategy/expiry_optimizer.py
+  min_pair_wr_actual: 0      # WR-based blacklist (0=выкл). Если >0 — пары с counterfactual WR<X%
+                             # за последние 30 дней (signals.exp_wins 2-бар) не торгуются.
+                             # Минимум 30 сигналов нужно для применения порога.
   trade_mode: otc            # "otc" | "regular" | "mixed" — какие пары РЕАЛЬНО торгуем.
                              # Аналитика (signals в БД) пишется по ОБОИМ типам всегда.
   min_payout: 92             # минимальная выплата для первой сделки (%) — для OTC-пар

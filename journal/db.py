@@ -733,6 +733,46 @@ class Journal:
             "SELECT * FROM trades WHERE close_ts >= ? ORDER BY close_ts", (ts,))
         return cur.fetchall()
 
+    def pair_wr_from_signals(self, symbol: str,
+                              min_count: int = 30,
+                              exp_bar_index: int = 1,
+                              days_lookback: int = 30) -> Optional[float]:
+        """Считает counterfactual WR конкретной пары из таблицы signals.
+        Используется WR-based blacklist'ом: пары с WR<X% не торгуются, хотя
+        в аналитику продолжают писаться.
+
+        Args:
+            symbol: имя пары (например "EURJPY_otc")
+            min_count: минимальное число signals чтобы считать WR значимым
+                       (иначе вернёт None — нет данных)
+            exp_bar_index: какую экспирацию проверять. 1 = 2-бар (default),
+                           0=1-бар, 2=3-бар и т.д.
+            days_lookback: за сколько дней брать. 0 = все.
+
+        Returns:
+            WR в процентах (0.0-100.0) или None если данных недостаточно.
+        """
+        import time as _t
+        since = int(_t.time()) - days_lookback * 86400 if days_lookback > 0 else 0
+        cur = self.conn.execute(
+            "SELECT exp_wins FROM signals WHERE symbol=? AND signal_ts >= ? "
+            "AND exp_wins IS NOT NULL",
+            (symbol, since),
+        )
+        wins = 0; total = 0
+        for r in cur:
+            try:
+                ew = json.loads(r[0])
+                if ew and len(ew) > exp_bar_index:
+                    total += 1
+                    if ew[exp_bar_index]:
+                        wins += 1
+            except Exception:
+                continue
+        if total < min_count:
+            return None
+        return wins / total * 100.0
+
     # ---------- bans ----------
 
     def ban(self, symbol: str, hours: int = 0, reason: str = "", minutes: int = 0):

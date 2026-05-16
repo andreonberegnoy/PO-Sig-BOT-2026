@@ -387,10 +387,12 @@ class StateMachine:
             # Mark refresh so REST backoff can skip this pair
             self._last_refresh[symbol] = time.time()
 
-    async def _notify(self, msg: str, parse_mode: str | None = None):
+    async def _notify(self, msg: str, parse_mode: str | None = "HTML"):
+        """Дефолт parse_mode=HTML — большинство сообщений содержат <b>-теги
+        (LOSS/WIN/DRAW/open). Если в тексте могут быть «<», «>», «&» —
+        вызывающий код должен экранировать или передать parse_mode=None.
+        """
         try:
-            # Если notify callback поддерживает parse_mode (как TG-обёртка) —
-            # пробуем передать, иначе вызываем со старой сигнатурой.
             try:
                 res = self.notify(msg, parse_mode=parse_mode) if parse_mode \
                     else self.notify(msg)

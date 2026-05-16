@@ -237,6 +237,27 @@
       document.getElementById("m-base").textContent = s.base_amount != null ? `$${(+s.base_amount).toFixed(2)}` : "—";
       document.getElementById("m-expiry").textContent = s.expiry_seconds != null ? `${s.expiry_seconds} сек` : "—";
       document.getElementById("m-mg").textContent = s.mg_step ?? 0;
+      // 🎰 В МГ-цикле: показываем активные циклы с номером сделки (1-indexed).
+      //   parallel_mode → все пары из parallel_cycles (например "EURUSD_otc(3), BTC_otc(1)")
+      //   legacy mode + mg_step>0 → current_pair с trade# (например "EURUSD_otc(2)")
+      //   иначе — "—"
+      const mgCyclesEl = document.getElementById("m-mg-cycles");
+      if (mgCyclesEl) {
+        const parts = [];
+        if (s.parallel_mode && s.parallel_cycles) {
+          for (const sym of Object.keys(s.parallel_cycles)) {
+            const c = s.parallel_cycles[sym];
+            const tradeN = (c.mg_step ?? 0) + 1;  // 1-indexed (1 = первая сделка цикла)
+            parts.push(`${sym}(${tradeN})`);
+          }
+        } else if ((s.mg_step ?? 0) > 0 && s.current_pair) {
+          // Legacy mode — single active cycle
+          parts.push(`${s.current_pair}(${(s.mg_step ?? 0) + 1})`);
+        }
+        mgCyclesEl.innerHTML = parts.length > 0
+          ? `<span style="font-size:13px; word-break:break-all">${parts.join(", ")}</span>`
+          : "—";
+      }
       document.getElementById("m-loss").textContent = `$${(+(s.session_loss || 0)).toFixed(2)}`;
       // Макс. промежуток без торговли — формат «Хч Yм»
       const ntEl = document.getElementById("m-no-trade-gap");

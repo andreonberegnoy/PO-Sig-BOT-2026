@@ -533,6 +533,86 @@ Backwards-compat: старый `filter.day_off_hours` в state_kv override ав�
   тоже использует per-pair payout-порог. Backward-compat: дефолт `trade_mode=otc`
   → старое поведение для существующих установок.
 
+### POST-3 Stage 1+2+3 пакет (2026-05-15/16)
+
+- **Stage 1.1** — MG=5: `martingale.cycle_total_limit` уменьшен с 7 до 5
+  на основе аналитики (98% циклов закрывается ≤MG3, MG6-7 — статистически
+  нулевая глубина recovery, лишний риск).
+- **Stage 1.2** — Broad analytics pool: новое поле `state_machine._scan_pool`
+  + фоновая задача `_record_signals_broad_loop` (REST каждые 60с) пишет
+  signals по парам прошедшим payout-scan но не торгуемым (scan_pool − tracked).
+  Решает проблему: при активном фильтре аналитика собиралась только по
+  узкому _tracked, теряя данные по широкому пулу. Теперь broad. Защита
+  feed_ready guard, semaphore(5), debug-level логирование fail. Дедуп
+  через `_last_signal_record_bar`.
+- **Stage 1.3** — WR-blacklist: `filter.min_pair_wr_actual` (default 0 =
+  выкл). При ≥1 в `_eligible_for_new_cycle` проверяется counterfactual WR
+  из БД signals (exp_wins[1]=2-бар, 30 дней, N≥30) через новый
+  `journal.pair_wr_from_signals()`. Кэш `_pair_wr_cache` TTL 10мин.
+- **Stage 2** — Auto-expiry per-pair × hour: новый модуль
+  `strategy/expiry_optimizer.py`. `compute_pair_hour_expiry()` агрегирует
+  signals.exp_wins за 30 дней per (sym, hour_local Kyiv) и находит оптимум
+  1-5 баров (N≥8). `expiry_optimizer_loop` фоновая задача раз в 4ч пишет
+  результат в `state_kv["pair_hour_expiry"]`. `_open_and_track` и
+  `_open_parallel_trade` читают через `pair_hour_expiry_lookup(...)`,
+  fallback на `trading.expiry_seconds`. Toggle `filter.auto_expiry_enabled`
+  default true.
+- **Stage 3** — Parallel trading: `trading.parallel_pairs` toggle,
+  `trading.max_parallel_pairs` default 3. `RuntimeState.pair_cycles:
+  dict[sym→cycle_state]`. Главный диспатч выбирает `_parallel_step` vs
+  legacy. `_parallel_step` имеет 2 фазы: process active cycles
+  (поиск signal для след MG-шага per cycle), open new cycles (если
+  active < max_par). `_open_parallel_trade` спавнит fire-and-forget task
+  `_watch_parallel_close` (sleep expiry+2 → poll _closed_deals_index 15с
+  → construct ClosedTrade → call _on_trade_closed). Этот watcher был
+  критичным багом review #4 — без него parallel trades никогда не
+  закрывались.
+
+  `_on_trade_closed_parallel` short-circuit в `_on_trade_closed` по
+  `parallel_pairs=True + opened.asset in pair_cycles`. WIN → cleanup +
+  auto-recalc check; LOSS → mg_step++ + live-streak check + bust→ban+
+  cleanup при cycle_total_limit. Sticky tracked в `_rescan_pairs` включает
+  pair_cycles keys чтобы live candles обновлялись.
+
+  Миграция legacy→parallel при первом запуске _parallel_step с активным
+  legacy cycle (current_pair + mg_step > 0). Migration копирует
+  last_eval_bar из `_last_closed_bar_time[sym]` чтобы дедуп работал.
+  Orphan cleanup при выключении toggle: WARN-лог + ручной /reset_cycle.
+
+  Защиты Stage 3-aware:
+  - `_safe_to_relogin` (main.py) проверяет pending_trade в pair_cycles
+  - `_is_safe_for_recalc` блокирует пересчёт если pair_cycles активны
+  - `force_reset_cycle` очищает и pair_cycles
+  - `force_switch_pair` early return в parallel mode (концепт неприменим)
+  - `_maybe_pause_on_live_streak` вызывается в parallel close
+  - Auto-pause после WIN при закрытии последнего cycle в нерабочие часы
+
+- **balance_pct** — процент депо на цикл в автокалькуляторе. Юзер: «брать
+  10-14% от баланса и вмещать N сделок». Формула:
+  `base = floor((balance × balance_pct/100) / sum_factor × 10)/10`.
+  Default 100 = backwards-compat. UI input в автокалькуляторе с live preview.
+  Recalc срабатывает мгновенно при изменении (recalc_keys в api/server.py).
+
+- **UI Stage 3**: API `/status` отдаёт `parallel_mode`, `parallel_cycles`
+  (dict с mg_step/direction/cycle_loss/has_pending per sym),
+  `max_parallel_pairs`. Mini App строка «🎰 В МГ-цикле» под Tracked-парами
+  показывает активные циклы как `EURUSD_otc(3), KESUSD_otc(1)`
+  (1-indexed trade number).
+
+- **API recalc_keys** расширен — `balance_pct`, `min_amount` теперь тоже
+  триггерят `_recalc_base_from_balance` при изменении через PUT /api/settings
+  (юзер выставил 14% → видит новую базу мгновенно, не ждёт 5 WIN-ов).
+
+- **Bug review #4** — 8 багов исправлено в Stage 3 коде:
+  1. CRITICAL: parallel trades никогда не закрывались (нет close-watcher)
+  2. subscribe failure не abortил open
+  3. paused/waiting double-check
+  4. opened.open_time может быть None
+  5. API /status не показывал parallel cycles
+  6. /reset_cycle не очищал pair_cycles
+  7. /switch_pair не имеет смысла в parallel
+  8. Migration last_eval_bar=0 → дубль-открытие
+
 ### Удаление `consecutive_losses_switch`
 По запросу юзера: триггер «N минусов подряд → switch» избыточен в типовой
 конфигурации `pair_limits=[3,3]` где `consec=3` — оба триггера срабатывают

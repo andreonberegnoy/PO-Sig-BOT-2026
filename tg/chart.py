@@ -61,14 +61,18 @@ def render_chart(
     db_stats: dict | None = None
     if journal is not None:
         try:
-            buf_start_ts = int(candles[0]["time"])
             buf_end_ts = int(candles[-1]["time"])
-            db_signals = journal.signals_in_range(symbol, buf_start_ts, buf_end_ts)
+            # ВАЖНО: lookback по ВРЕМЕНИ, не по длине буфера. Буфер в памяти
+            # может быть короче 1000 баров (свежая подписка после ротации
+            # _tracked) — тогда привязка к candles[0].time резала бы
+            # видимость старых settled сигналов. БД хранит всю историю.
+            tf_sec = 60  # стандарт для PO 1m
+            long_bars = int(merged_params.get("statsLookbackBars", 1000))
+            recent_bars = int(merged_params.get("recentLookbackBars", 200))
+            long_since_ts = buf_end_ts - long_bars * tf_sec
+            recent_since_ts = buf_end_ts - recent_bars * tf_sec
+            db_signals = journal.signals_in_range(symbol, long_since_ts, buf_end_ts)
             if db_signals:
-                # recent окно — последние `recentLookbackBars` баров буфера
-                recent_bars = int(merged_params.get("recentLookbackBars", 200))
-                recent_idx = max(0, len(candles) - 1 - recent_bars)
-                recent_since_ts = int(candles[recent_idx]["time"])
                 exp_bar_idx = int(merged_params.get("expiryBars", 2)) - 1
                 exp_bar_idx = max(0, min(4, exp_bar_idx))
                 from journal.db import Journal as _J

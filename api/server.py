@@ -901,13 +901,16 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
                     except Exception:
                         pass
                 recent_lookback_bars = int(params.get("recentLookbackBars", 200))
-                # ИСТОЧНИК — БД signals (immutable). См. tg/chart.py для
-                # обоснования (HTF buffer-relative repaint).
-                buf_start_ts = int(candles[0]["time"])
+                long_lookback_bars = int(params.get("statsLookbackBars", 1000))
+                # ИСТОЧНИК — БД signals (immutable). См. tg/chart.py.
+                # Lookback по времени (не по длине буфера) — буфер может
+                # быть короче чем statsLookbackBars если пара только что
+                # ротировалась в _tracked. БД хранит всю историю.
+                tf_sec = 60
                 buf_end_ts = int(candles[-1]["time"])
-                recent_idx = max(0, len(candles) - 1 - recent_lookback_bars)
-                recent_since_ts = int(candles[recent_idx]["time"])
-                db_signals = journal.signals_in_range(symbol, buf_start_ts, buf_end_ts) \
+                long_since_ts = buf_end_ts - long_lookback_bars * tf_sec
+                recent_since_ts = buf_end_ts - recent_lookback_bars * tf_sec
+                db_signals = journal.signals_in_range(symbol, long_since_ts, buf_end_ts) \
                     if journal else []
                 exp_bar_idx = max(0, min(4, expiry_bars - 1))
                 stats = type(journal).aggregate_signal_stats(

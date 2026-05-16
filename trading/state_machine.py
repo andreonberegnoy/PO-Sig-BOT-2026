@@ -2163,7 +2163,7 @@ class StateMachine:
         tf_sec = int(self.cfg["filter"].get("tf", 60))
         if (self.cfg.get("filter") or {}).get("auto_expiry_enabled", True):
             try:
-                from strategy.expiry_optimizer import pair_hour_expiry_lookup
+                from strategy.expiry_optimizer import resolve_expiry_bars
                 try:
                     tz_name = (self.cfg.get("telegram") or {}).get(
                         "daily_report_timezone") or "Europe/Kyiv"
@@ -2171,13 +2171,15 @@ class StateMachine:
                     current_hour = datetime.fromtimestamp(int(time.time()), tz=tz).hour
                 except Exception:
                     current_hour = datetime.utcfromtimestamp(int(time.time())).hour
-                opt = pair_hour_expiry_lookup(self.journal, sym, current_hour)
+                opt = resolve_expiry_bars(self.journal, sym, current_hour)
                 if opt:
                     optimum_bars = int(opt["bars"])
                     new_expiry = optimum_bars * tf_sec
                     if new_expiry != expiry:
-                        logger.info("parallel auto-expiry: %s @%dh → %d bars (was %ds → %ds)",
-                                    sym, current_hour, optimum_bars, expiry, new_expiry)
+                        logger.info("parallel auto-expiry: %s @%dh → %d bars "
+                                    "(was %ds → %ds, src=%s)",
+                                    sym, current_hour, optimum_bars,
+                                    expiry, new_expiry, opt["source"])
                         expiry = new_expiry
             except Exception:
                 logger.debug("parallel auto-expiry lookup failed for %s", sym)
@@ -2480,7 +2482,7 @@ class StateMachine:
         # filter.auto_expiry_enabled (default true).
         if (self.cfg.get("filter") or {}).get("auto_expiry_enabled", True):
             try:
-                from strategy.expiry_optimizer import pair_hour_expiry_lookup
+                from strategy.expiry_optimizer import resolve_expiry_bars
                 # КРИТИЧНО: hour_local в БД signals хранится в LOCAL TZ (Kyiv/Helsinki),
                 # не в UTC. Должны использовать ту же TZ что _market_snapshot:
                 #   tz_name = telegram.daily_report_timezone (default Europe/Kyiv).
@@ -2492,15 +2494,17 @@ class StateMachine:
                     current_hour = datetime.fromtimestamp(int(time.time()), tz=tz).hour
                 except Exception:
                     current_hour = datetime.utcfromtimestamp(int(time.time())).hour
-                opt = pair_hour_expiry_lookup(self.journal, sym, current_hour)
+                # Двухуровневый fallback: сначала (sym, hour) ≥8 сигналов,
+                # потом per-pair overall ≥30, иначе дефолт из config.
+                opt = resolve_expiry_bars(self.journal, sym, current_hour)
                 if opt:
                     optimum_bars = int(opt["bars"])
                     new_expiry = optimum_bars * tf_sec
                     if new_expiry != expiry:
                         logger.info(
-                            "auto-expiry: %s @%dh → %d bars (was %ds → %ds, WR=%s%%, N=%d)",
+                            "auto-expiry: %s @%dh → %d bars (was %ds → %ds, WR=%s%%, N=%d, src=%s)",
                             sym, current_hour, optimum_bars,
-                            expiry, new_expiry, opt["wr"], opt["n"],
+                            expiry, new_expiry, opt["wr"], opt["n"], opt["source"],
                         )
                         expiry = new_expiry
             except Exception:

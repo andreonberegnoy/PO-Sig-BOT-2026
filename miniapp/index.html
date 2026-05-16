@@ -31,13 +31,13 @@
         <tr><td>Баланс:</td><td id="m-balance">—</td></tr>
         <tr><td>Стратегия:</td><td id="m-strategy">—</td></tr>
         <tr id="row-tracked" class="clickable-row"><td>📊 Tracked пары:<span class="row-arrow">▾</span></td><td id="m-tracked">—</td></tr>
+        <tr><td title="Пары которые сейчас находятся в активном МГ-цикле. Цифра в скобках = номер сделки в цикле (1 = первая, 2 = после первого LOSS и т.д.). В parallel-режиме показывает все одновременные циклы; в legacy-режиме — одну текущую пару (если есть). Пусто если нет активных циклов.">🎰 В МГ-цикле:</td><td id="m-mg-cycles">—</td></tr>
         <tr><td>Активных пар (live):</td><td id="m-active">—</td></tr>
         <tr><td>В бане:</td><td id="m-banned">—</td></tr>
         <tr><td>Текущая пара:</td><td id="m-pair">—</td></tr>
         <tr><td>Сумма первой сделки:</td><td id="m-base">—</td></tr>
         <tr><td>Экспирация:</td><td id="m-expiry">—</td></tr>
         <tr><td>МГ-шаг:</td><td id="m-mg">—</td></tr>
-        <tr><td title="Пары которые сейчас находятся в активном МГ-цикле. Цифра в скобках = номер сделки в цикле (1 = первая, 2 = после первого LOSS и т.д.). В parallel-режиме показывает все одновременные циклы; в legacy-режиме — одну текущую пару (если есть). Пусто если нет активных циклов.">🎰 В МГ-цикле:</td><td id="m-mg-cycles">—</td></tr>
         <tr><td>Потери сессии:</td><td id="m-loss">—</td></tr>
         <tr><td title="Самый длинный непрерывный промежуток без открытых сделок в рамках текущего торгового дня (или 24h если 24/7). Обновляется онлайн.">⏱️ Макс. без торговли:</td><td id="m-no-trade-gap">—</td></tr>
         <tr><td title="Самый низкий payout(%) среди сделок открытых за последние 24 часа. Учитываются все исходы (WIN/LOSS/DRAW).">📉 Мин. payout за сутки:</td><td id="m-min-payout">—</td></tr>
@@ -266,6 +266,6 @@
 </main>
 
 <!-- Cache-bust: bump v=YYYYMMDD when app.js changes. -->
-<script src="/miniapp/app.js?v=20260612"></script>
+<script src="/miniapp/app.js?v=20260613"></script>
 </body>
 </html>

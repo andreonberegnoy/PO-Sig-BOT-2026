@@ -175,15 +175,28 @@ after every pull (config.yaml in repo has mode=paper as the safe default).
   N≥30 для значимости) через `journal.pair_wr_from_signals()`. Пары с
   WR<порог не торгуются, но в аналитику пишутся через broad loop. Кэш
   `_pair_wr_cache` (TTL 10 мин) защищает от SQL на каждом тике.
-- **Stage 2 — Auto-expiry per-pair × hour**. Модуль
+- **Stage 2 — Auto-expiry per-pair × hour** (двухуровневый fallback). Модуль
   `strategy/expiry_optimizer.py`. Раз в 4ч (фоновая задача
-  `expiry_optimizer_loop`) `compute_pair_hour_expiry()` агрегирует
-  `signals.exp_wins` за 30 дней → для каждой (sym, hour_local Kyiv) ячейки
-  ищет оптимум 1-5 баров (N≥8 для значимости). Результат в
-  `state_kv["pair_hour_expiry"]` dict. В `_open_and_track` и
-  `_open_parallel_trade` функция `pair_hour_expiry_lookup(journal, sym,
-  current_hour_Kyiv)` возвращает оптимум; fallback на
-  `trading.expiry_seconds`. Toggle `filter.auto_expiry_enabled` (default true).
+  `expiry_optimizer_loop`) агрегирует `signals.exp_wins` за 30 дней по двум
+  разрезам:
+  1. **(sym, hour_local Kyiv)** — `compute_pair_hour_expiry()`, N≥8 для
+     значимости. Хранится в `state_kv["pair_hour_expiry"]`.
+  2. **(sym) overall** — `compute_pair_overall_expiry()`, N≥30 для значимости.
+     Хранится в `state_kv["pair_overall_expiry"]`. Это промежуточный fallback
+     для случая когда конкретный час ещё не накопил данных, но у пары есть
+     общая история.
+
+  Лукап через `resolve_expiry_bars(journal, sym, hour)` — возвращает
+  `{"bars","wr","n","source"}` где `source ∈ {"hour","pair"}`. Каскад: hour
+  → pair → None (caller использует `trading.expiry_seconds` из config).
+  В `_open_and_track` и `_open_parallel_trade` оптимум читается БЕЗ
+  `max(2,...)` clamp — адаптивная модель без ограничений (юзер 2026-05-16).
+  Toggle `filter.auto_expiry_enabled` (default true).
+- **Адаптивная экспирация — фундаментальный принцип** (юзер 2026-05-16):
+  `EXPIRY_BARS=[1,2,3,4,5]` в `expiry_optimizer.py`, цикл `range(5)` без
+  пропусков. В торговле НЕТ нижней границы (`max(2,...)` clamp удалён).
+  Для аналитики (broad pool) тоже без ограничений — `_record_signals_broad_loop`
+  пишет exp_wins для всех 1-5 баров.
 - **Stage 3 — Parallel trading** (юзерская фича: «несколько пар
   одновременно в МГ»). Toggle `trading.parallel_pairs` (default false),
   `trading.max_parallel_pairs` (default 3). При parallel=true главный
@@ -213,6 +226,43 @@ after every pull (config.yaml in repo has mode=paper as the safe default).
 - **`_is_safe_for_recalc` (Stage 3-aware)** — блокирует recalc base_amount
   если есть активные parallel cycles (mg_step>0 или pending_trade).
   Изменение base в середине цикла ломает recovery-математику.
+- **Signal fixation — per-TRADE, не per-CYCLE** (юзер 2026-05-16): пока
+  `pending_trade` висит — новых входов нет (направление текущей сделки
+  де-факто заморожено). После закрытия сделки на новом баре `_in_cycle_step`
+  (legacy) и `_parallel_step` phase 1 (parallel) **обновляют direction под
+  свежий сигнал** — следующий MG-шаг может быть в ЛЮБОМ направлении.
+  Юзерская логика: «если сделка закрылась в минус и появился сигнал на
+  противоположный — заходим в него». Direction НЕ блокируется на весь
+  цикл.
+- **Визуальная фиксация сигнала на чарте** (юзер 2026-05-16): юзер
+  жаловался что скриншот после открытия показывал сделку «в плюс» хотя
+  по факту она минусовая — стрелка перерисовывалась. Причина:
+  `_notify_open_async` читал `self._candles[sym]` внутри фоновой таски,
+  и пока таска ждала в очереди event loop мог прилететь новый тик →
+  `generate_signals` пересчитывал стрелки. Фикс: `candles_snapshot =
+  list(self._candles[sym])` СИНХРОННО до `create_task` (state_machine.py).
+  Чарт теперь = ровно то что бот видел в момент входа. Реальную торговлю
+  не трогает.
+- **Schedule respect в parallel mode**: `_parallel_step` phase 2 (открытие
+  новых циклов) проверяет `_within_working_hours()` перед открытием.
+  Phase 1 (доработка существующих циклов) — без проверки, цикл должен
+  доводиться до WIN/bust независимо от часа. Cross-midnight окна
+  (start>end, например 8-3) обрабатываются: `h >= start or h < end`.
+- **TG-нотификация открытия сделки** (`_notify_open_async`): показывает
+  `⏱ Экспирация: N бара (Sс, source)` где source = `ч×пара|по паре|дефолт`
+  (двухуровневый fallback). `parse_mode="HTML"` обязателен иначе `<b>`-теги
+  отображаются дословно. `_notify(msg, parse_mode=...)` пробрасывает через
+  TypeError-fallback (для backwards-compat с lambda-callback'ами).
+- **Mini App pair_card — единый источник истины** (юзер 2026-05-16,
+  баг-репорт): `/api/pair_card/{symbol}` раньше брал totals (wins/losses/wr)
+  из `sm._pair_scores` (снапшот рескана ~60с), а `recent_results` через
+  свежий `analyze(candles)` — две разные «эпохи» данных, sequence
+  арифметически не сходилась с totals. Фикс: все статистические поля из
+  одного `analyze()` как чарт. Из PairScore берём только runtime-флаги
+  (allowed/ban/pause/reason) — их в Analysis нет.
+- **Chart layout** (`tg/chart.py`): свечи 4/5 ширины (right_pad = N*0.25),
+  плашка статов в левом верхнем углу `(0.01, 0.97) ha="left"`, title
+  символа также `loc="left"` (рендерится над plot area, не перекрывается).
 
 ## Permissions you have (auto-allow in `.claude/settings.json` если настроено)
 

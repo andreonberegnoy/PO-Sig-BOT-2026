@@ -122,7 +122,9 @@ def render_chart(
         lines.append(f"Последние {len(last)} сделок: " + "".join("✓" if x else "✗" for x in last))
 
     txt = "\n".join(lines)
-    ax.text(0.99, 0.97, txt, transform=ax.transAxes, ha="right", va="top",
+    # Плашка в ЛЕВОМ верхнем углу (юзер 2026-05-16). Title символа смещён
+    # вправо чтобы не перекрываться с плашкой.
+    ax.text(0.01, 0.97, txt, transform=ax.transAxes, ha="left", va="top",
             color="#e2e8f0", fontsize=10, family="monospace",
             parse_math=False,
             bbox=dict(boxstyle="round,pad=0.6", facecolor="#111827", edgecolor="#334155", alpha=0.95))
@@ -130,17 +132,18 @@ def render_chart(
     # parse_math=False keeps '$' '#' '_' as literal chars in matplotlib labels.
     # Without this, e.g. "#AAPL_otc" or "BTC$..." may be parsed as mathtext
     # and either render weirdly or raise "missing $".
+    # Title справа (плашка теперь в левом углу — см. выше).
     ax.set_title(f"{symbol}  (last {len(show)} bars)", color="#e2e8f0",
-                 fontsize=11, loc="left", parse_math=False)
+                 fontsize=11, loc="right", parse_math=False)
     # Time labels at evenly-spaced indices (every ~10 bars)
     step = max(1, len(show) // 8)
     tick_idx = list(range(0, len(show), step))
     ax.set_xticks(tick_idx)
     ax.set_xticklabels([times[i].strftime("%H:%M") for i in tick_idx])
-    # Extend right side so the last candle sits at ~2/3 of the chart width
-    # (1/3 of empty space to the right) — matches PocketOption/PoSignals layout
-    # where future space is reserved for the next-bar projection.
-    right_pad = len(show) * 0.5
+    # Свечи занимают 4/5 ширины графика, 1/5 — пустое пространство справа
+    # (юзер 2026-05-16). Формула: total = N + pad, candles_share = N/total = 4/5
+    # → pad = N/4.
+    right_pad = len(show) * 0.25
     ax.set_xlim(-1, len(show) + right_pad)
     plt.xticks(rotation=0)
     plt.tight_layout()

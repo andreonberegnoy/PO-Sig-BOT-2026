@@ -1767,13 +1767,20 @@ class StateMachine:
         if not action:
             return  # no consensus on this bar — keep waiting
 
-        # Accept signal. If direction flipped vs original, update state.direction
-        # so the MG ladder follows the new edge instead of fighting it.
-        if action != self.state.direction:
-            logger.info("in-cycle: signal direction flipped %s → %s on %s",
-                        self.state.direction, action, sym)
-            self.state.direction = action
-            self._persist()
+        # ── Direction lock (юзерская фича 2026-05-16) ──
+        # Раньше: бот ФЛИПАЛ direction цикла если новый сигнал противоположный
+        # («follow the new edge»). Юзер: «сигнал должен фиксироваться — если
+        # цикл начался на PUT, recovery должно быть тоже PUT, не CALL».
+        # Согласуется с parallel mode (`_parallel_step` фаза 1 уже так работает).
+        # Если сигнал не совпадает с direction — пропускаем этот бар, ждём
+        # следующего с правильным направлением. mg_step не меняется,
+        # bust-таймер через cycle_total_limit всё равно будет считать общую
+        # длительность цикла.
+        if self.state.direction and action != self.state.direction:
+            logger.info("in-cycle: skip %s bar — direction lock (%s ≠ cycle %s)",
+                        sym, action, self.state.direction)
+            return
+        action = self.state.direction or action  # fixed direction для recovery
 
         payout_in = int(self.feed.assets.get(sym, {}).get("payout", 0))
         pre_balance_now = float(self.feed.balance() or 0.0)
@@ -1878,6 +1885,12 @@ class StateMachine:
                 continue
             action = self._check_signal(sym)
             if action:
+                # Direction lock (юзерская фича 2026-05-16): в in-cycle SEARCH
+                # должны брать только пары где новый сигнал совпадает с
+                # ИЗНАЧАЛЬНЫМ направлением цикла. Иначе recovery идёт против
+                # original edge — что противоречит идее «вытянуть тот же setup».
+                if self.state.direction and action != self.state.direction:
+                    continue
                 fired = (sym, action)
                 break
 
@@ -1891,12 +1904,12 @@ class StateMachine:
         sym, action = fired
         payout = int(self.feed.assets.get(sym, {}).get("payout", 0))
 
-        # Lock onto this pair, adapt direction if needed
+        # Lock onto this pair. Direction lock уже проверен выше в поиске —
+        # сюда попадаем только если action == self.state.direction (или direction
+        # ещё не задан, что бывает при первом входе в SEARCH без legacy direction).
         self.state.current_pair = sym
-        if action != self.state.direction:
-            logger.info("in-cycle search: direction flipped %s → %s on %s",
-                        self.state.direction, action, sym)
-            self.state.direction = action
+        if not self.state.direction:
+            self.state.direction = action  # fix direction если не было
         self.state.trades_on_pair = 0
         self._persist()
 

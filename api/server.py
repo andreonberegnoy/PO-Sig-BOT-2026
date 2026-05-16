@@ -782,53 +782,72 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
                 "low":   float(c["low"]),
                 "close": float(c["close"]),
             })
-        # Маркеры BUY/SELL + ✓/✗ — прогон CONSENSUS по этим же candles
-        # для отрисовки исторических сигналов поверх графика (как у PoSignals).
+        # Маркеры BUY/SELL + ✓/✗ — ИСТОЧНИК таблица `signals` (immutable).
+        # Раньше использовался analyze(windowed) что давало repaint при
+        # сдвиге буфера (см. tg/chart.py для детального обоснования).
         markers = []
         try:
-            from strategy.consensus import analyze, DEFAULT_PARAMS
+            from strategy.consensus import DEFAULT_PARAMS
             params = {**DEFAULT_PARAMS, **(cfg.get("indicator") or {})}
             if sm and sm.registry:
                 try:
                     params = sm.registry.get_active().merged_params()
                 except Exception:
                     pass
-            a = analyze(windowed, params)
-            for ev in a.signals:
-                if ev.i < 0 or ev.i >= len(windowed):
-                    continue
-                bar = windowed[ev.i]
-                is_buy = (ev.side == "buy")
-                markers.append({
-                    "time":     int(bar["time"]),
-                    "position": "belowBar" if is_buy else "aboveBar",
-                    "shape":    "arrowUp"  if is_buy else "arrowDown",
-                    "color":    "#22c55e"  if is_buy else "#ef4444",
-                    "text":     f"{'BUY' if is_buy else 'SELL'} {ev.total}/5",
-                    "size":     1.0,
-                })
-                # WIN/LOSS маркер на exit-баре (если outcome известен)
-                r = a.outcomes.get(ev.i)
-                if r and r.completed and 0 <= r.exit_index < len(windowed):
-                    exit_bar = windowed[r.exit_index]
-                    if r.total_win:
-                        markers.append({
-                            "time":     int(exit_bar["time"]),
-                            "position": "aboveBar" if is_buy else "belowBar",
-                            "shape":    "circle",
-                            "color":    "#22c55e",
-                            "text":     "✓",
-                            "size":     0.8,
-                        })
-                    else:
-                        markers.append({
-                            "time":     int(exit_bar["time"]),
-                            "position": "aboveBar" if is_buy else "belowBar",
-                            "shape":    "square",
-                            "color":    "#ef4444",
-                            "text":     "✗",
-                            "size":     0.8,
-                        })
+            expiry_bars = int(params.get("expiryBars", 2))
+            exp_bar_idx = max(0, min(4, expiry_bars - 1))
+            tf_sec = int(period or 60) or 60
+            if windowed and journal:
+                buf_start_ts = int(windowed[0]["time"])
+                buf_end_ts = int(windowed[-1]["time"])
+                db_signals = journal.signals_in_range(symbol, buf_start_ts, buf_end_ts)
+                # Маппинг signal_ts → ближайший candle index
+                window_times = [int(c["time"]) for c in windowed]
+                for sg in db_signals:
+                    ts = sg["signal_ts"]
+                    if ts < window_times[0] or ts > window_times[-1]:
+                        continue
+                    ci = min(range(len(window_times)),
+                              key=lambda j: abs(window_times[j] - ts))
+                    bar = windowed[ci]
+                    side = (sg["side"] or "").lower()
+                    is_buy = side in ("buy", "call")
+                    markers.append({
+                        "time":     int(bar["time"]),
+                        "position": "belowBar" if is_buy else "aboveBar",
+                        "shape":    "arrowUp"  if is_buy else "arrowDown",
+                        "color":    "#22c55e"  if is_buy else "#ef4444",
+                        "text":     "BUY" if is_buy else "SELL",
+                        "size":     1.0,
+                    })
+                    # WIN/LOSS маркер на exit-баре: exit_index = ci + expiry_bars
+                    # (counterfactual: исход на N-м баре после сигнала).
+                    ew = sg.get("exp_wins")
+                    if ew and len(ew) > exp_bar_idx:
+                        outcome = ew[exp_bar_idx]
+                        if outcome is None:
+                            continue  # DRAW — без маркера
+                        exit_ci = ci + expiry_bars
+                        if 0 <= exit_ci < len(windowed):
+                            exit_bar = windowed[exit_ci]
+                            if outcome:
+                                markers.append({
+                                    "time":     int(exit_bar["time"]),
+                                    "position": "aboveBar" if is_buy else "belowBar",
+                                    "shape":    "circle",
+                                    "color":    "#22c55e",
+                                    "text":     "✓",
+                                    "size":     0.8,
+                                })
+                            else:
+                                markers.append({
+                                    "time":     int(exit_bar["time"]),
+                                    "position": "aboveBar" if is_buy else "belowBar",
+                                    "shape":    "square",
+                                    "color":    "#ef4444",
+                                    "text":     "✗",
+                                    "size":     0.8,
+                                })
             # LWC требует sorted by time ASC
             markers.sort(key=lambda m: m["time"])
         except Exception:

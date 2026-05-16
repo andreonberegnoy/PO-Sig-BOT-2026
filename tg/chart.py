@@ -132,9 +132,10 @@ def render_chart(
     # parse_math=False keeps '$' '#' '_' as literal chars in matplotlib labels.
     # Without this, e.g. "#AAPL_otc" or "BTC$..." may be parsed as mathtext
     # and either render weirdly or raise "missing $".
-    # Title справа (плашка теперь в левом углу — см. выше).
+    # Title слева (юзер: оставить с левой стороны, выше плашки — title
+    # рендерится над plot area так что с плашкой не перекрывается).
     ax.set_title(f"{symbol}  (last {len(show)} bars)", color="#e2e8f0",
-                 fontsize=11, loc="right", parse_math=False)
+                 fontsize=11, loc="left", parse_math=False)
     # Time labels at evenly-spaced indices (every ~10 bars)
     step = max(1, len(show) // 8)
     tick_idx = list(range(0, len(show), step))

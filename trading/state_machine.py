@@ -2044,6 +2044,13 @@ class StateMachine:
             await self._open_parallel_trade(sym, action, next_amt)
 
         # ── 2. Открываем новые циклы если есть ёмкость ──
+        # ВНЕ рабочих часов НЕ открываем новые циклы — это согласуется с legacy
+        # _free_scan_step (там тот же check). Существующие циклы в фазе 1
+        # продолжают работать (как legacy _in_cycle_step) чтобы доработать до
+        # WIN/bust. Auto-pause после закрытия ПОСЛЕДНЕГО цикла происходит в
+        # _on_trade_closed_parallel WIN handler.
+        if not self._within_working_hours():
+            return
         active_count = len(self.state.pair_cycles)
         if active_count >= max_par:
             return

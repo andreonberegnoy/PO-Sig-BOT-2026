@@ -1767,20 +1767,21 @@ class StateMachine:
         if not action:
             return  # no consensus on this bar — keep waiting
 
-        # ── Direction lock (юзерская фича 2026-05-16) ──
-        # Раньше: бот ФЛИПАЛ direction цикла если новый сигнал противоположный
-        # («follow the new edge»). Юзер: «сигнал должен фиксироваться — если
-        # цикл начался на PUT, recovery должно быть тоже PUT, не CALL».
-        # Согласуется с parallel mode (`_parallel_step` фаза 1 уже так работает).
-        # Если сигнал не совпадает с direction — пропускаем этот бар, ждём
-        # следующего с правильным направлением. mg_step не меняется,
-        # bust-таймер через cycle_total_limit всё равно будет считать общую
-        # длительность цикла.
-        if self.state.direction and action != self.state.direction:
-            logger.info("in-cycle: skip %s bar — direction lock (%s ≠ cycle %s)",
-                        sym, action, self.state.direction)
-            return
-        action = self.state.direction or action  # fixed direction для recovery
+        # Signal fixation (юзерская фича 2026-05-16):
+        # • Пока сделка pending (в полёте) — другие сигналы игнорируются
+        #   (это происходит ВЫШЕ через `if self.state.pending_trade`).
+        # • После закрытия trade (LOSS) — следующий MG-шаг может быть в
+        #   ЛЮБОМ направлении какое появится на новом баре. То есть direction
+        #   цикла НЕ фиксируется глобально, только текущая сделка фиксирована
+        #   на момент входа.
+        # Если новый сигнал противоположный — это валидный новый вход,
+        # обновляем direction и открываем сделку.
+        if action != self.state.direction:
+            logger.info("in-cycle: signal direction %s → %s on %s "
+                        "(new bar after LOSS — следующий MG-шаг в новом направлении)",
+                        self.state.direction, action, sym)
+            self.state.direction = action
+            self._persist()
 
         payout_in = int(self.feed.assets.get(sym, {}).get("payout", 0))
         pre_balance_now = float(self.feed.balance() or 0.0)
@@ -1885,12 +1886,10 @@ class StateMachine:
                 continue
             action = self._check_signal(sym)
             if action:
-                # Direction lock (юзерская фича 2026-05-16): в in-cycle SEARCH
-                # должны брать только пары где новый сигнал совпадает с
-                # ИЗНАЧАЛЬНЫМ направлением цикла. Иначе recovery идёт против
-                # original edge — что противоречит идее «вытянуть тот же setup».
-                if self.state.direction and action != self.state.direction:
-                    continue
+                # Signal fixation: после LOSS бот может зайти в ЛЮБОМ направлении
+                # на следующем сигнале (включая противоположное). direction цикла
+                # не фиксируется глобально — фиксируется только сделка на момент
+                # входа. Так что любой свежий сигнал принимаем.
                 fired = (sym, action)
                 break
 
@@ -1904,12 +1903,10 @@ class StateMachine:
         sym, action = fired
         payout = int(self.feed.assets.get(sym, {}).get("payout", 0))
 
-        # Lock onto this pair. Direction lock уже проверен выше в поиске —
-        # сюда попадаем только если action == self.state.direction (или direction
-        # ещё не задан, что бывает при первом входе в SEARCH без legacy direction).
+        # Lock onto this pair. Direction обновляем под текущий сигнал
+        # (signal fixation = direction конкретной сделки, не цикла).
         self.state.current_pair = sym
-        if not self.state.direction:
-            self.state.direction = action  # fix direction если не было
+        self.state.direction = action
         self.state.trades_on_pair = 0
         self._persist()
 
@@ -2028,11 +2025,12 @@ class StateMachine:
                 continue
             action, _sig, _params, _strat = meta
 
-            # Направление цикла зафиксировано на первом входе — следующие шаги
-            # должны иметь то же направление (иначе это уже не recovery, а новый
-            # цикл). Если сигнал поменял направление — пропускаем (ждём next bar).
-            if action != cycle.get("direction"):
-                continue
+            # Signal fixation (юзерская фича 2026-05-16):
+            # • Pending trade на этой паре уже отсеян выше (cycle.get("pending_trade"))
+            # • После LOSS direction цикла НЕ фиксируется глобально — следующий
+            #   MG-шаг может быть в ЛЮБОМ направлении какое появится на новом баре.
+            # Обновляем direction цикла под текущий сигнал и продолжаем.
+            cycle["direction"] = action
 
             # Проверяем что не превысили cycle_total_limit
             if cycle["mg_step"] >= cycle_limit:
@@ -2166,10 +2164,11 @@ class StateMachine:
                     current_hour = datetime.utcfromtimestamp(int(time.time())).hour
                 opt = pair_hour_expiry_lookup(self.journal, sym, current_hour)
                 if opt:
-                    new_expiry = int(opt["bars"]) * tf_sec
+                    optimum_bars = int(opt["bars"])
+                    new_expiry = optimum_bars * tf_sec
                     if new_expiry != expiry:
                         logger.info("parallel auto-expiry: %s @%dh → %d bars (was %ds → %ds)",
-                                    sym, current_hour, opt["bars"], expiry, new_expiry)
+                                    sym, current_hour, optimum_bars, expiry, new_expiry)
                         expiry = new_expiry
             except Exception:
                 logger.debug("parallel auto-expiry lookup failed for %s", sym)

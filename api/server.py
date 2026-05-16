@@ -842,16 +842,34 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
         _auth(request)
         if not sm:
             raise HTTPException(503, "state machine not ready")
+        # ВАЖНО (2026-05-16): раньше totals (wins/losses/wr/wr1) бралось из
+        # `sm._pair_scores` — это снапшот с фонового рескана (~раз в 60с), а
+        # `recent_results` пересчитывалось live через analyze(candles). В
+        # результате на карточке смешивались две «эпохи» данных и
+        # последовательность ✓/✗ арифметически не сходилась с totals (юзер
+        # прислал скриншот: «Общая 48% (10:11)» и одновременно «Последние 23:
+        # ~20✓ 2✗»). Чарт (TG) делает один вызов analyze() на снимок буфера
+        # → внутренне консистентен.
+        #
+        # Фикс: все статы считаем ОДНИМ вызовом analyze() — как чарт. Из
+        # PairScore берём только runtime-флаги (allowed/ban/pause/reason),
+        # которые в Analysis не выражены.
         score = sm._pair_scores.get(symbol)
         candles = sm._candles.get(symbol) or []
-        # Recent results — берём из analyze() на текущих candles
-        recent_results = []
+        recent_results: list[int] = []
         signals_count = 0
         completed = 0
         completed_recent = 0
         signals_recent = 0
         recent_lookback_bars = 200
         expiry_bars = 2
+        wr_val: Optional[float] = None
+        wr1_val: Optional[float] = None
+        wr1_recent_val: Optional[float] = None
+        wins_val = 0
+        losses_val = 0
+        max_loss_streak_val = 0
+        max_loss_streak_before_win_val = 0
         if len(candles) >= 100:
             try:
                 from strategy.consensus import analyze, DEFAULT_PARAMS
@@ -869,6 +887,13 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
                 signals_count = len(a.signals)
                 completed = a.completed
                 completed_recent = a.completed_recent
+                wins_val = a.wins
+                losses_val = a.losses
+                wr_val = a.wr
+                wr1_val = a.wr1
+                wr1_recent_val = a.wr1_recent
+                max_loss_streak_val = a.max_loss_streak_overall
+                max_loss_streak_before_win_val = a.max_loss_streak_before_win
                 # Сырое число CONSENSUS-сигналов в окне последних N баров
                 # (с учётом ещё не settled — для UI это «всего сработок за окно»).
                 from_bar_recent = max(0, (len(candles) - 1) - recent_lookback_bars)
@@ -882,11 +907,12 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
         return {
             "symbol": symbol,
             "payout": payout,
-            "wr":   getattr(score, "wr", None) if score else None,
-            "wr1":  getattr(score, "wr1", None) if score else None,
-            "wr1_recent": getattr(score, "wr1_recent", None) if score else None,
-            "wins": getattr(score, "wins", 0) if score else 0,
-            "losses": getattr(score, "losses", 0) if score else 0,
+            # Все статы из одного analyze() — консистентно с чартом.
+            "wr": wr_val,
+            "wr1": wr1_val,
+            "wr1_recent": wr1_recent_val,
+            "wins": wins_val,
+            "losses": losses_val,
             "completed": completed,
             "signals_count": signals_count,
             # Окно «свежей формы» (по умолчанию 200 баров):
@@ -896,8 +922,9 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
             "completed_recent": completed_recent,
             "signals_recent": signals_recent,
             "recent_lookback_bars": recent_lookback_bars,
-            "max_loss_streak": getattr(score, "max_loss_streak", 0) if score else 0,
-            "max_loss_streak_before_win": getattr(score, "max_loss_streak_before_win", 0) if score else 0,
+            "max_loss_streak": max_loss_streak_val,
+            "max_loss_streak_before_win": max_loss_streak_before_win_val,
+            # Runtime-флаги из PairScore (не в Analysis): allowed/ban/pause/reason.
             "allowed": getattr(score, "allowed", False) if score else False,
             "ban": getattr(score, "ban", False) if score else False,
             "pause": getattr(score, "pause", False) if score else False,

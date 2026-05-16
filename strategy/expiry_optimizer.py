@@ -36,11 +36,9 @@ logger = logging.getLogger(__name__)
 MIN_COUNT_PER_CELL = 8
 # За сколько дней брать данные (свежие важнее, рынок меняется)
 LOOKBACK_DAYS = 30
-# Сколько разных экспираций тестируем (exp_wins имеет до 5 элементов).
-# Юзерское требование: МИНИМУМ 2 бара (стандарт PO), поэтому 1-бар не
-# тестируется — оптимизатор не предложит экспирацию ниже 2 баров.
-MIN_BAR_INDEX = 1   # 0=1бар (skip), 1=2бар, 2=3бар, ..., 4=5бар
-EXPIRY_BARS = [2, 3, 4, 5]
+# Все экспирации в exp_wins (1-5 баров). Юзер: «адаптивная модель,
+# не ограничиваем аналитику» — оптимизатор может выбрать любую от 1 до 5.
+EXPIRY_BARS = [1, 2, 3, 4, 5]
 
 
 def compute_pair_hour_expiry(journal) -> dict:
@@ -84,12 +82,11 @@ def compute_pair_hour_expiry(journal) -> dict:
         if n_total < MIN_COUNT_PER_CELL:
             continue
         # Находим bar_idx с лучшим WR (среди тех у кого total>=min_count).
-        # МИНИМУМ 2 бара (стандарт PO для аналитики) — пропускаем i=0 (1-бар).
-        # Counterfactual exp_wins всё равно записан для всех 1-5 баров в БД,
-        # просто оптимизатор для торговли не предложит экспирацию ниже 2.
+        # Юзер: адаптивная модель — оптимизатор может выбрать ЛЮБУЮ экспирацию
+        # 1-5 баров без ограничений. Counterfactual exp_wins даёт полную картину.
         best_idx = None
         best_wr = -1.0
-        for i in range(MIN_BAR_INDEX, 5):  # 1..4 = 2бар..5бар
+        for i in range(5):
             d = bars_data[i]
             if d["total"] < MIN_COUNT_PER_CELL:
                 continue

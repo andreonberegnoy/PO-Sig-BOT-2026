@@ -672,7 +672,17 @@ class StateMachine:
                             mg_step: int, payout: int, pre_balance: float):
         """Формирует подробное TG-уведомление об открытии + шлёт график PNG.
         Вызывается fire-and-forget (asyncio.create_task), чтобы PNG render
-        не задерживал реальный вход в сделку."""
+        не задерживал реальный вход в сделку.
+
+        ВАЖНО (визуальная фиксация сигнала): снапшотим буфер свечей СИНХРОННО
+        прямо сейчас, до спавна таски. Если этого не делать — пока _bg() ждёт
+        в очереди event loop, может прилететь новый тик и `generate_signals`
+        внутри render_chart пересчитает стрелки → на скриншоте может оказаться
+        либо отсутствующая стрелка, либо в противоположном направлении.
+        Юзеру важно: то что бот увидел в момент входа — то и на картинке.
+        Реальную торговлю это не ограничивает (на следующем баре после LOSS
+        бот всё равно перечитает свежий сигнал — см. _in_cycle_step)."""
+        candles_snapshot = list(self._candles.get(sym) or [])
         async def _bg():
             stage = "первая сделка" if mg_step == 0 else f"МГ{mg_step}"
             msg = (
@@ -689,8 +699,7 @@ class StateMachine:
                 try:
                     from tg.chart import render_chart
                     params = {**self.cfg["indicator"]}
-                    candles = self._candles.get(sym) or []
-                    png = render_chart(candles, params, sym)
+                    png = render_chart(candles_snapshot, params, sym)
                     cap = f"📊 {sym} — {action.upper()} ({stage})"
                     await self.send_chart(png, caption=cap)
                 except Exception as e:

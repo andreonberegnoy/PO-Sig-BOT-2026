@@ -158,9 +158,6 @@ class StateMachine:
         feed.on_trade_close = self._on_trade_close_event
         # Latest closed deals from PO keyed by "asset:open_ts" → {profit, ...}
         self._closed_deals_index: dict[str, dict] = {}
-        # Время последнего открытия сделки (для idle-gap в TG-нотификации).
-        # 0 = ещё не было сделок с момента старта бота.
-        self._last_trade_open_ts: float = 0.0
 
     # ---------- persist ----------
     def _persist(self):
@@ -704,23 +701,6 @@ class StateMachine:
             pass
         return default_expiry, "default"
 
-    @staticmethod
-    def _fmt_gap(seconds: float) -> str:
-        """Человекочитаемый gap: '47с', '12 мин', '1ч 23м', '2д 4ч'."""
-        s = int(max(0, seconds))
-        if s < 60:
-            return f"{s}с"
-        m = s // 60
-        if m < 60:
-            return f"{m} мин"
-        h = m // 60
-        m2 = m % 60
-        if h < 24:
-            return f"{h}ч {m2:02d}м" if m2 else f"{h}ч"
-        d = h // 24
-        h2 = h % 24
-        return f"{d}д {h2}ч" if h2 else f"{d}д"
-
     def _notify_open_async(self, sym: str, action: str, amt: float,
                             mg_step: int, payout: int, pre_balance: float):
         """Формирует подробное TG-уведомление об открытии + шлёт график PNG.
@@ -736,11 +716,6 @@ class StateMachine:
         Реальную торговлю это не ограничивает (на следующем баре после LOSS
         бот всё равно перечитает свежий сигнал — см. _in_cycle_step)."""
         candles_snapshot = list(self._candles.get(sym) or [])
-        # Idle gap до этой сделки (с момента предыдущего открытия). 0 если
-        # это первая сделка после старта бота — тогда не показываем.
-        now_ts = time.time()
-        prev_open_ts = self._last_trade_open_ts
-        self._last_trade_open_ts = now_ts  # update synchronously для следующего
         # Экспирация для этой сделки (двухуровневый fallback hour→pair→default).
         exp_sec, exp_src = self._compute_expiry_preview(sym)
         tf_sec = int(self.cfg["filter"].get("tf", 60)) or 60
@@ -749,16 +724,12 @@ class StateMachine:
 
         async def _bg():
             stage = "первая сделка" if mg_step == 0 else f"МГ{mg_step}"
-            lines = [
-                f"📡 <b>{sym} → {action.upper()}</b> ({stage})",
-                f"💰 Ставка: ${amt:.2f}   📊 Payout: {payout}%",
-                f"💼 Баланс до: ${pre_balance:.2f}",
-                f"⏱ Экспирация: {exp_bars} бара ({exp_sec}с, {src_label})",
-            ]
-            if prev_open_ts > 0:
-                gap = self._fmt_gap(now_ts - prev_open_ts)
-                lines.append(f"🕓 Без торгов: {gap}")
-            msg = "\n".join(lines)
+            msg = (
+                f"📡 <b>{sym} → {action.upper()}</b> ({stage})\n"
+                f"💰 Ставка: ${amt:.2f}   📊 Payout: {payout}%\n"
+                f"💼 Баланс до: ${pre_balance:.2f}\n"
+                f"⏱ Экспирация: {exp_bars} бара ({exp_sec}с, {src_label})"
+            )
             try:
                 # parse_mode=HTML чтобы <b>...</b> рендерился жирным, а не
                 # текстом (бага со скриншота 2026-05-16).

@@ -741,7 +741,10 @@ class StateMachine:
                 try:
                     from tg.chart import render_chart
                     params = {**self.cfg["indicator"]}
-                    png = render_chart(candles_snapshot, params, sym)
+                    # journal даёт immutable-источник сигналов из БД таблицы
+                    # signals — устраняет «исчезание» стрелок при HTF repaint.
+                    png = render_chart(candles_snapshot, params, sym,
+                                       journal=self.journal)
                     cap = f"📊 {sym} — {action.upper()} ({stage})"
                     await self.send_chart(png, caption=cap)
                 except Exception as e:

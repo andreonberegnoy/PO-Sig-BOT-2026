@@ -226,6 +226,107 @@ class Journal:
         )
         self.conn.commit()
 
+    def signals_in_range(self, symbol: str, since_ts: int, until_ts: int) -> list[dict]:
+        """Возвращает все зафиксированные сигналы по паре в окне [since_ts, until_ts].
+
+        Используется чартом и pair_card как ИММУТАБЕЛЬНЫЙ источник истории —
+        в отличие от generate_signals() который пересчитывается на live-буфере
+        и может «терять» сигналы из-за HTF buffer-relative группировки
+        (см. strategy/consensus.py:107-113). Юзер 2026-05-16: «важно чтобы
+        статистика не менялась, иначе нет смысла анализировать».
+
+        Returns list of {signal_ts, side, exp_wins (parsed list|None)}.
+        """
+        cur = self.conn.execute(
+            "SELECT signal_ts, side, exp_wins FROM signals "
+            "WHERE symbol=? AND signal_ts >= ? AND signal_ts <= ? "
+            "ORDER BY signal_ts",
+            (symbol, int(since_ts), int(until_ts)),
+        )
+        out: list[dict] = []
+        for ts, side, ew in cur:
+            parsed = None
+            if ew:
+                try:
+                    parsed = _json.loads(ew)
+                except Exception:
+                    pass
+            out.append({"signal_ts": int(ts), "side": side, "exp_wins": parsed})
+        return out
+
+    @staticmethod
+    def aggregate_signal_stats(signals_list: list[dict], exp_bar_idx: int = 1,
+                                recent_since_ts: Optional[int] = None) -> dict:
+        """Считает аналитику из списка signals (immutable, из БД).
+
+        Args:
+          signals_list: вывод signals_in_range()
+          exp_bar_idx: какой бар экспирации использовать (0=1бар, 1=2бар, ...)
+          recent_since_ts: если задано — посчитать отдельно метрики «recent»
+            для сигналов с signal_ts >= recent_since_ts.
+
+        Returns dict с полями совместимыми с Analysis dataclass (для подмены
+        в chart/pair_card без правки UI).
+        """
+        wins = 0; losses = 0; settled = 0
+        wins_recent = 0; losses_recent = 0; settled_recent = 0
+        seq: list[int] = []
+        cur_streak = 0; max_streak_overall = 0
+        tmp_streak = 0; max_streak_before_win = 0
+        for s in signals_list:
+            ew = s.get("exp_wins")
+            if not ew or len(ew) <= exp_bar_idx:
+                continue  # ещё не settled или некорректные данные
+            outcome = ew[exp_bar_idx]
+            if outcome is None:
+                # DRAW — не считаем ни в плюс, ни в минус (как в _on_trade_closed)
+                continue
+            settled += 1
+            is_win = bool(outcome)
+            seq.append(1 if is_win else 0)
+            if is_win:
+                wins += 1
+                # фиксируем streak-до-WIN
+                if tmp_streak > max_streak_before_win:
+                    max_streak_before_win = tmp_streak
+                tmp_streak = 0
+                cur_streak = 0
+            else:
+                losses += 1
+                cur_streak += 1
+                tmp_streak += 1
+                if cur_streak > max_streak_overall:
+                    max_streak_overall = cur_streak
+            # recent окно
+            if recent_since_ts is not None and s["signal_ts"] >= recent_since_ts:
+                settled_recent += 1
+                if is_win:
+                    wins_recent += 1
+                else:
+                    losses_recent += 1
+        wr = (wins / settled * 100) if settled else 0.0
+        wr_recent = (wins_recent / settled_recent * 100) if settled_recent else 0.0
+        # signals_count_recent — сколько ВСЕГО сигналов в recent окне (включая
+        # ещё не settled), а не только settled.
+        if recent_since_ts is not None:
+            signals_recent = sum(1 for s in signals_list
+                                  if s["signal_ts"] >= recent_since_ts)
+        else:
+            signals_recent = 0
+        return {
+            "signals_count": len(signals_list),
+            "completed": settled,
+            "wins": wins, "losses": losses, "wr": wr,
+            "wr1": wr,  # counterfactual: wr1 ≡ wr (нет различия MG-recovery)
+            "wins_recent": wins_recent, "losses_recent": losses_recent,
+            "completed_recent": settled_recent, "wr_recent": wr_recent,
+            "wr1_recent": wr_recent,
+            "signals_recent": signals_recent,
+            "recent_results": seq,
+            "max_loss_streak_overall": max_streak_overall,
+            "max_loss_streak_before_win": max_streak_before_win,
+        }
+
     def signals_since(self, ts: int, strategy_name: Optional[str] = None) -> list[sqlite3.Row]:
         self.conn.row_factory = sqlite3.Row
         if strategy_name:

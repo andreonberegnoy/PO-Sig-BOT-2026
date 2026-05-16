@@ -258,7 +258,7 @@ class TelegramBot:
             try:
                 from tg.chart import render_chart
                 params = {**self.cfg["indicator"]}
-                png = render_chart(buf, params, sym)
+                png = render_chart(buf, params, sym, journal=self.journal)
                 await self.send_chart(png, caption=f"📊 {sym}")
             except Exception as e:
                 logger.exception("chart error")

@@ -36,18 +36,58 @@ def render_chart(
     last_bars: int = 80,
     out_path: Optional[str] = None,
     tz_name: str = "Europe/Kyiv",
+    journal=None,
 ) -> str:
     """Render PNG chart and return its path. Uses same buffer + same indicator
     as bot. Time axis is rendered in `tz_name` (default Europe/Kyiv) so the
-    chart visually matches PocketOption / PoSignals which show local time."""
+    chart visually matches PocketOption / PoSignals which show local time.
+
+    Если передан `journal` — стрелки и статы берутся из БД таблицы `signals`
+    (immutable), а НЕ пересчитываются через generate_signals() на live-буфере.
+    Это устраняет «исчезание» сигналов из-за HTF buffer-relative группировки
+    (см. strategy/consensus.py:107-113). Юзер 2026-05-16: «важно чтобы
+    статистика не менялась, иначе нет смысла анализировать».
+    """
     if not candles or len(candles) < 5:
         raise ValueError(f"render_chart: not enough candles for {symbol} ({len(candles) if candles else 0})")
     if out_path is None:
         out_path = f"/tmp/chart_{_safe_filename(symbol)}_{int(datetime.now().timestamp())}.png"
 
     merged_params = {**DEFAULT_PARAMS, **(params or {})}
-    sigs, _ = generate_signals(candles, merged_params)
-    analysis = analyze(candles, merged_params)
+    # Стратегия данных:
+    #   1) journal задан И в БД есть сигналы в окне → используем БД (immutable)
+    #   2) иначе fallback на generate_signals/analyze (legacy путь)
+    db_signals: list[dict] | None = None
+    db_stats: dict | None = None
+    if journal is not None:
+        try:
+            buf_start_ts = int(candles[0]["time"])
+            buf_end_ts = int(candles[-1]["time"])
+            db_signals = journal.signals_in_range(symbol, buf_start_ts, buf_end_ts)
+            if db_signals:
+                # recent окно — последние `recentLookbackBars` баров буфера
+                recent_bars = int(merged_params.get("recentLookbackBars", 200))
+                recent_idx = max(0, len(candles) - 1 - recent_bars)
+                recent_since_ts = int(candles[recent_idx]["time"])
+                exp_bar_idx = int(merged_params.get("expiryBars", 2)) - 1
+                exp_bar_idx = max(0, min(4, exp_bar_idx))
+                from journal.db import Journal as _J
+                db_stats = _J.aggregate_signal_stats(
+                    db_signals, exp_bar_idx=exp_bar_idx,
+                    recent_since_ts=recent_since_ts,
+                )
+        except Exception as e:
+            logger.warning("chart: DB signals lookup failed for %s: %s", symbol, e)
+            db_signals = None
+            db_stats = None
+    if db_signals is None or db_stats is None:
+        # Legacy путь: пересчёт generate_signals/analyze. Может «терять»
+        # сигналы при сдвиге буфера (см. docstring выше).
+        sigs, _ = generate_signals(candles, merged_params)
+        analysis = analyze(candles, merged_params)
+    else:
+        sigs = None
+        analysis = None
 
     show = candles[-last_bars:]
     base_idx = len(candles) - len(show)
@@ -86,38 +126,78 @@ def render_chart(
         ax.fill_between([i - half_w, i + half_w], low_y, high_y,
                         color=color, edgecolor=color, linewidth=0.5)
 
-    # Signal markers
-    for sig in sigs:
-        if sig.i < base_idx: continue
-        ci = sig.i - base_idx
-        if sig.side == "buy":
-            ax.annotate(
-                "▲",
-                xy=(ci, lows[ci]), xytext=(0, -14), textcoords="offset points",
-                ha="center", color="#22c55e", fontsize=16, fontweight="bold",
-            )
-        else:
-            ax.annotate(
-                "▼",
-                xy=(ci, highs[ci]), xytext=(0, 10), textcoords="offset points",
-                ha="center", color="#ef4444", fontsize=16, fontweight="bold",
-            )
+    # Signal markers — два пути:
+    #  (a) DB-источник: маппим signal_ts → ближайший candle index в окне `show`
+    #  (b) legacy: используем sigs[].i (вычисленный generate_signals)
+    if db_signals is not None:
+        # show window: candles[base_idx .. len-1]
+        # Бинарный поиск по `times` не нужен — окно 80 баров, линейно дёшево.
+        show_t = [int(c["time"]) for c in show]
+        for sg in db_signals:
+            ts = sg["signal_ts"]
+            if ts < show_t[0] or ts > show_t[-1]:
+                continue
+            # ищем индекс с минимальной |ts - bar.time|
+            ci = min(range(len(show_t)), key=lambda j: abs(show_t[j] - ts))
+            side_buy = (sg["side"] or "").lower() in ("buy", "call")
+            if side_buy:
+                ax.annotate("▲",
+                    xy=(ci, lows[ci]), xytext=(0, -14), textcoords="offset points",
+                    ha="center", color="#22c55e", fontsize=16, fontweight="bold")
+            else:
+                ax.annotate("▼",
+                    xy=(ci, highs[ci]), xytext=(0, 10), textcoords="offset points",
+                    ha="center", color="#ef4444", fontsize=16, fontweight="bold")
+    else:
+        for sig in sigs:
+            if sig.i < base_idx: continue
+            ci = sig.i - base_idx
+            if sig.side == "buy":
+                ax.annotate("▲",
+                    xy=(ci, lows[ci]), xytext=(0, -14), textcoords="offset points",
+                    ha="center", color="#22c55e", fontsize=16, fontweight="bold")
+            else:
+                ax.annotate("▼",
+                    xy=(ci, highs[ci]), xytext=(0, 10), textcoords="offset points",
+                    ha="center", color="#ef4444", fontsize=16, fontweight="bold")
 
-    # Title + stats plaque (po-signals.com HUD style, ASCII-safe for matplotlib)
-    wr_color = "#86feac" if analysis.wr >= 60 else ("#fdf647" if analysis.wr >= 53 else "#ffffff")
+    # Title + stats plaque (po-signals.com HUD style, ASCII-safe for matplotlib).
+    # Источник статов: db_stats если есть, иначе analysis (fallback).
+    if db_stats is not None:
+        wr_v = db_stats["wr"]
+        wr1_v = db_stats["wr1"]
+        wr_recent_v = db_stats["wr_recent"]
+        wr1_recent_v = db_stats["wr1_recent"]
+        completed = db_stats["completed"]
+        wins = db_stats["wins"]; losses = db_stats["losses"]
+        completed_recent = db_stats["completed_recent"]
+        wins_recent = db_stats["wins_recent"]; losses_recent = db_stats["losses_recent"]
+        recent_results = db_stats["recent_results"]
+        mls_before = db_stats["max_loss_streak_before_win"]
+        mls_overall = db_stats["max_loss_streak_overall"]
+    else:
+        wr_v = analysis.wr; wr1_v = analysis.wr1
+        completed = analysis.completed; wins = analysis.wins; losses = analysis.losses
+        completed_recent = analysis.completed_recent
+        wins_recent = analysis.wins_recent; losses_recent = analysis.losses_recent
+        completed_recent_full = wins_recent + losses_recent
+        wr_recent_v = (wins_recent / completed_recent_full * 100) if completed_recent_full else 0
+        wr1_recent_v = analysis.wr1_recent
+        recent_results = analysis.recent_results
+        mls_before = analysis.max_loss_streak_before_win
+        mls_overall = analysis.max_loss_streak_overall
+    wr_color = "#86feac" if wr_v >= 60 else ("#fdf647" if wr_v >= 53 else "#ffffff")
     long_window = int(merged_params.get("statsLookbackBars", 1000))
     recent_window = int(merged_params.get("recentLookbackBars", 200))
-    completed_recent_full = analysis.wins_recent + analysis.losses_recent
-    wr_recent = (analysis.wins_recent / completed_recent_full * 100) if completed_recent_full else 0
     lines = [
         f"◉ CONSENSUS 4/5    Экспир: {merged_params['expiryBars']} бара",
-        f"◆ За {long_window} свечей: {analysis.completed} сигналов  ✓{analysis.wins} ✗{analysis.losses}  WR {analysis.wr:.0f}%",
-        f"◆ За {recent_window} свечей: {analysis.completed_recent} сигналов  ✓{analysis.wins_recent} ✗{analysis.losses_recent}  WR {wr_recent:.0f}%",
-        f"◆ 1-я сделка: long {analysis.wr1:.0f}%   recent {analysis.wr1_recent:.0f}%",
-        f"◆ Макс. минусов до ✓: {analysis.max_loss_streak_before_win}    всего: {analysis.max_loss_streak_overall}",
+        f"◆ За {long_window} свечей: {completed} сигналов  ✓{wins} ✗{losses}  WR {wr_v:.0f}%",
+        f"◆ За {recent_window} свечей: {completed_recent} сигналов  ✓{wins_recent} ✗{losses_recent}  WR {wr_recent_v:.0f}%",
+        f"◆ 1-я сделка: long {wr1_v:.0f}%   recent {wr1_recent_v:.0f}%",
+        f"◆ Макс. минусов до ✓: {mls_before}    всего: {mls_overall}",
     ]
-    if analysis.recent_results:
-        last = analysis.recent_results[-25:]
+    if recent_results:
+        last = recent_results[-25:]
         lines.append("")
         lines.append(f"Последние {len(last)} сделок: " + "".join("✓" if x else "✗" for x in last))
 

@@ -842,18 +842,18 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
         _auth(request)
         if not sm:
             raise HTTPException(503, "state machine not ready")
-        # ВАЖНО (2026-05-16): раньше totals (wins/losses/wr/wr1) бралось из
-        # `sm._pair_scores` — это снапшот с фонового рескана (~раз в 60с), а
-        # `recent_results` пересчитывалось live через analyze(candles). В
-        # результате на карточке смешивались две «эпохи» данных и
-        # последовательность ✓/✗ арифметически не сходилась с totals (юзер
-        # прислал скриншот: «Общая 48% (10:11)» и одновременно «Последние 23:
-        # ~20✓ 2✗»). Чарт (TG) делает один вызов analyze() на снимок буфера
-        # → внутренне консистентен.
+        # ИСТОЧНИК ИСТИНЫ — таблица `signals` в БД (immutable). Раньше
+        # totals считались через analyze(candles) на live-буфере, но HTF
+        # использует buffer-relative группировку (strategy/consensus.py:107)
+        # из-за чего одни и те же бары давали 4/5 ↔ 3/5 при сдвиге буфера
+        # → сигналы «исчезали» из аналитики, totals/sequence плясали.
+        # Юзер 2026-05-16: «важно чтобы статистика не менялась, иначе нет
+        # смысла анализировать».
         #
-        # Фикс: все статы считаем ОДНИМ вызовом analyze() — как чарт. Из
-        # PairScore берём только runtime-флаги (allowed/ban/pause/reason),
-        # которые в Analysis не выражены.
+        # Сигналы в БД пишутся в момент срабатывания (insert_signal) и
+        # больше не пересчитываются. Из PairScore берём только runtime-
+        # флаги (allowed/ban/pause/reason). Fallback на analyze() если в
+        # БД ещё пусто (новая пара).
         score = sm._pair_scores.get(symbol)
         candles = sm._candles.get(symbol) or []
         recent_results: list[int] = []
@@ -872,7 +872,7 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
         max_loss_streak_before_win_val = 0
         if len(candles) >= 100:
             try:
-                from strategy.consensus import analyze, DEFAULT_PARAMS
+                from strategy.consensus import DEFAULT_PARAMS
                 params = {**DEFAULT_PARAMS, **(cfg.get("indicator") or {})}
                 expiry_bars = int(params.get("expiryBars", 2))
                 if sm.registry:
@@ -882,22 +882,50 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
                     except Exception:
                         pass
                 recent_lookback_bars = int(params.get("recentLookbackBars", 200))
-                a = analyze(candles, params)
-                recent_results = list(a.recent_results)
-                signals_count = len(a.signals)
-                completed = a.completed
-                completed_recent = a.completed_recent
-                wins_val = a.wins
-                losses_val = a.losses
-                wr_val = a.wr
-                wr1_val = a.wr1
-                wr1_recent_val = a.wr1_recent
-                max_loss_streak_val = a.max_loss_streak_overall
-                max_loss_streak_before_win_val = a.max_loss_streak_before_win
-                # Сырое число CONSENSUS-сигналов в окне последних N баров
-                # (с учётом ещё не settled — для UI это «всего сработок за окно»).
-                from_bar_recent = max(0, (len(candles) - 1) - recent_lookback_bars)
-                signals_recent = sum(1 for ev in a.signals if ev.i >= from_bar_recent)
+                # ИСТОЧНИК — БД signals (immutable). См. tg/chart.py для
+                # обоснования (HTF buffer-relative repaint).
+                buf_start_ts = int(candles[0]["time"])
+                buf_end_ts = int(candles[-1]["time"])
+                recent_idx = max(0, len(candles) - 1 - recent_lookback_bars)
+                recent_since_ts = int(candles[recent_idx]["time"])
+                db_signals = journal.signals_in_range(symbol, buf_start_ts, buf_end_ts) \
+                    if journal else []
+                exp_bar_idx = max(0, min(4, expiry_bars - 1))
+                stats = type(journal).aggregate_signal_stats(
+                    db_signals, exp_bar_idx=exp_bar_idx,
+                    recent_since_ts=recent_since_ts,
+                ) if db_signals else None
+                if stats:
+                    recent_results = stats["recent_results"]
+                    signals_count = stats["signals_count"]
+                    completed = stats["completed"]
+                    completed_recent = stats["completed_recent"]
+                    wins_val = stats["wins"]
+                    losses_val = stats["losses"]
+                    wr_val = stats["wr"]
+                    wr1_val = stats["wr1"]
+                    wr1_recent_val = stats["wr1_recent"]
+                    max_loss_streak_val = stats["max_loss_streak_overall"]
+                    max_loss_streak_before_win_val = stats["max_loss_streak_before_win"]
+                    signals_recent = stats["signals_recent"]
+                else:
+                    # Fallback на legacy analyze() если в БД пока пусто
+                    # (например пара только что появилась).
+                    from strategy.consensus import analyze
+                    a = analyze(candles, params)
+                    recent_results = list(a.recent_results)
+                    signals_count = len(a.signals)
+                    completed = a.completed
+                    completed_recent = a.completed_recent
+                    wins_val = a.wins
+                    losses_val = a.losses
+                    wr_val = a.wr
+                    wr1_val = a.wr1
+                    wr1_recent_val = a.wr1_recent
+                    max_loss_streak_val = a.max_loss_streak_overall
+                    max_loss_streak_before_win_val = a.max_loss_streak_before_win
+                    from_bar_recent = max(0, (len(candles) - 1) - recent_lookback_bars)
+                    signals_recent = sum(1 for ev in a.signals if ev.i >= from_bar_recent)
             except Exception:
                 logger.exception("analyze failed for %s", symbol)
         try:

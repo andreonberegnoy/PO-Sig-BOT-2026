@@ -157,6 +157,62 @@ after every pull (config.yaml in repo has mode=paper as the safe default).
     тот же шаг МГ). Поэтому считается через mg_step→WIN, а не через
     chronological streak (которая в `daily_summary.max_loss_streak` всё ещё
     есть, но юзеру не показывается).
+- **🎰 Строка «В МГ-цикле»** на Главной — показывает все активные циклы с
+  номером сделки в формате `EURUSD_otc(3), BTC_otc(1)`. Число — 1-indexed
+  trade number (1 = первая сделка, 2 = после 1-го LOSS и т.д.). В parallel
+  mode итерирует `parallel_cycles` из `/api/status`. В legacy — `current_pair`
+  + `mg_step+1` если mg_step>0. Размещена под «Tracked пары».
+- **Stage 1.2 — Broad analytics pool** (юзер: «аналитика должна писаться
+  ВСЕГДА независимо от фильтра»). `self._scan_pool: set[str]` =
+  все пары прошедшие базовый scan (payout + asset_categories). Заполняется
+  в `_rescan_pairs`. `_record_signals_broad_loop` (новая фоновая задача
+  каждые 60с) делает REST-fetch для пар в `_scan_pool − _tracked` и пишет
+  signals в БД через `journal.insert_signal`. Гарантирует что аналитика
+  собирается по всем парам прошедшим payout-фильтр, не только торгуемым.
+- **Stage 1.3 — WR-blacklist по аналитике**. `filter.min_pair_wr_actual`
+  (default 0 = выкл). Если ≥1, в `_eligible_for_new_cycle` считается
+  counterfactual WR пары из БД signals (exp_wins[1]=2-бар, 30 дней,
+  N≥30 для значимости) через `journal.pair_wr_from_signals()`. Пары с
+  WR<порог не торгуются, но в аналитику пишутся через broad loop. Кэш
+  `_pair_wr_cache` (TTL 10 мин) защищает от SQL на каждом тике.
+- **Stage 2 — Auto-expiry per-pair × hour**. Модуль
+  `strategy/expiry_optimizer.py`. Раз в 4ч (фоновая задача
+  `expiry_optimizer_loop`) `compute_pair_hour_expiry()` агрегирует
+  `signals.exp_wins` за 30 дней → для каждой (sym, hour_local Kyiv) ячейки
+  ищет оптимум 1-5 баров (N≥8 для значимости). Результат в
+  `state_kv["pair_hour_expiry"]` dict. В `_open_and_track` и
+  `_open_parallel_trade` функция `pair_hour_expiry_lookup(journal, sym,
+  current_hour_Kyiv)` возвращает оптимум; fallback на
+  `trading.expiry_seconds`. Toggle `filter.auto_expiry_enabled` (default true).
+- **Stage 3 — Parallel trading** (юзерская фича: «несколько пар
+  одновременно в МГ»). Toggle `trading.parallel_pairs` (default false),
+  `trading.max_parallel_pairs` (default 3). При parallel=true главный
+  диспатч в main loop уходит в `_parallel_step` вместо free_scan/in_cycle.
+  Использует `RuntimeState.pair_cycles: dict[symbol→cycle_state]` вместо
+  единого current_pair/mg_step. Каждый cycle: `{direction, mg_step,
+  cycle_loss, pending_trade, losses_streak, started_at, trades_count}`.
+  Phase 1 обрабатывает существующие циклы (ищет signal для след MG-шага),
+  Phase 2 открывает новые если active < max_par. `_open_parallel_trade`
+  возвращается сразу + спавнит fire-and-forget task `_watch_parallel_close`
+  который ждёт expiry+poll close event. `_on_trade_closed_parallel`
+  обновляет per-cycle state не трогая legacy fields. Sticky tracked для
+  pair_cycles гарантирует live candles. Bust → ban на ban_hours +
+  cleanup_pair_cycle. Миграция legacy→parallel при первом включении
+  toggle (legacy active cycle copy → pair_cycles[current_pair]).
+- **balance_pct — процент депо на цикл** (юзер: «брать 10-14% от общего
+  депозита, вмещать N сделок»). `trading.auto_base_amount.balance_pct`
+  (default 100 = весь баланс, backwards-compat). Формула в
+  `_recalc_base_from_balance`:
+  `base = floor((balance × pct/100) / sum_factor × 10)/10`. Гарантия: при
+  всех N LOSS теряется не более чем balance × pct/100. Триггер пересчёта
+  при изменении этого ключа через API срабатывает мгновенно (в
+  `api/server.py:recalc_keys`).
+- **`_safe_to_relogin` (Stage 3-aware)** — блокирует relogin если есть
+  pending_trade в state ИЛИ в любом из pair_cycles. Также проверяет
+  mg_step>0 в legacy state.
+- **`_is_safe_for_recalc` (Stage 3-aware)** — блокирует recalc base_amount
+  если есть активные parallel cycles (mg_step>0 или pending_trade).
+  Изменение base в середине цикла ломает recovery-математику.
 
 ## Permissions you have (auto-allow in `.claude/settings.json` если настроено)
 

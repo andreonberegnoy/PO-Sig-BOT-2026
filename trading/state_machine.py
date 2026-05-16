@@ -390,9 +390,15 @@ class StateMachine:
             # Mark refresh so REST backoff can skip this pair
             self._last_refresh[symbol] = time.time()
 
-    async def _notify(self, msg: str):
+    async def _notify(self, msg: str, parse_mode: str | None = None):
         try:
-            res = self.notify(msg)
+            # Если notify callback поддерживает parse_mode (как TG-обёртка) —
+            # пробуем передать, иначе вызываем со старой сигнатурой.
+            try:
+                res = self.notify(msg, parse_mode=parse_mode) if parse_mode \
+                    else self.notify(msg)
+            except TypeError:
+                res = self.notify(msg)
             if asyncio.iscoroutine(res):
                 await res
         except Exception:
@@ -754,7 +760,9 @@ class StateMachine:
                 lines.append(f"🕓 Без торгов: {gap}")
             msg = "\n".join(lines)
             try:
-                await self._notify(msg)
+                # parse_mode=HTML чтобы <b>...</b> рендерился жирным, а не
+                # текстом (бага со скриншота 2026-05-16).
+                await self._notify(msg, parse_mode="HTML")
             except Exception:
                 logger.exception("notify_open failed")
             # Chart на каждой ступени (этап 2 — раньше слался только на 1-й)

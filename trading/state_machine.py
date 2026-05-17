@@ -683,12 +683,17 @@ class StateMachine:
     def _compute_expiry_preview(self, sym: str) -> tuple[int, str]:
         """Возвращает (expiry_sec, source) для текущей сделки на sym.
 
-        Используется только для отображения в TG-нотификации (не для реального
-        входа — там та же логика выполняется ниже по стеку в _open_and_track /
-        _open_parallel_trade). source ∈ {"hour","pair","default"}.
+        ВАЖНО: должна совпадать 1:1 с логикой `_open_and_track` /
+        `_open_parallel_trade`. Раньше из-за `except Exception: pass`
+        преview мог упасть и вернуть default, а реальный код торговать с
+        оптимумом → нотификация врала. Юзер 2026-05-17: «Бот говорит 2 бара,
+        а реально 1». Теперь exceptions логируются.
+
+        source ∈ {"hour","pair","default"}.
         """
         default_expiry = int(self.cfg["trading"]["expiry_seconds"])
         tf_sec = int(self.cfg["filter"].get("tf", 60))
+        min_bars = 2  # юзер: минимум 2 бара в торговле (стандарт PO)
         if not (self.cfg.get("filter") or {}).get("auto_expiry_enabled", True):
             return default_expiry, "default"
         try:
@@ -698,13 +703,16 @@ class StateMachine:
             try:
                 tz = pytz.timezone(tz_name)
                 current_hour = datetime.fromtimestamp(int(time.time()), tz=tz).hour
-            except Exception:
+            except Exception as e:
+                logger.warning("expiry_preview: tz failed (%s), using UTC", e)
                 current_hour = datetime.utcfromtimestamp(int(time.time())).hour
             opt = resolve_expiry_bars(self.journal, sym, current_hour)
             if opt:
-                return int(opt["bars"]) * tf_sec, opt.get("source", "hour")
+                # Минимум 2 бара — оптимизатор может выбрать 2/3/4/5 но не 1
+                optimum_bars = max(min_bars, int(opt["bars"]))
+                return optimum_bars * tf_sec, opt.get("source", "hour")
         except Exception:
-            pass
+            logger.exception("expiry_preview: resolve failed for %s, using default", sym)
         return default_expiry, "default"
 
     def _notify_open_async(self, sym: str, action: str, amt: float,
@@ -2224,13 +2232,17 @@ class StateMachine:
                     current_hour = datetime.utcfromtimestamp(int(time.time())).hour
                 opt = resolve_expiry_bars(self.journal, sym, current_hour)
                 if opt:
-                    optimum_bars = int(opt["bars"])
+                    # ЮЗЕР: минимум 2 бара (стандарт PO). Оптимизатор может
+                    # выбрать 2-5 но не 1. На 1-баре слишком много шума,
+                    # реальная торговля проигрывает несмотря на counterfactual.
+                    optimum_bars = max(2, int(opt["bars"]))
                     new_expiry = optimum_bars * tf_sec
                     if new_expiry != expiry:
                         logger.info("parallel auto-expiry: %s @%dh → %d bars "
-                                    "(was %ds → %ds, src=%s)",
+                                    "(was %ds → %ds, src=%s, raw=%d)",
                                     sym, current_hour, optimum_bars,
-                                    expiry, new_expiry, opt["source"])
+                                    expiry, new_expiry, opt["source"],
+                                    int(opt["bars"]))
                         expiry = new_expiry
             except Exception:
                 logger.debug("parallel auto-expiry lookup failed for %s", sym)
@@ -2549,13 +2561,18 @@ class StateMachine:
                 # потом per-pair overall ≥30, иначе дефолт из config.
                 opt = resolve_expiry_bars(self.journal, sym, current_hour)
                 if opt:
-                    optimum_bars = int(opt["bars"])
+                    # ЮЗЕР: минимум 2 бара (стандарт PO). Оптимизатор может
+                    # выбрать 2-5 но не 1. Counterfactual 55-60% WR на 1-баре
+                    # на проверке оказался слишком шумным для реальной
+                    # торговли (юзер словил 4 LOSS подряд на CADCHF_otc).
+                    raw_bars = int(opt["bars"])
+                    optimum_bars = max(2, raw_bars)
                     new_expiry = optimum_bars * tf_sec
                     if new_expiry != expiry:
                         logger.info(
-                            "auto-expiry: %s @%dh → %d bars (was %ds → %ds, WR=%s%%, N=%d, src=%s)",
+                            "auto-expiry: %s @%dh → %d bars (was %ds → %ds, WR=%s%%, N=%d, src=%s, raw=%d)",
                             sym, current_hour, optimum_bars,
-                            expiry, new_expiry, opt["wr"], opt["n"], opt["source"],
+                            expiry, new_expiry, opt["wr"], opt["n"], opt["source"], raw_bars,
                         )
                         expiry = new_expiry
             except Exception:

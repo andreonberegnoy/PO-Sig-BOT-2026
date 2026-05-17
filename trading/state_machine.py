@@ -590,8 +590,12 @@ class StateMachine:
         min_wr1_recent = float(f_cfg.get("min_wr1_recent", 0) or 0)
         payout_now = int((self.feed.assets.get(sym) or {}).get("payout", 0))
         try:
+            # journal — immutable источник статов (см. classify docstring).
+            # Без него HTF buffer-relative repaint мог давать ложно-низкий
+            # max_loss_streak → фильтр пропускал плохие пары.
             score = classify(sym, payout_now, candles, params,
-                             max_losses, min_wr1, min_wr1_recent)
+                             max_losses, min_wr1, min_wr1_recent,
+                             journal=self.journal)
         except Exception:
             logger.exception("classify failed for %s", sym)
             return
@@ -1137,7 +1141,7 @@ class StateMachine:
             await asyncio.sleep(60)
             return
 
-        scores = await scan_all_pairs(self.feed, self.cfg)
+        scores = await scan_all_pairs(self.feed, self.cfg, journal=self.journal)
         # BROAD pool — все пары что прошли базовый payout+categories фильтр.
         # Используется отдельным _record_signals_broad_loop для записи signals
         # независимо от того что пара allowed/banned/pause для торговли.

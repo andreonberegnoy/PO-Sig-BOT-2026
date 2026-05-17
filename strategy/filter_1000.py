@@ -117,8 +117,60 @@ def classify(
     max_losses_in_row: int,
     min_wr1: float = 0.0,
     min_wr1_recent: float = 0.0,
+    journal=None,
 ) -> PairScore:
-    a = analyze(candles, params)
+    """Классифицирует пару: allowed / ban / pause / temp_pause + статистика.
+
+    Если задан `journal` — статы (max_loss_streak, wins/losses/wr/wr1) берутся
+    из таблицы `signals` (immutable, см. `journal.signals_in_range` +
+    `aggregate_signal_stats`). Это решает проблему HTF buffer-relative repaint
+    в `analyze(candles)` где одни и те же бары могут давать 4/5 ↔ 3/5 в
+    зависимости от offset → max_loss_streak плясал → фильтр пропускал пары
+    которые ДОЛЖЕН был забанить (юзер 2026-05-17: YERUSD_otc реально дала
+    3 LOSS подряд, classify видел 0 сигналов и не банила при max_losses=2).
+
+    Fallback на analyze() если journal=None или в БД пусто (новая пара).
+    """
+    # ── Источник статистики ──
+    used_db = False
+    if journal is not None and candles and len(candles) >= 100:
+        try:
+            buf_end_ts = int(candles[-1]["time"])
+            long_bars = int(params.get("statsLookbackBars", 1000))
+            recent_bars = int(params.get("recentLookbackBars", 200))
+            tf_sec = 60
+            long_since_ts = buf_end_ts - long_bars * tf_sec
+            recent_since_ts = buf_end_ts - recent_bars * tf_sec
+            db_signals = journal.signals_in_range(symbol, long_since_ts, buf_end_ts)
+            if db_signals:
+                from journal.db import Journal as _J
+                exp_bar_idx = max(0, min(4, int(params.get("expiryBars", 2)) - 1))
+                s = _J.aggregate_signal_stats(
+                    db_signals, exp_bar_idx=exp_bar_idx,
+                    recent_since_ts=recent_since_ts,
+                )
+                # Адаптер под старый интерфейс Analysis (поля используются ниже)
+                class _A: pass
+                a = _A()
+                a.completed = s["completed"]
+                a.wins = s["wins"]; a.losses = s["losses"]
+                a.wr = s["wr"]; a.wr1 = s["wr1"]
+                a.wins_recent = s["wins_recent"]; a.losses_recent = s["losses_recent"]
+                a.completed_recent = s["completed_recent"]
+                a.wr1_recent = s["wr1_recent"]
+                a.max_loss_streak_overall = s["max_loss_streak_overall"]
+                a.max_loss_streak_before_win = s["max_loss_streak_before_win"]
+                used_db = True
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(
+                "classify: DB-based stats failed for %s, fallback to analyze(): %s: %s",
+                symbol, type(e).__name__, e,
+            )
+    if not used_db:
+        # Fallback: пересчёт через analyze() (HTF buffer-relative — нестабилен)
+        a = analyze(candles, params)
+
     # Compute recent-window WR (общий, не только первая сделка)
     completed_recent_full = a.wins_recent + a.losses_recent
     wr_recent = (a.wins_recent / completed_recent_full * 100.0) if completed_recent_full else 0.0
@@ -191,8 +243,13 @@ async def scan_all_pairs(
     feed,
     cfg: dict,
     symbols: Optional[list[str]] = None,
+    journal=None,
 ) -> dict[str, PairScore]:
-    """Fetch 1000 M1 candles for each qualifying asset, run CONSENSUS, classify."""
+    """Fetch 1000 M1 candles for each qualifying asset, run CONSENSUS, classify.
+
+    Если задан `journal` — classify() возьмёт статы из БД signals
+    (immutable), что устраняет HTF buffer-relative repaint в max_loss_streak.
+    """
     f_cfg = cfg["filter"]
     ind_cfg = dict(cfg["indicator"])
     # honour stats_lookback_bars from filter config so stats window matches site
@@ -248,7 +305,8 @@ async def scan_all_pairs(
             if len(candles) < 200:
                 logger.info("skip %s — only %d candles", sym, len(candles))
                 return
-            score = classify(sym, payout, candles, ind_cfg, max_losses, min_wr1, min_wr1_recent)
+            score = classify(sym, payout, candles, ind_cfg, max_losses,
+                              min_wr1, min_wr1_recent, journal=journal)
             scores[sym] = score
 
     await asyncio.gather(*[work(s) for s in candidates])

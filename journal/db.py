@@ -248,7 +248,7 @@ class Journal:
             parsed = None
             if ew:
                 try:
-                    parsed = _json.loads(ew)
+                    parsed = json.loads(ew)
                 except Exception:
                     pass
             out.append({"signal_ts": int(ts), "side": side, "exp_wins": parsed})

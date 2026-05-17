@@ -796,7 +796,6 @@ def create_app(*, cfg: dict, config_path: str, registry, sm, feed, journal, bot_
                     pass
             expiry_bars = int(params.get("expiryBars", 2))
             exp_bar_idx = max(0, min(4, expiry_bars - 1))
-            tf_sec = int(period or 60) or 60
             if windowed and journal:
                 buf_start_ts = int(windowed[0]["time"])
                 buf_end_ts = int(windowed[-1]["time"])

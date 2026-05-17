@@ -264,6 +264,23 @@ after every pull (config.yaml in repo has mode=paper as the safe default).
   плашка статов в левом верхнем углу `(0.01, 0.97) ha="left"`, title
   символа также `loc="left"` (рендерится над plot area, не перекрывается).
 
+## Уроки / антипаттерны (чего НЕ делать)
+
+- **`except Exception: pass` БЕЗ логирования — главный источник тихих
+  багов.** Урок 2026-05-17: в `signals_in_range` я использовал `_json.loads`
+  забыв импортировать `_json` локально. `NameError` ловился в `except
+  Exception: pass` → все exp_wins возвращались как None → чарт и pair_card
+  показывали 0 сигналов 8 часов. Решение: ВСЕГДА минимум `logger.warning`
+  или `logger.debug` в except-блоках. Если ловишь не для логирования, а
+  чтобы дефолтнуть значение — лови конкретный класс ошибки (`KeyError`,
+  `ValueError`, `json.JSONDecodeError`).
+- **Перед коммитом: `python3 -m pyflakes <touched_files>`** — ловит
+  NameError, unused imports, unreferenced variables. Не панацея, но
+  поймало бы тот же `_json` если бы он был на module-level.
+- **Не использовать локальные `import X as Y`** в одних методах и
+  потом ссылаться на `Y` в других — `Y` существует только в скопе
+  объявившего метода. Если нужен alias во всём модуле — на верх файла.
+
 ## Permissions you have (auto-allow in `.claude/settings.json` если настроено)
 
 If user has set up auto-allow:

@@ -249,8 +249,16 @@ class Journal:
             if ew:
                 try:
                     parsed = json.loads(ew)
-                except Exception:
-                    pass
+                except Exception as e:
+                    # Не просто игнорируем — логируем чтобы баги парсинга/
+                    # импортов не «протухали» в тишине. Урок 2026-05-17:
+                    # NameError на _json в этом же коде 8ч жил незамеченным
+                    # из-за `except Exception: pass`.
+                    logger.warning(
+                        "signals_in_range: exp_wins parse failed for "
+                        "ts=%s sym=%s: %s: %s",
+                        ts, symbol, type(e).__name__, e,
+                    )
             out.append({"signal_ts": int(ts), "side": side, "exp_wins": parsed})
         return out
 

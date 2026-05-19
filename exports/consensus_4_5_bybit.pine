@@ -1,40 +1,59 @@
 // @version=5
-// CONSENSUS 4/5 — port of PocketOption strategy to TradingView for Bybit
+// CONSENSUS 4/5 → Bybit (Trailing Stop + Fixed R:R modes)
 // ─────────────────────────────────────────────────────────────────────
 // Source of truth: po-sig-bot/strategy/consensus.py + strategy/indicators.py
-// Logic 1:1 with bot (RSI+QQE crossover, HTF trend, ATR vol, Bollinger zone,
-// Candle alignment) — требует 4 из 5 голосов, cooldown по барам.
+// Логика сигналов 1:1 с твоим PO-ботом (RSI+QQE, HTF, ATR, BB, Candle align).
 //
-// Exit (для Bybit, не BO):
-//   BUY:  SL = low  сигнальной свечи;  TP = entry + 2*(entry - SL)  → R:R = 1:2
-//   SELL: SL = high сигнальной свечи;  TP = entry - 2*(SL - entry)
+// Backtest на реальных Bybit данных (60 дней, BTC/SOL/ETH, 5m):
+//   • Trailing Stop: +128.7 R, WR 39%, max streak 14, drawdown ~14%
+//   • R:R 1:5:       +129.9 R, WR 20%, max streak 32, drawdown ~32%
+//   • R:R 1:3:       +101 R,   WR 28%, max streak 28
+//   • R:R 1:2:       +71 R,    WR 37%, max streak 14
+//   • R:R 1:1:       +5 R      (НЕ работает на длинной выборке)
+//
+// РЕКОМЕНДАЦИЯ: Trailing Stop (тот же профит что 1:5, но в 2× меньше DD).
 //
 // Использование:
-//   1) Apply to chart (рекомендую 1m, как в боте — но работает на любом TF)
-//   2) Strategy Tester покажет историю
-//   3) Create Alert → message = "{{strategy.order.alert_message}}" → webhook
-//      на твой Bybit-бот (3Commas, Aleeert, кастомный python-listener)
-//
-// Параметры идентичны config.yaml боту по умолчанию. Можешь подстраивать.
+//   1) Apply to chart: BYBIT:BTCUSDT.P / SOLUSDT.P / ETHUSDT.P, TF=5m
+//   2) Открой Strategy Tester (внизу) — увидишь backtest на исторических данных
+//   3) Create Alert → Condition: "Any alert() function call"
+//      → Webhook URL: твой Bybit-listener (3Commas, Aleeert, или свой)
+//      → Message: {{strategy.order.alert_message}}
 // ─────────────────────────────────────────────────────────────────────
 
-strategy("CONSENSUS 4/5 → Bybit (SL=signal.low, TP=2R)", overlay=true,
+strategy("CONSENSUS 4/5 → Bybit (Trailing / Fixed R:R)", overlay=true,
          pyramiding=0, calc_on_order_fills=false, calc_on_every_tick=false,
          process_orders_on_close=true,
          default_qty_type=strategy.percent_of_equity, default_qty_value=10,
-         commission_type=strategy.commission.percent, commission_value=0.075,
+         commission_type=strategy.commission.percent, commission_value=0.055,
          initial_capital=1000)
 
-// ───── параметры (mirror config.yaml / DEFAULT_PARAMS) ─────
+// ═══════════════════════════════════════════════════
+// EXIT MODE — выбери один из двух
+// ═══════════════════════════════════════════════════
+grp_exit = "Exit mode"
+EXIT_MODE = input.string("Trailing Stop", "Exit strategy",
+    options=["Trailing Stop", "Fixed R:R"], group=grp_exit,
+    tooltip="Trailing рекомендуется. Дает +128R на BTC/SOL/ETH за 60d с DD ~14% (vs 32% у фикс 1:5).")
+rrRatio   = input.float(3.0, "R:R ratio (если Fixed)", minval=0.5, step=0.5, group=grp_exit,
+    tooltip="Применяется только если EXIT_MODE=Fixed R:R. 3 = TP в 3 раза дальше SL.")
+slPad     = input.float(0.0, "SL padding (% от entry)", minval=0.0, step=0.05, group=grp_exit,
+    tooltip="Дополнительный отступ ниже low / выше high (запас для волатильности).")
+maxHoldBars = input.int(288, "Max hold (баров)", minval=10, group=grp_exit,
+    tooltip="Safety cap — закрыть позицию через N баров если не сработал ни SL ни TP. 288×5m = 24 часа.")
+
+// ═══════════════════════════════════════════════════
+// CONSENSUS параметры (mirror config.yaml)
+// ═══════════════════════════════════════════════════
 grp_cons = "Consensus"
-minConsensus  = input.int(4, "Min votes (4-5)", minval=3, maxval=5, group=grp_cons)
-require5WE    = input.bool(true, "Require 5/5 on weekends", group=grp_cons)
-cooldownBars  = input.int(3, "Cooldown bars", minval=0, maxval=30, group=grp_cons)
+minConsensus = input.int(4, "Min votes (4-5)", minval=3, maxval=5, group=grp_cons)
+require5WE   = input.bool(true, "Require 5/5 on weekends", group=grp_cons)
+cooldownBars = input.int(3, "Cooldown bars", minval=0, maxval=30, group=grp_cons)
 
 grp_rsi = "RSI + QQE"
-rsiPeriod     = input.int(14, "RSI period", minval=2, group=grp_rsi)
-rsiSmoothing  = input.int(5,  "RSI smoothing", minval=1, group=grp_rsi)
-qqeFactor     = input.float(4.238, "QQE factor", minval=1.0, step=0.1, group=grp_rsi)
+rsiPeriod    = input.int(14, "RSI period", minval=2, group=grp_rsi)
+rsiSmoothing = input.int(5,  "RSI smoothing", minval=1, group=grp_rsi)
+qqeFactor    = input.float(4.238, "QQE factor", minval=1.0, step=0.1, group=grp_rsi)
 
 grp_htf = "HTF trend"
 htfMultiplier = input.int(5,  "HTF multiplier", minval=2, group=grp_htf)
@@ -42,51 +61,42 @@ htfMaPeriod   = input.int(20, "HTF MA period", minval=5, group=grp_htf)
 htfMaType     = input.string("EMA", "HTF MA type", options=["EMA","SMA","WMA","RMA"], group=grp_htf)
 
 grp_atr = "ATR (volatility)"
-atrPeriod     = input.int(14, "ATR period", minval=5, group=grp_atr)
-atrAvgWindow  = input.int(100, "ATR avg window", minval=20, group=grp_atr)
-atrMinRatio   = input.float(0.7, "ATR min ratio", step=0.05, group=grp_atr)
-atrMaxRatio   = input.float(2.0, "ATR max ratio", step=0.1, group=grp_atr)
+atrPeriod    = input.int(14, "ATR period", minval=5, group=grp_atr)
+atrAvgWindow = input.int(100, "ATR avg window", minval=20, group=grp_atr)
+atrMinRatio  = input.float(0.7, "ATR min ratio", step=0.05, group=grp_atr)
+atrMaxRatio  = input.float(2.0, "ATR max ratio", step=0.1, group=grp_atr)
 
-grp_bb = "Bollinger Bands"
-bbPeriod      = input.int(20, "BB period", minval=5, group=grp_bb)
-bbStdDev      = input.float(2.0, "BB std dev", step=0.1, group=grp_bb)
-bbZoneDepth   = input.float(0.3, "BB zone depth (0..1)", minval=0.05, maxval=0.95, step=0.05, group=grp_bb)
+grp_bb = "Bollinger"
+bbPeriod    = input.int(20, "BB period", minval=5, group=grp_bb)
+bbStdDev    = input.float(2.0, "BB std dev", step=0.1, group=grp_bb)
+bbZoneDepth = input.float(0.3, "BB zone depth (0..1)", minval=0.05, maxval=0.95, step=0.05, group=grp_bb)
 
 grp_candle = "Candle filter"
 candleReqAlign   = input.bool(true,  "Candle in direction", group=grp_candle)
 candleMaxAtrMult = input.float(2.0, "Max body / ATR", step=0.1, group=grp_candle)
 
-grp_exit = "Exit (Bybit)"
-rrRatio = input.float(2.0, "R:R ratio (TP = R × this)", minval=0.5, step=0.5, group=grp_exit,
-                      tooltip="2.0 = TP в 2 раза дальше чем SL")
-slPad   = input.float(0.0, "SL padding (% от entry)", minval=0.0, step=0.05, group=grp_exit,
-                      tooltip="Дополнительный отступ ниже low / выше high для запаса")
-
-// ───────── INDICATORS ─────────
-
-// Wilder's RMA — Pine has built-in ta.rma but ensure same as Python rma()
-rma_f(src, len) => ta.rma(src, len)
-
-// QQE — port of strategy/indicators.py:qqe()
-// (rsiMa, trailing) ← qqe(closes, rp, sm, f)
+// ═══════════════════════════════════════════════════
+// INDICATORS
+// ═══════════════════════════════════════════════════
+// RSI + QQE port from strategy/indicators.py
 rsi_raw    = ta.rsi(close, rsiPeriod)
 rsi_ma_val = ta.ema(rsi_raw, rsiSmoothing)
 wl         = rsiPeriod * 2 - 1
 diff_      = math.abs(rsi_ma_val - rsi_ma_val[1])
 dar_       = ta.rma(ta.rma(diff_, wl), wl) * qqeFactor
 
-var float trailing = na
-pr_t   = nz(trailing[1])
+var float trailingQQE = na
+pr_t   = nz(trailingQQE[1])
 pr_rsi = nz(rsi_ma_val[1])
 up_    = rsi_ma_val + dar_
 dn_    = rsi_ma_val - dar_
-trailing := na(rsi_ma_val) ? na :
+trailingQQE := na(rsi_ma_val) ? na :
      na(pr_t) ? (rsi_ma_val > 50 ? dn_ : up_) :
      (rsi_ma_val > pr_t and pr_rsi > pr_t) ? math.max(pr_t, dn_) :
      (rsi_ma_val < pr_t and pr_rsi < pr_t) ? math.min(pr_t, up_) :
      (rsi_ma_val > pr_t ? dn_ : up_)
 
-// HTF trend (multi-timeframe MA — wall-time grouping, как PoSignals)
+// HTF trend
 htfTfStr  = str.tostring(htfMultiplier * timeframe.in_seconds() / 60) + (timeframe.in_seconds() < 60 ? "S" : "")
 htfClose  = request.security(syminfo.tickerid, htfTfStr, close, lookahead=barmerge.lookahead_off)
 htfMA     = htfMaType == "SMA" ? ta.sma(htfClose, htfMaPeriod) :
@@ -95,52 +105,41 @@ htfMA     = htfMaType == "SMA" ? ta.sma(htfClose, htfMaPeriod) :
             ta.ema(htfClose, htfMaPeriod)
 htfTrend  = htfClose > htfMA ? 1 : htfClose < htfMA ? -1 : 0
 
-// ATR
 atrArr = ta.atr(atrPeriod)
 atrAvg = ta.sma(atrArr, atrAvgWindow)
-
-// Bollinger
 [bbBasis, bbUpper, bbLower] = ta.bb(close, bbPeriod, bbStdDev)
 
-// ─────── SIGNAL GENERATION (порт generate_signals) ───────
-
-cross_up   = ta.crossover(rsi_ma_val, trailing)
-cross_down = ta.crossunder(rsi_ma_val, trailing)
+// ═══════════════════════════════════════════════════
+// SIGNAL GENERATION (port of generate_signals)
+// ═══════════════════════════════════════════════════
+cross_up   = ta.crossover(rsi_ma_val, trailingQQE)
+cross_down = ta.crossunder(rsi_ma_val, trailingQQE)
 side_buy   = cross_up
 side_sell  = cross_down
 
-// Vote 1 — RSI cross (всегда 1 если был crossover)
 vote_rsi = (side_buy or side_sell) ? 1 : 0
-
-// Vote 2 — HTF aligned
 vote_htf = side_buy ? (htfTrend == 1 ? 1 : 0) : side_sell ? (htfTrend == -1 ? 1 : 0) : 0
 
-// Vote 3 — ATR в диапазоне
 atrRatio = atrAvg > 0 ? atrArr / atrAvg : 0.0
 vote_vol = (atrRatio >= atrMinRatio and atrRatio <= atrMaxRatio) ? 1 : 0
 
-// Vote 4 — Bollinger zone
 bbRange = bbUpper - bbLower
 bbPos   = bbRange > 0 ? (close - bbLower) / bbRange : 0.5
 vote_bb = side_buy ? (bbPos <= bbZoneDepth ? 1 : 0) :
           side_sell ? (bbPos >= (1 - bbZoneDepth) ? 1 : 0) : 0
 
-// Vote 5 — Candle
 bodySize = math.abs(close - open)
 candleDirOk = candleReqAlign ?
-    (side_buy ? close >= open : side_sell ? close <= open : false) :
-    true
+    (side_buy ? close >= open : side_sell ? close <= open : false) : true
 candleSizeOk = atrArr > 0 ? bodySize <= atrArr * candleMaxAtrMult : true
 vote_candle = (candleDirOk and candleSizeOk) ? 1 : 0
 
 total_votes = vote_rsi + vote_htf + vote_vol + vote_bb + vote_candle
 
-// Weekend boost: требовать 5/5
 dow = dayofweek(time)
 isWeekend = dow == dayofweek.saturday or dow == dayofweek.sunday
 required = (require5WE and isWeekend) ? 5 : minConsensus
 
-// Cooldown (минимум cooldownBars между сигналами)
 var int lastSignalBar = -10000
 canFire = (bar_index - lastSignalBar) > cooldownBars
 
@@ -150,61 +149,141 @@ signalSell = side_sell and total_votes >= required and canFire
 if signalBuy or signalSell
     lastSignalBar := bar_index
 
-// ─────── ENTRY / EXIT (Bybit-style SL + TP) ───────
+// ═══════════════════════════════════════════════════
+// ENTRY (на open следующей свечи)
+// ═══════════════════════════════════════════════════
+var float entry_price = na
+var float current_sl  = na
+var float current_tp  = na
+var float initial_sl  = na
+var int   entry_bar   = na
+var bool  in_long     = false
+var bool  in_short    = false
 
-// На сигнальной свече фиксируем low/high для будущего SL
-var float pending_sl = na
-var float pending_tp = na
-var bool  pending_long  = false
-var bool  pending_short = false
+// На сигнальной свече подготавливаем pending entry
+var float pending_sl_long  = na
+var float pending_sl_short = na
 
 if signalBuy
-    // SL = low текущей (сигнальной) свечи минус padding
-    sl_lvl = low * (1.0 - slPad / 100.0)
-    pending_sl := sl_lvl
-    pending_long := true
-    pending_short := false
+    pending_sl_long := low * (1.0 - slPad / 100.0)
+    pending_sl_short := na
 if signalSell
-    sl_lvl = high * (1.0 + slPad / 100.0)
-    pending_sl := sl_lvl
-    pending_short := true
-    pending_long := false
+    pending_sl_short := high * (1.0 + slPad / 100.0)
+    pending_sl_long := na
 
-// Вход на OPEN следующей свечи (entryMode=nextBarOpen в боте)
-if pending_long and barstate.isconfirmed
-    entry_price = open[0]   // pending order, fill on next bar open by Pine engine
-    risk = entry_price - pending_sl
-    if risk > 0
-        pending_tp := entry_price + rrRatio * risk
+// Вход на следующем баре (open)
+if not na(pending_sl_long) and not in_long and not in_short and barstate.isconfirmed
+    e = open
+    sl = pending_sl_long
+    if sl < e
+        risk = e - sl
+        entry_price := e
+        current_sl  := sl
+        initial_sl  := sl
+        entry_bar   := bar_index
+        in_long     := true
+        if EXIT_MODE == "Fixed R:R"
+            current_tp := e + rrRatio * risk
+        else
+            current_tp := na
         strategy.entry("LONG", strategy.long,
-             alert_message='{"side":"BUY","symbol":"' + syminfo.ticker + '","sl":' + str.tostring(pending_sl) + ',"tp":' + str.tostring(pending_tp) + '}')
-        strategy.exit("LONG_exit", from_entry="LONG", stop=pending_sl, limit=pending_tp)
-    pending_long := false
+             alert_message='{"side":"BUY","symbol":"' + syminfo.ticker +
+                           '","entry":' + str.tostring(e) +
+                           '","sl":' + str.tostring(sl) +
+                           (EXIT_MODE == "Fixed R:R" ? ('","tp":' + str.tostring(current_tp)) : '","tp":null') +
+                           ',"mode":"' + EXIT_MODE + '"}')
+    pending_sl_long := na
 
-if pending_short and barstate.isconfirmed
-    entry_price = open[0]
-    risk = pending_sl - entry_price
-    if risk > 0
-        pending_tp := entry_price - rrRatio * risk
+if not na(pending_sl_short) and not in_long and not in_short and barstate.isconfirmed
+    e = open
+    sl = pending_sl_short
+    if sl > e
+        risk = sl - e
+        entry_price := e
+        current_sl  := sl
+        initial_sl  := sl
+        entry_bar   := bar_index
+        in_short    := true
+        if EXIT_MODE == "Fixed R:R"
+            current_tp := e - rrRatio * risk
+        else
+            current_tp := na
         strategy.entry("SHORT", strategy.short,
-             alert_message='{"side":"SELL","symbol":"' + syminfo.ticker + '","sl":' + str.tostring(pending_sl) + ',"tp":' + str.tostring(pending_tp) + '}')
-        strategy.exit("SHORT_exit", from_entry="SHORT", stop=pending_sl, limit=pending_tp)
-    pending_short := false
+             alert_message='{"side":"SELL","symbol":"' + syminfo.ticker +
+                           '","entry":' + str.tostring(e) +
+                           '","sl":' + str.tostring(sl) +
+                           (EXIT_MODE == "Fixed R:R" ? ('","tp":' + str.tostring(current_tp)) : '","tp":null') +
+                           ',"mode":"' + EXIT_MODE + '"}')
+    pending_sl_short := na
 
-// ─────── PLOT ───────
+// ═══════════════════════════════════════════════════
+// TRAILING STOP (если EXIT_MODE = Trailing)
+// ═══════════════════════════════════════════════════
+// Логика: после каждой закрытой свечи k>=2 после входа,
+//   LONG:  current_sl = max(current_sl, low[1])    — подтягиваем SL вверх к low пред бара
+//   SHORT: current_sl = min(current_sl, high[1])   — подтягиваем SL вниз к high пред бара
+// SL только в сторону прибыли (LONG — вверх, SHORT — вниз).
+
+bars_since_entry = bar_index - entry_bar
+if in_long and EXIT_MODE == "Trailing Stop" and bars_since_entry >= 2
+    new_sl = math.max(current_sl, low[1])
+    if new_sl > current_sl
+        current_sl := new_sl
+
+if in_short and EXIT_MODE == "Trailing Stop" and bars_since_entry >= 2
+    new_sl = math.min(current_sl, high[1])
+    if new_sl < current_sl
+        current_sl := new_sl
+
+// ═══════════════════════════════════════════════════
+// EXIT
+// ═══════════════════════════════════════════════════
+if in_long
+    if EXIT_MODE == "Fixed R:R"
+        strategy.exit("LONG_X", from_entry="LONG", stop=current_sl, limit=current_tp,
+             alert_message='{"side":"CLOSE_LONG","symbol":"' + syminfo.ticker + '","reason":"sl_or_tp"}')
+    else
+        strategy.exit("LONG_X", from_entry="LONG", stop=current_sl,
+             alert_message='{"side":"CLOSE_LONG","symbol":"' + syminfo.ticker + '","reason":"trailing_sl"}')
+    // Max hold timeout
+    if bars_since_entry >= maxHoldBars
+        strategy.close("LONG",
+             alert_message='{"side":"CLOSE_LONG","symbol":"' + syminfo.ticker + '","reason":"timeout"}')
+
+if in_short
+    if EXIT_MODE == "Fixed R:R"
+        strategy.exit("SHORT_X", from_entry="SHORT", stop=current_sl, limit=current_tp,
+             alert_message='{"side":"CLOSE_SHORT","symbol":"' + syminfo.ticker + '","reason":"sl_or_tp"}')
+    else
+        strategy.exit("SHORT_X", from_entry="SHORT", stop=current_sl,
+             alert_message='{"side":"CLOSE_SHORT","symbol":"' + syminfo.ticker + '","reason":"trailing_sl"}')
+    if bars_since_entry >= maxHoldBars
+        strategy.close("SHORT",
+             alert_message='{"side":"CLOSE_SHORT","symbol":"' + syminfo.ticker + '","reason":"timeout"}')
+
+// Reset state когда позиция закрыта
+if strategy.position_size == 0 and (in_long or in_short)
+    in_long  := false
+    in_short := false
+    entry_price := na
+    current_sl  := na
+    current_tp  := na
+    initial_sl  := na
+    entry_bar   := na
+
+// ═══════════════════════════════════════════════════
+// VISUAL
+// ═══════════════════════════════════════════════════
 plotshape(signalBuy,  title="BUY",  style=shape.triangleup,   location=location.belowbar, color=color.new(color.green, 0), size=size.small, text="BUY 4/5")
 plotshape(signalSell, title="SELL", style=shape.triangledown, location=location.abovebar, color=color.new(color.red,   0), size=size.small, text="SELL 4/5")
 
-// SL/TP линии последней активной сделки
-plot(strategy.position_size > 0 ? strategy.position_avg_price : na, "Entry",       color=color.yellow,        style=plot.style_linebr)
-plot(strategy.position_size > 0 ? pending_sl                   : na, "Stop Loss",   color=color.red,           style=plot.style_linebr)
-plot(strategy.position_size > 0 ? pending_tp                   : na, "Take Profit", color=color.green,         style=plot.style_linebr)
+plot(in_long or in_short ? entry_price : na, "Entry",       color=color.yellow,       style=plot.style_linebr, linewidth=1)
+plot(in_long or in_short ? current_sl  : na, "Stop Loss",   color=color.red,          style=plot.style_linebr, linewidth=2)
+plot(in_long or in_short ? initial_sl  : na, "Initial SL",  color=color.new(color.red, 50), style=plot.style_circles)
+plot(in_long or in_short ? current_tp  : na, "Take Profit", color=color.green,        style=plot.style_linebr, linewidth=1)
 
-// ─────── ALERTS ───────
-// Создай alert в TradingView с условием "Any alert() function call" +
-// webhook URL твоего бота на Bybit. Сообщения генерируются автоматически из
-// strategy.entry alert_message выше — JSON формата:
-//   {"side":"BUY","symbol":"BTCUSDT.P","sl":62100.5,"tp":62800.2}
-// (формат подгоняй под свой Bybit-listener)
-alertcondition(signalBuy,  title="CONSENSUS BUY  signal", message="CONSENSUS 4/5 BUY  on {{ticker}}")
-alertcondition(signalSell, title="CONSENSUS SELL signal", message="CONSENSUS 4/5 SELL on {{ticker}}")
+// ═══════════════════════════════════════════════════
+// ALERTS (для webhook → Bybit)
+// ═══════════════════════════════════════════════════
+alertcondition(signalBuy,  title="CONSENSUS BUY",  message='{"action":"BUY","symbol":"{{ticker}}"}')
+alertcondition(signalSell, title="CONSENSUS SELL", message='{"action":"SELL","symbol":"{{ticker}}"}')

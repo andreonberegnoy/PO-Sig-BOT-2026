@@ -390,11 +390,27 @@ async def run(cfg: dict, config_path: str = "config.yaml"):
     except NameError:
         pass    # po_feed mode — no relogin closure
 
+    stop_event = asyncio.Event()
+    async def stop_all():
+        stop_event.set()
+
     # Wire user-visible WS health alerts to Telegram. PoDirectFeed will call
     # feed.on_alert(text) when the WS freezes / can't reconnect / etc.
     # This is *the* fix for "I don't know when the bot stopped working".
+    # If WS freeze is detected — also trigger stop_all() so the top-level
+    # supervisor restarts everything from scratch (including relogin).
     if hasattr(feed, "on_alert"):
-        feed.on_alert = tg.notify
+        _orig_on_alert = feed.on_alert or (lambda _: None)
+        async def _ws_alert_wrapper(text: str):
+            try:
+                await tg.notify(text)
+            except Exception:
+                pass
+            # If it's a freeze alert — do a full restart via stop_all
+            if text and ("WebSocket замолчал" in text):
+                log.warning("ws_freeze alert — triggering stop_all for full restart")
+                await stop_all()
+        feed.on_alert = _ws_alert_wrapper
 
     # If a previous run() invocation crashed, the supervisor in main() left a
     # marker in the journal. Now that TG is up, send a one-time alert so the
@@ -428,10 +444,6 @@ async def run(cfg: dict, config_path: str = "config.yaml"):
             journal.delete("last_supervisor_crash")
     except Exception:
         log.exception("supervisor-crash alert failed (non-fatal)")
-
-    stop_event = asyncio.Event()
-    async def stop_all():
-        stop_event.set()
 
     # 5. State machine
     sm = StateMachine(cfg, feed, tc, journal, notify=tg.notify, send_chart=tg.send_chart)

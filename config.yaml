@@ -1,7 +1,7 @@
 # ================= MY PO-SIG BOT — конфигурация =================
 
 # ---- режим работы ----
-mode: paper              # paper | real  (paper = demo account, real = real money)
+mode: real              # paper | real  (paper = demo account, real = real money)
 cdp_url: http://localhost:9222
 
 # ---- авто-логин на po-signals.com (для хостинга / автовосстановления сессии) ----
